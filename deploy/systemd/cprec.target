@@ -1,0 +1,7 @@
+[Unit]
+Description=cprec recording platform
+Wants=cprec-api.service cprec-scheduler.service cprec-reconciler.service
+After=cprec-api.service
+
+[Install]
+WantedBy=multi-user.target

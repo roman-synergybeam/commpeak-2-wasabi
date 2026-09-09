@@ -1,0 +1,66 @@
+<div class="cards">
+  <div class="card">
+    <div class="label">Queued jobs</div>
+    <div class="value">{{ "{:,}".format(jobs.get('PENDING', 0)) }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Running</div>
+    <div class="value">{{ "{:,}".format(jobs.get('RUNNING', 0)) }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Done</div>
+    <div class="value">{{ "{:,}".format(jobs.get('DONE', 0)) }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Failed</div>
+    <div class="value" {% if jobs.get('FAILED', 0) %}style="color:var(--err)"{% endif %}>
+      {{ "{:,}".format(jobs.get('FAILED', 0)) }}
+    </div>
+  </div>
+</div>
+
+{% if error_classes %}
+  <h2>Failures by cause</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Cause</th><th class="num">Jobs</th><th>What to do</th></tr></thead>
+      <tbody>
+      {% for cause, count, hint in error_classes %}
+        <tr>
+          <td><span class="badge err">{{ cause }}</span></td>
+          <td class="num">{{ "{:,}".format(count) }}</td>
+          <td class="sub">{{ hint }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+
+<h2>Per connection</h2>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>Connection</th><th>Last inventory</th><th>Scanned up to</th>
+          <th class="num">Discovered</th><th class="num">Archived</th>
+          <th class="num">Pending</th><th class="num">Failed</th></tr>
+    </thead>
+    <tbody>
+    {% for row in per_connection %}
+      <tr>
+        <td>{{ row.name }}</td>
+        <td class="mono">{{ row.last_inventory_at | dt }}</td>
+        <td class="mono">{{ row.inventory_cursor_hour | dt }}</td>
+        <td class="num">{{ "{:,}".format(row.total) }}</td>
+        <td class="num">{{ "{:,}".format(row.archived) }}</td>
+        <td class="num">{{ "{:,}".format(row.pending) }}</td>
+        <td class="num" {% if row.failed %}style="color:var(--err)"{% endif %}>
+          {{ "{:,}".format(row.failed) }}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="empty">No connections configured.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>

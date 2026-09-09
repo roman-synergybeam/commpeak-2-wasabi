@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Users — cprec{% endblock %}
+{% block body %}
+<div class="page-head"><h1>Users</h1></div>
+
+<div class="notice info">
+  <h3>Authentication</h3>
+  <p>Local accounts are in use now. Once Entra ID / Active Directory is configured, turn off
+     <code>auth.local_accounts_enabled</code> in Settings — the super admin keeps local
+     sign-in as a break-glass route, everyone else moves to SSO with group-mapped roles.</p>
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>Email</th><th>Name</th><th>Role</th><th>Source</th><th>Active</th>
+          <th>Last sign-in</th></tr>
+    </thead>
+    <tbody>
+    {% for u in users %}
+      <tr>
+        <td>{{ u.email }}</td>
+        <td>{{ u.display_name or '—' }}</td>
+        <td><span class="badge info">{{ u.role }}</span></td>
+        <td>{{ u.auth_source }}</td>
+        <td>{{ 'yes' if u.is_active else 'no' }}</td>
+        <td class="mono">{{ u.last_login_at | dt }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

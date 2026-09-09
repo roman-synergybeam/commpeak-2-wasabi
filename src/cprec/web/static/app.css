@@ -1,0 +1,647 @@
+/* cprec UI — styled to shadcn/ui's design language.
+ *
+ * shadcn is a React + Tailwind library and this UI is server-rendered Jinja2
+ * with htmx, so its components are not importable here. What *is* portable is
+ * the design system underneath them: the token names and HSL values below are
+ * shadcn's default (zinc) theme, and the component rules that follow mirror how
+ * shadcn builds its table, badge, button, card and input primitives.
+ *
+ * Tokens are HSL triplets rather than finished colours, exactly as shadcn does
+ * it, so a colour can be used at partial opacity — `hsl(var(--muted) / 0.5)`
+ * for a table hover, say — and so retheming means editing this block alone.
+ *
+ * Dark mode follows the OS by default and can be overridden per-viewer with
+ * data-theme on <html>, which is what the toggle in the sidebar sets.
+ */
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 240 10% 3.9%;
+  --card: 0 0% 100%;
+  --card-foreground: 240 10% 3.9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 240 10% 3.9%;
+  --primary: 240 5.9% 10%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 240 4.8% 95.9%;
+  --secondary-foreground: 240 5.9% 10%;
+  --muted: 240 4.8% 95.9%;
+  --muted-foreground: 240 3.8% 46.1%;
+  --accent: 240 4.8% 95.9%;
+  --accent-foreground: 240 5.9% 10%;
+  --destructive: 0 72.2% 50.6%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 240 5.9% 90%;
+  --input: 240 5.9% 90%;
+  --ring: 240 10% 3.9%;
+  --radius: 0.5rem;
+
+  /* Status hues. Not part of core shadcn — it ships only `destructive` — so
+     these follow the same HSL-triplet convention and are tuned to sit at the
+     same saturation as the neutrals rather than shouting over them. */
+  --success: 142 71% 45%;
+  --warning: 38 92% 50%;
+  --info: 217 91% 60%;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 10% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 40%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 240 4.9% 83.9%;
+    --success: 142 69% 58%;
+    --warning: 38 92% 60%;
+    --info: 213 94% 68%;
+  }
+}
+
+:root[data-theme="dark"] {
+  --background: 240 10% 3.9%;
+  --foreground: 0 0% 98%;
+  --card: 240 10% 3.9%;
+  --card-foreground: 0 0% 98%;
+  --popover: 240 10% 3.9%;
+  --popover-foreground: 0 0% 98%;
+  --primary: 0 0% 98%;
+  --primary-foreground: 240 5.9% 10%;
+  --secondary: 240 3.7% 15.9%;
+  --secondary-foreground: 0 0% 98%;
+  --muted: 240 3.7% 15.9%;
+  --muted-foreground: 240 5% 64.9%;
+  --accent: 240 3.7% 15.9%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 62.8% 40%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 240 3.7% 15.9%;
+  --input: 240 3.7% 15.9%;
+  --ring: 240 4.9% 83.9%;
+  --success: 142 69% 58%;
+  --warning: 38 92% 60%;
+  --info: 213 94% 68%;
+}
+
+*,
+*::before,
+*::after { box-sizing: border-box; border-color: hsl(var(--border)); }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+a { color: inherit; text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+code, .mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-variant-ligatures: none;
+}
+
+/* shadcn puts a 2px ring at a 2px offset on the focused element only when
+   focus came from the keyboard, so mouse users never see it. */
+:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+
+::selection { background: hsl(var(--primary) / 0.15); }
+
+/* ---------------------------------------------------------------- layout -- */
+
+.layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100vh; }
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 12px;
+  background: hsl(var(--background));
+  border-right: 1px solid hsl(var(--border));
+}
+
+.brand-mark {
+  padding: 4px 12px 16px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.brand-mark small {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 400;
+  color: hsl(var(--muted-foreground));
+}
+
+/* Nav items are shadcn's "ghost button" treatment: no chrome until hovered. */
+.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav a {
+  display: block;
+  padding: 7px 12px;
+  border-radius: calc(var(--radius) - 2px);
+  font-size: 13.5px;
+  font-weight: 500;
+  color: hsl(var(--muted-foreground));
+  transition: background-color .12s ease, color .12s ease;
+}
+.nav a:hover {
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+  text-decoration: none;
+}
+.nav a.active {
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+  font-weight: 600;
+}
+.nav .section {
+  padding: 16px 12px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground) / 0.75);
+}
+
+.sidebar-foot {
+  margin-top: auto;
+  padding: 12px;
+  border-top: 1px solid hsl(var(--border));
+  font-size: 12.5px;
+  color: hsl(var(--muted-foreground));
+}
+.sidebar-foot .who { color: hsl(var(--foreground)); font-weight: 500; }
+.sidebar-foot .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+
+main { padding: 24px 28px 56px; min-width: 0; }
+
+.page-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+h2 {
+  margin: 28px 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.page-head .sub, .sub { color: hsl(var(--muted-foreground)); font-size: 13px; }
+
+/* ----------------------------------------------------------------- cards -- */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+}
+
+/* shadcn cards are a 1px border plus a barely-there shadow — depth without
+   the drop-shadow look. */
+.card {
+  padding: 16px;
+  background: hsl(var(--card));
+  color: hsl(var(--card-foreground));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  box-shadow: 0 1px 2px 0 hsl(var(--foreground) / 0.04);
+}
+.card .label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: hsl(var(--muted-foreground));
+}
+.card .value {
+  margin-top: 6px;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  font-variant-numeric: tabular-nums;
+}
+.card .foot { margin-top: 4px; font-size: 12.5px; color: hsl(var(--muted-foreground)); }
+
+.bar {
+  height: 8px;
+  margin-top: 10px;
+  background: hsl(var(--secondary));
+  border-radius: 9999px;
+  overflow: hidden;
+}
+.bar > span {
+  display: block;
+  height: 100%;
+  background: hsl(var(--primary));
+  border-radius: 9999px;
+  transition: width .3s ease;
+}
+
+/* ---------------------------------------------------------------- tables -- */
+
+.table-wrap {
+  overflow-x: auto;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+}
+
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+
+/* No vertical rules and a muted header: shadcn's tables lean on whitespace
+   and one hairline per row, which keeps a hundred rows readable. */
+th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 14px;
+  text-align: left;
+  white-space: nowrap;
+  background: hsl(var(--card));
+  border-bottom: 1px solid hsl(var(--border));
+  font-size: 12.5px;
+  font-weight: 500;
+  color: hsl(var(--muted-foreground));
+}
+th a { color: inherit; }
+th a:hover { color: hsl(var(--foreground)); }
+
+td {
+  padding: 10px 14px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid hsl(var(--border));
+  vertical-align: middle;
+}
+tbody tr { transition: background-color .1s ease; }
+tbody tr:hover { background: hsl(var(--muted) / 0.5); }
+tbody tr:last-child td { border-bottom: none; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td .desc { white-space: normal; }
+
+/* ----------------------------------------------------------------- forms -- */
+
+form.filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 16px;
+  padding: 16px;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  box-shadow: 0 1px 2px 0 hsl(var(--foreground) / 0.04);
+}
+
+label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: hsl(var(--foreground));
+}
+
+input, select, textarea {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--input));
+  border-radius: calc(var(--radius) - 2px);
+  font: inherit;
+  font-size: 13.5px;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+textarea { height: auto; padding: 8px 10px; }
+input::placeholder { color: hsl(var(--muted-foreground)); }
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: none;
+  border-color: hsl(var(--ring));
+  box-shadow: 0 0 0 2px hsl(var(--background)), 0 0 0 4px hsl(var(--ring) / 0.4);
+}
+select {
+  appearance: none;
+  padding-right: 30px;
+  /* Inline chevron, so the control needs no icon font or image request. */
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+}
+
+/* --------------------------------------------------------------- buttons -- */
+
+button, .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 16px;
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius) - 2px);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: opacity .12s ease, background-color .12s ease;
+}
+button:hover, .btn:hover { opacity: .9; text-decoration: none; }
+
+button.secondary, .btn.secondary {
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  border-color: hsl(var(--border));
+}
+button.secondary:hover, .btn.secondary:hover {
+  background: hsl(var(--accent));
+  opacity: 1;
+}
+
+button.ghost, .btn.ghost {
+  height: 32px;
+  padding: 0 10px;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  border-color: transparent;
+}
+button.ghost:hover, .btn.ghost:hover {
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+  opacity: 1;
+}
+
+button:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ---------------------------------------------------------------- badges -- */
+
+/* shadcn badges: pill, 1px border, small semibold text. The status variants
+   are tinted backgrounds at low alpha so a table of them stays calm. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border: 1px solid transparent;
+  border-radius: 9999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.badge.ok {
+  background: hsl(var(--success) / 0.12);
+  color: hsl(var(--success));
+  border-color: hsl(var(--success) / 0.3);
+}
+.badge.warn {
+  background: hsl(var(--warning) / 0.12);
+  color: hsl(var(--warning));
+  border-color: hsl(var(--warning) / 0.3);
+}
+.badge.err {
+  background: hsl(var(--destructive) / 0.12);
+  color: hsl(var(--destructive));
+  border-color: hsl(var(--destructive) / 0.3);
+}
+.badge.info {
+  background: hsl(var(--info) / 0.12);
+  color: hsl(var(--info));
+  border-color: hsl(var(--info) / 0.3);
+}
+.badge.mute {
+  background: hsl(var(--secondary));
+  color: hsl(var(--secondary-foreground));
+  border-color: hsl(var(--border));
+}
+
+.dir-in, .dir-out { display: inline-flex; align-items: center; gap: 4px; }
+.dir-in::before { content: "\2193"; color: hsl(var(--info)); font-weight: 600; }
+.dir-out::before { content: "\2191"; color: hsl(var(--success)); font-weight: 600; }
+
+/* --------------------------------------------------------------- notices -- */
+
+/* shadcn's Alert: border, no fill, an accent border on the variants. */
+.notice {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+}
+.notice h3 {
+  margin: 0 0 4px;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.notice p { margin: 0; font-size: 13px; color: hsl(var(--muted-foreground)); }
+.notice code {
+  padding: 1px 5px;
+  background: hsl(var(--muted));
+  border-radius: 4px;
+}
+.notice.warn { border-color: hsl(var(--warning) / 0.45); background: hsl(var(--warning) / 0.05); }
+.notice.warn h3 { color: hsl(var(--warning)); }
+.notice.err { border-color: hsl(var(--destructive) / 0.45); background: hsl(var(--destructive) / 0.05); }
+.notice.err h3 { color: hsl(var(--destructive)); }
+.notice.info { border-color: hsl(var(--info) / 0.45); background: hsl(var(--info) / 0.05); }
+.notice.info h3 { color: hsl(var(--info)); }
+
+/* ----------------------------------------------------------------- login -- */
+
+.login-wrap { display: grid; place-items: center; min-height: 100vh; padding: 24px; }
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  padding: 28px;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  box-shadow: 0 4px 12px -2px hsl(var(--foreground) / 0.08),
+              0 1px 2px 0 hsl(var(--foreground) / 0.04);
+}
+.login-card h1 { margin-bottom: 6px; font-size: 22px; }
+.login-card .sub { margin: 0 0 22px; }
+.login-card label { margin-top: 16px; }
+.login-card button { width: 100%; margin-top: 22px; height: 38px; }
+
+/* ---------------------------------------------------------------- detail -- */
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 16px 24px;
+  margin: 0;
+  padding: 18px;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+}
+.detail-grid dt {
+  font-size: 12px;
+  font-weight: 500;
+  color: hsl(var(--muted-foreground));
+}
+.detail-grid dd { margin: 4px 0 0; font-size: 13.5px; }
+
+.player {
+  margin: 14px 0;
+  padding: 18px;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+}
+.player .part-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.player .part-head > div:first-child {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.player audio { width: 100%; height: 40px; border-radius: calc(var(--radius) - 2px); }
+.player details { margin-top: 14px; }
+.player summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: hsl(var(--muted-foreground));
+  user-select: none;
+}
+.player summary:hover { color: hsl(var(--foreground)); }
+
+/* ------------------------------------------------------------ pagination -- */
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  font-size: 13px;
+  color: hsl(var(--muted-foreground));
+}
+
+.empty {
+  padding: 40px 24px;
+  text-align: center;
+  font-size: 13.5px;
+  color: hsl(var(--muted-foreground));
+}
+
+/* htmx sets .htmx-request on the indicator's target during a request. */
+.spin {
+  visibility: hidden;
+  font-size: 12.5px;
+  color: hsl(var(--muted-foreground));
+}
+.htmx-request .spin, .htmx-request.spin { visibility: visible; }
+
+/* -------------------------------------------------------------- settings -- */
+
+.settings-cat { margin-bottom: 26px; }
+
+/* The label carries the meaning, so it gets the width; the control column is
+   fixed so every row's input lines up down the page. */
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 20px;
+  align-items: start;
+  padding: 14px 16px;
+  border-bottom: 1px solid hsl(var(--border));
+}
+.settings-row:last-child { border-bottom: none; }
+
+.setting-label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.setting-info .desc {
+  margin-top: 3px;
+  max-width: 62ch;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: hsl(var(--muted-foreground));
+  white-space: normal;
+}
+/* The machine name stays available for the command line without competing
+   with the label for attention. */
+.setting-key {
+  margin-top: 5px;
+  font-size: 11.5px;
+  color: hsl(var(--muted-foreground) / 0.7);
+}
+
+.setting-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 1px;
+}
+.setting-control input, .setting-control select { width: 190px; }
+.setting-control .unit {
+  font-size: 12.5px;
+  color: hsl(var(--muted-foreground));
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------- responsive */
+
+@media (max-width: 860px) {
+  .layout { grid-template-columns: 1fr; }
+  .sidebar {
+    border-right: none;
+    border-bottom: 1px solid hsl(var(--border));
+  }
+  .nav { flex-direction: row; flex-wrap: wrap; }
+  main { padding: 20px 16px 48px; }
+  .settings-row { grid-template-columns: 1fr; }
+}

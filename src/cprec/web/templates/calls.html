@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Calls — cprec{% endblock %}
+{% block body %}
+<div class="page-head">
+  <h1>Calls &amp; recordings</h1>
+  <span class="sub" id="result-count">{{ count_label }}</span>
+  <span class="spin">searching…</span>
+</div>
+
+{# GET so a filtered view is a shareable URL; htmx swaps just the table. #}
+<form class="filters" method="get" action="/calls"
+      hx-get="/calls/rows" hx-target="#rows" hx-swap="innerHTML"
+      hx-trigger="submit, change from:select, keyup changed delay:400ms from:input[type=search]"
+      hx-indicator=".spin" hx-push-url="true">
+  <div>
+    <label for="q">Number</label>
+    <input id="q" name="number" type="search" value="{{ q.number or '' }}"
+           placeholder="441632960770 or 9607">
+  </div>
+  <div>
+    <label for="from">From</label>
+    <input id="from" name="date_from" type="datetime-local" value="{{ q.date_from | dtlocal }}">
+  </div>
+  <div>
+    <label for="to">To</label>
+    <input id="to" name="date_to" type="datetime-local" value="{{ q.date_to | dtlocal }}">
+  </div>
+  <div>
+    <label for="direction">Direction</label>
+    <select id="direction" name="direction">
+      <option value="">Any</option>
+      <option value="in" {{ 'selected' if q.direction == 'in' }}>Inbound</option>
+      <option value="out" {{ 'selected' if q.direction == 'out' }}>Outbound</option>
+    </select>
+  </div>
+  <div>
+    <label for="agent">Agent</label>
+    <input id="agent" name="agent" type="search" value="{{ q.agent or '' }}" placeholder="101 or name">
+  </div>
+  <div>
+    <label for="media">Recording</label>
+    <select id="media" name="media">
+      <option value="">Any</option>
+      <option value="available" {{ 'selected' if q.media == 'available' }}>Playable</option>
+      <option value="pending" {{ 'selected' if q.media == 'pending' }}>Syncing</option>
+      <option value="failed" {{ 'selected' if q.media == 'failed' }}>Failed</option>
+      <option value="none" {{ 'selected' if q.media == 'none' }}>No recording</option>
+    </select>
+  </div>
+  <div>
+    <label for="min_duration">Min duration (s)</label>
+    <input id="min_duration" name="min_duration" type="number" min="0"
+           value="{{ q.min_duration or '' }}" placeholder="e.g. 30">
+  </div>
+  <div>
+    <label for="connection">Bucket</label>
+    <select id="connection" name="connection_id">
+      <option value="">All buckets</option>
+      {% for c in connections %}
+        <option value="{{ c.id }}" {{ 'selected' if q.connection_id == c.id }}>{{ c.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label for="limit">Per page</label>
+    <select id="limit" name="limit">
+      {% for n in [25, 50, 100, 200] %}
+        <option value="{{ n }}" {{ 'selected' if q.limit == n }}>{{ n }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div style="display:flex;gap:8px">
+    <button type="submit">Search</button>
+    <a class="btn secondary" href="/calls">Reset</a>
+  </div>
+  {% if 'cdr.export' in permissions %}
+    <div>
+      <label>&nbsp;</label>
+      <a class="btn secondary" href="/calls/export.csv?{{ query_string }}">Export CSV</a>
+    </div>
+  {% endif %}
+</form>
+
+<div id="rows">
+  {% include "_calls_rows.html" %}
+</div>
+{% endblock %}

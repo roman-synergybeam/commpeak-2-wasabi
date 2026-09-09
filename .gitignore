@@ -1,0 +1,26 @@
+# Never commit credentials. The CommPeak/Wasabi keys belong in
+# /etc/cprec/secrets.env on the host, sealed in the database, and nowhere else.
+.env
+*.env
+!deploy/**/*.env.example
+secrets*
+*.key
+*.pem
+
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+uv.lock.bak
+/var/
+*.log
+.DS_Store
+
+# shadcn.io MCP personal token. The URL in .mcp.json expands ${SHADCNIO_TOKEN}
+# from the environment, so the token itself is never committed.
+.shadcnio-token

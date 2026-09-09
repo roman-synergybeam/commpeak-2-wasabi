@@ -1,0 +1,59 @@
+[Unit]
+Description=cprec reconciler
+Documentation=file:/opt/cprec/AGENTS.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+PartOf=cprec.target
+
+[Service]
+Type=simple
+User=cprec
+Group=cprec
+WorkingDirectory=/opt/cprec
+
+# Only two values can live outside the database, because they are what a process
+# needs in order to reach it and to make sense of what it finds there. Everything
+# else is configured in the app itself (Settings page, or cprec-admin settings).
+# There is deliberately no .env file: configuration that lives in two places
+# eventually disagrees with itself.
+Environment=CPREC_DATABASE_URL=postgresql+asyncpg://cprec@127.0.0.1:5432/cprec
+Environment=CPREC_PLATFORM_DATABASE_URL=postgresql+asyncpg://cprec_platform@127.0.0.1:5432/cprec
+
+# The master key unseals every stored credential. Delivered as a systemd
+# credential so it never appears in this unit file, in `systemctl show`, or in
+# the environment of a child process.
+LoadCredential=master_key:/etc/cprec/master.key
+Environment=CPREC_MASTER_KEY_FILE=%d/master_key
+
+# The database password is the one value that must reach the process as text;
+# it lives in a 0600 root-owned file rather than in this unit.
+EnvironmentFile=/etc/cprec/database.env
+
+ExecStart=/opt/cprec/.venv/bin/python -m cprec.workers.reconciler
+
+Restart=always
+RestartSec=15s
+TimeoutStopSec=60s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+StateDirectory=cprec
+LogsDirectory=cprec
+ReadWritePaths=/var/lib/cprec
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Sign in — cprec</title>
+  <script>
+    try {
+      var t = localStorage.getItem("cprec-theme");
+      if (t) document.documentElement.dataset.theme = t;
+    } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="login-wrap">
+  <form class="login-card" method="post" action="/login">
+    <h1>cprec</h1>
+    <p class="sub">Call recording archive</p>
+    {% if error %}<div class="notice err"><p>{{ error }}</p></div>{% endif %}
+    {% if no_users %}
+      <div class="notice info">
+        <h3>No accounts yet</h3>
+        <p>Create the first administrator on the server:<br>
+        <code>cprec-admin superadmin create --email you@example.com</code></p>
+      </div>
+    {% endif %}
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="username" required autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
+    {% if sso_enabled %}
+      <p class="sub" style="margin-top:16px;text-align:center">
+        <a href="/auth/entra">Sign in with your organisation account</a>
+      </p>
+    {% endif %}
+  </form>
+</div>
+</body>
+</html>

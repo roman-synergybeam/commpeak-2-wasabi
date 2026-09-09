@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "shadcnio": {
+      "type": "http",
+      "url": "https://www.shadcn.io/api/mcp?token=${SHADCNIO_TOKEN}"
+    }
+  }
+}

@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — cprec{% endblock %}
+{% block body %}
+<div class="page-head">
+  <h1>Dashboard</h1>
+  <span class="sub">{{ active_brand.name if active_brand }}</span>
+</div>
+
+{% if not has_destination %}
+  <div class="notice warn">
+    <h3>No archive storage configured yet</h3>
+    <p>Recordings are being discovered and matched to calls, but nothing is being copied
+       anywhere. Add a storage destination, then enable <code>transfer.enabled</code>
+       in Settings to start archiving. Nothing is ever written to or deleted from CommPeak.</p>
+  </div>
+{% elif not transfers_enabled %}
+  <div class="notice info">
+    <h3>Transfers are switched off</h3>
+    <p>Storage is configured but <code>transfer.enabled</code> is false, so recordings are
+       inventoried without being copied. Turn it on in Settings when you are ready.</p>
+  </div>
+{% endif %}
+
+<div class="cards">
+  <div class="card">
+    <div class="label">Calls today</div>
+    <div class="value">{{ "{:,}".format(stats.calls_today) }}</div>
+    <div class="foot">{{ "{:,}".format(stats.recordings_today) }} recordings</div>
+  </div>
+  <div class="card">
+    <div class="label">Recordings known</div>
+    <div class="value">{{ "{:,}".format(stats.recordings_total) }}</div>
+    <div class="foot">{{ stats.bytes_source | filesize }} at source</div>
+  </div>
+  <div class="card">
+    <div class="label">Archived</div>
+    <div class="value">{{ "{:,}".format(stats.archived) }}</div>
+    <div class="bar"><span style="width: {{ stats.progress_pct }}%"></span></div>
+    <div class="foot">{{ stats.progress_pct }}% &middot; {{ stats.bytes_archived | filesize }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Pending</div>
+    <div class="value">{{ "{:,}".format(stats.pending) }}</div>
+    <div class="foot">{{ "{:,}".format(stats.job_states.get('PENDING', 0)) }} queued jobs</div>
+  </div>
+  <div class="card">
+    <div class="label">Failed</div>
+    <div class="value" {% if stats.failed %}style="color:var(--err)"{% endif %}>
+      {{ "{:,}".format(stats.failed) }}
+    </div>
+    <div class="foot">{{ "{:,}".format(stats.job_states.get('FAILED', 0)) }} failed jobs</div>
+  </div>
+  <div class="card">
+    <div class="label">Uncorrelated</div>
+    <div class="value">{{ "{:,}".format(stats.orphans) }}</div>
+    <div class="foot">recordings with no matching call</div>
+  </div>
+</div>
+
+<h2>Recording states</h2>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>State</th><th class="num">Recordings</th><th>Meaning</th></tr></thead>
+    <tbody>
+    {% for state, count in state_rows %}
+      <tr>
+        <td><span class="badge {{ state | state_class }}">{{ state }}</span></td>
+        <td class="num">{{ "{:,}".format(count) }}</td>
+        <td class="sub">{{ state | state_help }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="3" class="empty">Nothing discovered yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>Recent activity</h2>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>Started</th><th>Activity</th><th>Result</th>
+          <th class="num">Found</th><th class="num">Queued</th><th>Detail</th></tr>
+    </thead>
+    <tbody>
+    {% for run in stats.recent_runs %}
+      <tr>
+        <td class="mono">{{ run.started_at | dt }}</td>
+        <td>{{ run.kind | replace('_', ' ') | title }}</td>
+        <td>
+          {% if run.ok is none %}<span class="badge info">running</span>
+          {% elif run.ok %}<span class="badge ok">ok</span>
+          {% else %}<span class="badge err">failed</span>{% endif %}
+        </td>
+        <td class="num">{{ "{:,}".format(run.discovered or 0) }}</td>
+        <td class="num">{{ "{:,}".format(run.queued or 0) }}</td>
+        <td class="sub">{{ (run.error_detail or '') | truncate(90) }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="empty">No sync runs recorded yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

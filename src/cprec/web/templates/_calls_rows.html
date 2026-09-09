@@ -1,0 +1,68 @@
+{# Table body only: htmx swaps this fragment, so it must stand alone. #}
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th><a href="?{{ query_string | sortlink('started') }}">Started</a></th>
+        <th>Dir</th>
+        <th>From</th>
+        <th>To</th>
+        <th>Agent</th>
+        <th class="num"><a href="?{{ query_string | sortlink('duration') }}">Duration</a></th>
+        <th>Status</th>
+        <th>Recording</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in page.rows %}
+      <tr>
+        <td class="mono">{{ row.start_at | dt }}</td>
+        <td>
+          {% if row.direction %}
+            <span class="dir-{{ row.direction }}">{{ row.direction }}</span>
+          {% else %}<span class="sub">—</span>{% endif %}
+        </td>
+        <td class="mono">{{ row.src | number }}</td>
+        <td class="mono">{{ row.dst | number }}</td>
+        <td>{{ row.agent_name or row.agent_extension or '' }}</td>
+        <td class="num mono">{{ row.call_duration | duration }}</td>
+        <td>
+          {% if row.status %}
+            <span class="badge {{ row.status | status_class }}">{{ row.status | shorten_status }}</span>
+          {% endif %}
+        </td>
+        <td>{{ row | media_badge }}</td>
+        <td><a href="/calls/{{ row.id }}">Open</a></td>
+      </tr>
+    {% else %}
+      <tr>
+        <td colspan="9" class="empty">
+          No calls match these filters.
+          {% if not any_cdrs %}
+            <br><span class="sub">No CDRs have been ingested yet — check the CDR API
+            settings for each connection.</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="pager">
+  {% if page.offset %}
+    <a class="btn secondary" href="?{{ query_string | offsetlink(page.offset - page.limit) }}"
+       hx-get="/calls/rows?{{ query_string | offsetlink(page.offset - page.limit) }}"
+       hx-target="#rows" hx-push-url="true">Previous</a>
+  {% endif %}
+  <span>Showing {{ page.offset + 1 if page.rows else 0 }}–{{ page.offset + page.rows|length }}</span>
+  {% if page.has_more %}
+    <a class="btn secondary" href="?{{ query_string | offsetlink(page.offset + page.limit) }}"
+       hx-get="/calls/rows?{{ query_string | offsetlink(page.offset + page.limit) }}"
+       hx-target="#rows" hx-push-url="true">Next</a>
+  {% endif %}
+  {% if page.truncated %}
+    <span class="badge warn">Too deep to page further — narrow the date range</span>
+  {% endif %}
+</div>

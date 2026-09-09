@@ -1,0 +1,75 @@
+[project]
+name = "cprec"
+version = "0.1.0"
+description = "CommPeak -> Wasabi call-recording offload and CDR platform"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "alembic>=1.14",
+    "asyncpg>=0.30",
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "aioboto3>=13.2",
+    "botocore>=1.35",
+    "httpx>=0.27",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.17",
+    "authlib>=1.3",
+    "itsdangerous>=2.2",
+    "argon2-cffi>=23.1",
+    "cryptography>=43.0",
+    "structlog>=24.4",
+    "prometheus-client>=0.21",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "moto[s3,server]>=5.0",
+    "ruff>=0.7",
+    "mypy>=1.13",
+    "respx>=0.21",
+]
+
+[project.scripts]
+cprec-api = "cprec.workers.api_entry:main"
+cprec-worker = "cprec.workers.worker:main"
+cprec-scheduler = "cprec.workers.scheduler:main"
+cprec-reconciler = "cprec.workers.reconciler:main"
+cprec-admin = "cprec.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cprec"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "RUF"]
+ignore = ["S101", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106"]
+# Development-only demo-data generator: seeded randomness is the point (stable
+# fixtures), and the S3 credentials are a local mock's, not real ones.
+"tools/seed_demo.py" = ["S311", "S106", "S110"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
