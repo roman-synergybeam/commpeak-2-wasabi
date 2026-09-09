@@ -1,0 +1,42 @@
+{# Directory search results, swapped in by htmx.
+
+   Every failure arrives here as `result.error` -- a sentence naming which of
+   the six things that can be wrong actually is -- rather than as a status code,
+   because the person who has to fix it is reading this page. #}
+{% if result.error %}
+  <div class="note caution" style="margin:0">
+    <h3>Could not read the directory</h3>
+    <p>{{ result.error }}</p>
+  </div>
+{% elif not result.entries %}
+  <p class="hint" style="margin:0">
+    {% if term %}Nothing in the directory matches “{{ term }}”.
+    {% else %}No {{ kind }} entries found under the configured starting point.
+    {% endif %}
+  </p>
+{% else %}
+  <ul class="picklist">
+    {% for e in result.entries %}
+      <li>
+        <div>
+          <strong>{{ e.name }}</strong>
+          {% if e.email %}<span class="det mono">{{ e.email }}</span>{% endif %}
+          {% if e.login %}<span class="det">{{ e.login }}</span>{% endif %}
+          {% if e.description %}<span class="det">{{ e.description }}</span>{% endif %}
+          <span class="det mono dn">{{ e.dn }}</span>
+        </div>
+        {# The button fills the form above rather than submitting: choosing
+           somebody from the directory is not the same act as creating their
+           account, and one click should not do both. #}
+        <button type="button" class="btn ghost small"
+                data-pick-email="{{ e.email }}"
+                data-pick-name="{{ e.name }}"
+                data-pick-dn="{{ e.dn }}">Use this</button>
+      </li>
+    {% endfor %}
+  </ul>
+  {% if result.truncated %}
+    <p class="hint">Only the first {{ result.entries | length }} are shown &mdash;
+       narrow the search to see the rest.</p>
+  {% endif %}
+{% endif %}

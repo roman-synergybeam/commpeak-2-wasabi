@@ -60,7 +60,7 @@ from c2w.api.v1.messages import (
     message_stats,
     search_messages,
 )
-from c2w.auth import mfa
+from c2w.auth import directory, mfa
 from c2w.auth.local import (
     AuthError,
     authenticate,
@@ -113,6 +113,27 @@ router = APIRouter(include_in_schema=False)
 
 #: Falls back to the registry default rather than UTC, so the clock and the
 #: schedules agree with each other before anyone has chosen a zone.
+async def _brand_scope(
+    request: Request, session: AsyncSession, user: User
+) -> tuple[list[Brand], Brand | None]:
+    """The organisations this person can reach, and the one they are looking at.
+
+    Shared rather than repeated: any page that reads a per-brand setting has to
+    resolve the same cookie the same way, and two copies of this would drift
+    into a page rendering one organisation's data under another's settings.
+    """
+    brands = await selectable_brands(session, user)
+    cookie = request.cookies.get(BRAND_COOKIE)
+    active: Brand | None = None
+    if cookie and cookie.isdigit():
+        active = next((b for b in brands if b.id == int(cookie)), None)
+    if active is None:
+        active = next((b for b in brands if b.id == user.brand_id), None) or (
+            brands[0] if brands else None
+        )
+    return list(brands), active
+
+
 async def _shell(
     request: Request, session: AsyncSession, user: User, nav: str, **extra: Any
 ) -> dict[str, Any]:
@@ -122,15 +143,7 @@ async def _shell(
     account: the same person can be an admin for one of these companies and an
     operator for the other.
     """
-    brands = await selectable_brands(session, user)
-    brand_cookie = request.cookies.get(BRAND_COOKIE)
-    active: Brand | None = None
-    if brand_cookie and brand_cookie.isdigit():
-        active = next((b for b in brands if b.id == int(brand_cookie)), None)
-    if active is None:
-        active = next((b for b in brands if b.id == user.brand_id), None) or (
-            brands[0] if brands else None
-        )
+    brands, active = await _brand_scope(request, session, user)
 
     role_here = await effective_role(session, user, active.id if active else None)
     timezone = await settings_service.get_str(
@@ -1384,10 +1397,21 @@ async def _users_context(
     if user.is_super_admin:
         assignable = [Role.SUPER_ADMIN, *assignable]
 
+    # Per-brand: every one of these is brand-overridable, and reading them
+    # globally meant a brand that had turned Active Directory on saw no picker,
+    # because the global row was still false.
+    _, active = await _brand_scope(request, session, user)
+    directory_brand = active.id if active else None
     directory = {
-        "entra": await settings_service.get_bool(session, "auth.oidc_entra_enabled"),
-        "google": await settings_service.get_bool(session, "auth.oidc_google_enabled"),
-        "ldap": await settings_service.get_bool(session, "ldap.enabled"),
+        "entra": await settings_service.get_bool(
+            session, "auth.oidc_entra_enabled", brand_id=directory_brand
+        ),
+        "google": await settings_service.get_bool(
+            session, "auth.oidc_google_enabled", brand_id=directory_brand
+        ),
+        "ldap": await settings_service.get_bool(
+            session, "ldap.enabled", brand_id=directory_brand
+        ),
     }
     directory["any"] = any(directory.values())
 
@@ -1532,6 +1556,49 @@ async def add_user(
     )
     return RedirectResponse(
         f"/admin/users?saved={quote_plus(email)}", status_code=status.HTTP_303_SEE_OTHER
+    )
+
+
+@router.get("/admin/users/directory", response_class=HTMLResponse)
+async def browse_directory(
+    request: Request,
+    user: CurrentUser,
+    session: ScopedSession,
+    kind: str = "user",
+    q: str = "",
+) -> Response:
+    """Search Active Directory for people, groups or OUs.
+
+    A fragment for htmx rather than JSON: the results are a list with a button
+    on each row, which is markup, and rendering it here keeps the escaping and
+    the empty state in one place instead of in a script.
+
+    Returns 200 with a message on failure rather than an error status, because
+    "the domain controller refused the reading account" is information the
+    administrator needs to see in the page, not a stack trace in a console.
+    """
+    _assert_may_manage(user)
+    try:
+        entry_kind = directory.EntryKind(kind)
+    except ValueError:
+        entry_kind = directory.EntryKind.USER
+
+    _, active = await _brand_scope(request, session, user)
+    brand_id = active.id if active else None
+    config = await directory.load_config(session, brand_id=brand_id)
+    enabled = await settings_service.get_bool(session, "ldap.enabled", brand_id=brand_id)
+    if not enabled:
+        result = directory.DirectoryResult(
+            error="Active Directory is switched off. Turn on "
+                  "\u201cTake the list of people from Active Directory\u201d under Settings."
+        )
+    else:
+        result = await directory.search(config, entry_kind, q)
+
+    return templates.TemplateResponse(
+        request,
+        "_directory_results.html",
+        {"request": request, "result": result, "kind": entry_kind.value, "term": q},
     )
 
 

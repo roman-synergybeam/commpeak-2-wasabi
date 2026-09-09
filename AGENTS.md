@@ -283,7 +283,7 @@ src/c2w/
   db/         base.py session.py models/{core,auth,settings}.py
   sync/       queue.py inventory.py transfer.py
   media/      sdr.py
-  auth/       local.py rbac.py totp.py mfa.py
+  auth/       local.py rbac.py totp.py mfa.py directory.py
   alerts/     base.py telegram.py slack.py
   api/        app.py deps.py v1/cdrs.py v1/messages.py
   web/        routes.py filters.py templates/ static/
@@ -371,6 +371,41 @@ decoration and several are enforced in `web/filters.py`:
   per partition, so a long-lived scratch database eventually fails with *out of
   shared memory* at `max_locks_per_transaction` (default 64). Recreate the
   scratch database periodically, or raise that setting.
+
+## Reading Active Directory
+
+`c2w.auth.directory` searches AD for people, groups and OUs so an
+administrator can pick somebody instead of retyping an address. Getting that
+address wrong is not a validation error -- the account is created and then
+simply never matches at sign-in, which is a worse failure than a typo.
+
+Three rules, all of them because a directory is a remote system on the far
+side of a web request:
+
+- **Every call is bounded.** ldap3 is synchronous, so it runs in a worker
+  thread with a connect timeout, a receive timeout, a result cap and an outer
+  `asyncio.wait_for`. A controller that accepts a TCP connection and then says
+  nothing must not hold a request open.
+- **Failure is a sentence, never an exception through the page.** Everything
+  returns `DirectoryResult` with either entries or a message naming which of
+  the six things that can be wrong actually is -- credentials, address, DNS,
+  TLS, base DN, size. That is the whole job when a directory will not answer.
+- **Nothing is ever written.** It binds `read_only=True` and searches; a test
+  asserts the module contains no `add`/`modify`/`delete` call. Group
+  membership decides a role at sign-in, and is not edited from here.
+
+LDAP filters get the same treatment as SQL: `escape_filter` escapes the five
+RFC 4515 characters, and the tests assert on the **filter string**, not on what
+a server does with it -- ldap3's mock treats `\2a` as a wildcard rather than a
+literal asterisk, so a mock-driven test would report an injection a real
+controller does not have, and would pass just as happily with the escaping
+removed.
+
+Tests run against ldap3's `MOCK_SYNC` strategy, which makes the happy path
+verifiable without a domain controller. The mock's entries live on the
+*connection's* strategy, not the server's, which is why `search()` takes a
+connection. Not covered, and needing a real controller: TLS negotiation,
+referrals, paging past the size limit.
 
 ## The auto-sync hook
 

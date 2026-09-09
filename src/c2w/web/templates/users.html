@@ -35,6 +35,39 @@
   </div>
 {% endif %}
 
+{% if directory.ldap %}
+  <div class="card">
+    <h3 style="margin-top:0">Find them in Active Directory</h3>
+    <p class="hint">
+      Pick somebody from the directory rather than retyping their address. An
+      address that does not match exactly is not rejected &mdash; the account is
+      created and then never matches at sign-in, which is a worse failure than
+      a typo.
+    </p>
+    <div class="row">
+      <div>
+        <label for="dirq">Search the directory</label>
+        <input id="dirq" name="q" type="search" placeholder="name, login or address"
+               hx-get="/admin/users/directory" hx-target="#dirresults"
+               hx-include="#dirkind" hx-indicator="#dirspin"
+               hx-trigger="keyup changed delay:400ms, search">
+      </div>
+      <div>
+        <label for="dirkind">Looking for</label>
+        <select id="dirkind" name="kind"
+                hx-get="/admin/users/directory" hx-target="#dirresults"
+                hx-include="#dirq" hx-indicator="#dirspin">
+          <option value="user">People</option>
+          <option value="group">Groups</option>
+          <option value="ou">Organisational units</option>
+        </select>
+      </div>
+    </div>
+    <p><span id="dirspin" class="spin">searching the directory…</span></p>
+    <div id="dirresults"></div>
+  </div>
+{% endif %}
+
 <form class="card" method="post" action="/admin/users">
   <div class="row">
     <div>
@@ -198,6 +231,26 @@
     src.addEventListener("change", sync);
     role && role.addEventListener("change", sync);
     sync();
+
+    // Choosing somebody from the directory fills the form; it does not submit
+    // it. Delegated from the document because the results arrive by htmx and
+    // the buttons do not exist when this runs.
+    document.addEventListener("click", function (e) {
+      var pick = e.target.closest && e.target.closest("[data-pick-dn]");
+      if (!pick) return;
+      var email = pick.getAttribute("data-pick-email");
+      var name = pick.getAttribute("data-pick-name");
+      var emailField = document.getElementById("email");
+      var nameField = document.getElementById("display_name");
+      if (email && emailField) emailField.value = email;
+      if (name && nameField) nameField.value = name;
+      // A directory account has no password here, so switch the source across
+      // and let sync() hide the password pair.
+      var entra = src.querySelector('option[value="ENTRA"]:not([disabled])');
+      if (entra) { src.value = "ENTRA"; }
+      sync();
+      if (emailField) emailField.focus();
+    });
   })();
 </script>
 {% endblock %}

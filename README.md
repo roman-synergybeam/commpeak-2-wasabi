@@ -57,6 +57,7 @@ All credential settings ship empty, to be filled in by an operator.
 | Text messages (SMS) | done — both TextPeak endpoints (sent and received), delivery status, late-receipt handling, search, export |
 | Two-factor | done — authenticator app (RFC 6238), single-use codes, recovery codes, forced enrolment, administrator reset |
 | People administration | done — create accounts from the console, enable/disable, only a platform admin can create another |
+| Active Directory picker | done — search people, groups and OUs from the people page, with bounded timeouts and a message naming what is misconfigured. Reads only |
 | Web UI | done — built on the Console UI Kit design system; dashboard, call search, detail + player, messages, sync status, settings, audit, people, account |
 | Alerts | done — Telegram + Slack, per-brand, severity routing, deduplication |
 | Deployment | done — systemd units, nginx, idempotent installer |
@@ -110,14 +111,14 @@ so the UI is useful in the meantime and nothing needs re-scanning later.
 
 ```bash
 uv sync --extra dev
-uv run pytest -q                     # 279 tests
+uv run pytest -q                     # 313 tests
 uv run ruff check src/ tests/
 uv run uvicorn c2w.api.app:app --reload
 ```
 
 Most tests need PostgreSQL, because what they test *is* database behaviour —
 RLS policies, `SKIP LOCKED` claims, partition routing. They skip cleanly
-without one (128 pass, 151 skip):
+without one (193 pass, 120 skip):
 
 ```bash
 createdb c2w_test
