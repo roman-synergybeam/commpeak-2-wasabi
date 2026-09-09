@@ -132,9 +132,21 @@ class TransferError(Exception):
 
 
 _HINTS: Final[dict[ErrorClass, str]] = {
+    # Deliberately a way to *check*, not just a cause. The overwhelmingly
+    # common reason is the IP allow list, but asserting that and being wrong
+    # sends somebody round the portal for nothing -- so the hint names the
+    # test that distinguishes it. CommPeak's endpoint sits behind nginx, which
+    # answers a blocked address with its own HTML page rather than an S3 XML
+    # error, and that difference is visible without any credential.
     ErrorClass.ACL_ERROR: (
-        "check that this server's public IP is whitelisted in the CommPeak "
-        "Access Control List for this S3 account"
+        "this server's public IP is probably missing from this S3 account's "
+        "Access Control List at CommPeak (Recordings Access Accounts -> IP ACL "
+        "tab, per instance, address with a /32 mask). To confirm rather than "
+        "guess, run `curl -i https://recordings.commpeak.com/` from this server "
+        "and from a machine that already works: an nginx HTML 403 means the "
+        "address is blocked before S3 sees it, whereas an S3 XML error means "
+        "the address is allowed and something else is wrong. The account's "
+        "Access Summary tab also logs the IP it saw for each refused attempt"
     ),
     ErrorClass.AUTH_ERROR: "the S3 token/secret is wrong or has been rotated; re-enter it",
     ErrorClass.CONFIG_ERROR: (
