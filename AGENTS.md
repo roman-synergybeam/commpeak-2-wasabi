@@ -470,6 +470,34 @@ side of a web request:
   asserts the module contains no `add`/`modify`/`delete` call. Group
   membership decides a role at sign-in, and is not edited from here.
 
+**ldap3's SAFE_SYNC does not populate `connection.entries`.** This is the
+trap in this module and it cost every directory search: `_connection` dials
+SAFE_SYNC, which returns `(status, result, response, request)` from `search()`
+and leaves `.entries` empty. The code read `.entries`, so against a real
+controller every search found nothing -- the settings test reported "found no
+people under the starting point" about a domain holding fifty accounts, the
+user type-ahead offered nobody, and a directory sign-in could never locate the
+account it needed to bind as. **The test suite could not catch it**, because it
+injects a `MOCK_SYNC` connection and that strategy *does* fill `.entries`: the
+mock and the real client disagreed about where the answer lives, and only the
+mock was ever asked. `_response_rows` now reads the response list -- from the
+return tuple under SAFE_SYNC, from `connection.response` otherwise -- and the
+guards for it in `test_directory.py` deliberately do **not** use the mock, but
+a stand-in shaped like SAFE_SYNC with `.entries` empty. When a fake and the
+real library differ in shape, test the shape the real one has.
+
+Related: `sizeLimitExceeded` is a *successful* truncated search, not an error.
+The server answered and stopped at the ceiling we asked for; the rows it sent
+are all good. That is what `DirectoryResult.truncated` is for.
+
+**A test button must not refuse because the feature is switched off.** The
+Active Directory check used to return "Active Directory is switched off on this
+page." and do nothing, which had the order backwards -- you prove the address
+and the reading account work *first* and turn it on once they do. The switch is
+reported as a note now and the probe runs regardless, with the summary saying
+sign-in is still off so a green result cannot be mistaken for "AD login is
+live". Turnstile and the tunnel checks already worked this way.
+
 LDAP filters get the same treatment as SQL: `escape_filter` escapes the five
 RFC 4515 characters, and the tests assert on the **filter string**, not on what
 a server does with it -- ldap3's mock treats `\2a` as a wildcard rather than a

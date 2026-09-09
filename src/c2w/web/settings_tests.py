@@ -298,18 +298,39 @@ async def _test_alerts(
 async def _test_directory(
     session: AsyncSession, brand_id: int | None, actor: str
 ) -> SectionTest:
-    """Bind to the domain controller and read one person back."""
+    """Bind to the domain controller and read one person back.
+
+    The switch is reported, never a reason to refuse. This used to return
+    "Active Directory is switched off on this page." and do nothing, which had
+    the order backwards: you prove the address and the reading account work
+    *first* and turn it on once they do. A button that declines to test until
+    the thing it tests is live is no use on the one occasion you need it.
+    """
     from c2w.auth import directory
 
     out = SectionTest(True, "")
-    if not await settings_service.get_bool(session, "ldap.enabled", brand_id=brand_id):
-        return SectionTest(False, "Active Directory is switched off on this page.")
+    enabled = await settings_service.get_bool(session, "ldap.enabled", brand_id=brand_id)
 
     config = await directory.load_config(session, brand_id=brand_id)
     if not config.configured:
-        return SectionTest(
-            False, "The domain controller address or the search base is missing."
+        missing = " and ".join(
+            filter(None, [
+                "the domain controller address" if not config.server_uri else "",
+                "the search base" if not config.base_dn else "",
+            ])
         )
+        return SectionTest(False, f"Nothing to test yet: {missing} is not set.")
+
+    # A note rather than a check with a verdict: whether sign-in uses the
+    # directory is a decision, not a fault, and the rest of this test is
+    # exactly as meaningful either way.
+    out.add(
+        "used at sign-in", None if not enabled else True,
+        "on" if enabled else "off",
+        "" if enabled else "These settings are tested below regardless. Switch "
+                           "this on once the test passes and people will be "
+                           "able to sign in with their directory account",
+    )
     out.add("address", True, config.server_uri)
     out.add("encrypted", config.uses_tls, "ldaps" if config.uses_tls else "plain ldap",
             "" if config.uses_tls else "An ldap:// bind sends the reading "
@@ -323,6 +344,8 @@ async def _test_directory(
         return out
     out.add("read a person", True, f"{len(result.entries)} found")
     out.summary = f"Bound to the directory and read {len(result.entries)} account(s)."
+    if not enabled:
+        out.summary += " Sign-in with Active Directory is still switched off."
     return out
 
 

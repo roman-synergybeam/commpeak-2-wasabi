@@ -14,6 +14,8 @@ results past the size limit, and the behaviour of a real controller under
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 from ldap3 import MOCK_SYNC, OFFLINE_AD_2012_R2, Connection, Server
 
@@ -348,3 +350,129 @@ class TestAuthenticating:
 
         dn = "cn=Ana*,ou=Sales,dc=corp,dc=example"
         assert r"\2a" in escape_filter(dn)
+
+
+class TestTheStrategyMismatchThatMadeEverySearchEmpty:
+    """A live directory returned nothing while every test above passed.
+
+    `_connection` dials ldap3's **SAFE_SYNC** strategy, which hands results
+    back from `search()` as `(status, result, response, request)` and **never
+    populates `connection.entries`**. The code read `.entries`, so every real
+    search returned zero rows: the settings test reported "found no people
+    under the starting point" about a controller holding fifty accounts, the
+    user type-ahead offered nothing, and a directory sign-in could never find
+    the account it needed to bind as.
+
+    Nothing above could catch it, because these tests inject a **MOCK_SYNC**
+    connection and that strategy *does* populate `.entries`. The mock and the
+    real client disagreed about where the answer lives, and the mock was the
+    one being asked. So the tests here do not use the mock: they present a
+    connection shaped exactly like SAFE_SYNC -- results in the return value,
+    `.entries` empty -- which is the thing production actually talks to.
+    """
+
+    @staticmethod
+    def _safe_sync_connection(rows):
+        """A stand-in for a SAFE_SYNC connection: tuple out, `.entries` empty."""
+
+        class _Conn:
+            # Exactly what SAFE_SYNC leaves behind: an empty list.
+            entries: ClassVar[list[object]] = []
+            response = None
+
+            def search(self, **_kwargs):
+                return (True, {"description": "success"}, rows, None)
+
+            def unbind(self):
+                return None
+
+        return _Conn()
+
+    async def test_a_search_reads_the_response_not_the_entries_attribute(self):
+        from c2w.auth.directory import DirectoryConfig, EntryKind, search
+
+        rows = [
+            {
+                "type": "searchResEntry",
+                "dn": "CN=Reuven T,CN=Users,DC=PC,DC=local",
+                "attributes": {
+                    "displayName": "Reuven T",
+                    "sAMAccountName": "reuvent",
+                    "userPrincipalName": "reuvent@PC.local",
+                },
+            }
+        ]
+        config = DirectoryConfig(
+            server_uri="ldap://dc.example.test",
+            bind_dn="reader",
+            bind_password="x",
+            base_dn="DC=PC,DC=local",
+        )
+        result = await search(
+            config, EntryKind.USER, "", connection=self._safe_sync_connection(rows)
+        )
+        assert result.ok, result.error
+        assert [e.login for e in result.entries] == ["reuvent"]
+        assert result.entries[0].email == "reuvent@PC.local"
+        assert result.entries[0].name == "Reuven T"
+
+    async def test_referrals_are_not_mistaken_for_people(self):
+        """`searchResRef` rows carry no attributes and are not results."""
+        from c2w.auth.directory import DirectoryConfig, EntryKind, search
+
+        rows = [
+            {"type": "searchResRef", "uri": ["ldap://other.example.test/DC=x"]},
+            {
+                "type": "searchResEntry",
+                "dn": "CN=Real,CN=Users,DC=PC,DC=local",
+                "attributes": {"sAMAccountName": "real"},
+            },
+        ]
+        config = DirectoryConfig(
+            server_uri="ldap://dc.example.test",
+            bind_dn="reader",
+            bind_password="x",
+            base_dn="DC=PC,DC=local",
+        )
+        result = await search(
+            config, EntryKind.USER, "", connection=self._safe_sync_connection(rows)
+        )
+        assert [e.login for e in result.entries] == ["real"]
+
+    async def test_group_membership_reads_the_response_too(self):
+        """`_groups_blocking` had the identical bug, so it gets the same guard."""
+        from c2w.auth.directory import DirectoryConfig, group_memberships
+
+        rows = [
+            {
+                "type": "searchResEntry",
+                "dn": "CN=Recordings,CN=Users,DC=PC,DC=local",
+                "attributes": {"cn": "Recordings", "sAMAccountName": "recordings"},
+            }
+        ]
+        config = DirectoryConfig(
+            server_uri="ldap://dc.example.test",
+            bind_dn="reader",
+            bind_password="x",
+            base_dn="DC=PC,DC=local",
+        )
+        names = await group_memberships(
+            config,
+            "CN=Reuven T,CN=Users,DC=PC,DC=local",
+            connection=self._safe_sync_connection(rows),
+        )
+        assert names == {"Recordings", "recordings"}
+
+    def test_nothing_reads_the_convenience_attribute_any_more(self):
+        """The premise, guarded directly rather than only this code path."""
+        import ast
+        from pathlib import Path
+
+        source = Path("src/c2w/auth/directory.py").read_text()
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                node.value = ""          # docstrings explain the bug; skip them
+        code = ast.unparse(tree)
+        assert "connection.entries" not in code
+        assert "conn.entries" not in code

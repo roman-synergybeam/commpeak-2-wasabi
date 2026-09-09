@@ -305,6 +305,38 @@ def _connection(config: DirectoryConfig) -> Any:
     )
 
 
+def _response_rows(connection: Any, outcome: Any) -> list[tuple[str, dict[str, Any]]]:
+    """Every entry a search returned, as ``(dn, attributes)``.
+
+    This exists because of a bug that no test could have caught. The code used
+    to read ``connection.entries``, which **is never populated under
+    SAFE_SYNC** -- that strategy hands the results back from ``search()`` as
+    ``(status, result, response, request)`` instead. Production dials
+    SAFE_SYNC, so every real directory search returned zero entries: the
+    settings test said "found no people under the starting point" about a
+    controller holding plenty, the type-ahead offered nothing, and a sign-in
+    could never find the account to bind as. Meanwhile the tests passed,
+    because they inject a ``MOCK_SYNC`` connection and *that* strategy does
+    populate ``.entries``. The mock disagreeing with the real client on where
+    the answer lives is the whole trap.
+
+    So the response list is read rather than the convenience attribute, from
+    the return value when it is SAFE_SYNC's tuple and from
+    ``connection.response`` otherwise. Both strategies fill that list with the
+    same shape, which is why this works for the mock and the real thing alike.
+
+    ``searchResRef`` rows -- referrals to another controller, not results --
+    carry no attributes and are skipped.
+    """
+    response = outcome[2] if isinstance(outcome, tuple) else connection.response
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for item in response or []:
+        if item.get("type") != "searchResEntry":
+            continue
+        rows.append((str(item.get("dn") or ""), dict(item.get("attributes") or {})))
+    return rows
+
+
 def _search_blocking(
     config: DirectoryConfig,
     kind: EntryKind,
@@ -327,20 +359,19 @@ def _search_blocking(
             connection = _connection(config)
         # A search base narrower than the configured one for OUs would hide
         # the very thing being looked for, so all three start from the base.
-        connection.search(
+        outcome = connection.search(
             search_base=config.base_dn,
             search_filter=_filter_for(kind, term),
             attributes=_ATTRIBUTES[kind],
             size_limit=MAX_RESULTS + 1,
         )
-        entries = []
-        for item in connection.entries:
-            attrs = {
-                name: item[name].value
-                for name in _ATTRIBUTES[kind]
-                if name in item
-            }
-            entries.append(_to_entry(kind, str(item.entry_dn), attrs))
+        # A `sizeLimitExceeded` result is not a failure: the server answered
+        # and stopped at the ceiling we asked for, and the entries it did send
+        # are all present. That is what `truncated` reports.
+        entries = [
+            _to_entry(kind, dn, attrs)
+            for dn, attrs in _response_rows(connection, outcome)
+        ]
         truncated = len(entries) > MAX_RESULTS
         return DirectoryResult(entries=entries[:MAX_RESULTS], truncated=truncated)
     except Exception as exc:   # every failure becomes a message, not a 500
@@ -514,19 +545,18 @@ def _groups_blocking(config: DirectoryConfig, search_filter: str, connection: An
     try:
         if connection is None:
             connection = _connection(config)
-        connection.search(
+        outcome = connection.search(
             search_base=config.base_dn,
             search_filter=search_filter,
             attributes=["cn", "sAMAccountName"],
             size_limit=200,
         )
         names: set[str] = set()
-        for item in connection.entries:
+        for _dn, attrs in _response_rows(connection, outcome):
             for attr in ("cn", "sAMAccountName"):
-                if attr in item:
-                    value = _one(item[attr].value)
-                    if value:
-                        names.add(value)
+                value = _one(attrs.get(attr))
+                if value:
+                    names.add(value)
         return names
     except Exception as exc:
         log.warning("directory.groups_failed", error=str(exc)[:160])
