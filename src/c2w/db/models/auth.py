@@ -43,20 +43,29 @@ class AuthSource(enum.StrEnum):
 
 
 class Role(enum.StrEnum):
-    """Roles, most privileged first.
+    """Three roles, most privileged first.
 
     Kept as an enum rather than a table because the permission sets are part of
     the product's security model, not customer configuration -- a customer
-    inventing a role with ``recordings.delete`` should not be a data change.
+    inventing a role that can delete recordings should not be a data change.
+
+    It was briefly seven. Nobody asked for seven, and a role nobody can describe
+    in a sentence is one that gets handed out by guesswork:
+
+    * ``SUPER_ADMIN`` runs the platform and spans every organisation.
+    * ``ADMIN`` runs one organisation, and is the only role there that can
+      delete a recording.
+    * ``OPERATOR`` does the day job -- search calls, listen, export.
     """
 
     SUPER_ADMIN = "SUPER_ADMIN"
-    TENANT_ADMIN = "TENANT_ADMIN"
-    RECORDING_ADMIN = "RECORDING_ADMIN"
-    SUPERVISOR = "SUPERVISOR"
-    AGENT = "AGENT"
-    AUDITOR = "AUDITOR"
-    READ_ONLY = "READ_ONLY"
+    ADMIN = "ADMIN"
+    OPERATOR = "OPERATOR"
+
+    @property
+    def label(self) -> str:
+        return {"SUPER_ADMIN": "platform admin", "ADMIN": "admin",
+                "OPERATOR": "operator"}[self.value]
 
 
 class User(Base, IdMixin, TimestampMixin):

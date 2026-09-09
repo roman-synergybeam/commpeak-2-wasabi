@@ -204,35 +204,6 @@ async def cmd_settings_set(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-async def cmd_settings_reveal(args: argparse.Namespace) -> int:
-    """Print one setting in clear text, for handing to another process.
-
-    Deliberately narrow. Only settings whose spec sets ``shell_exportable`` may
-    be revealed, so this cannot become a way to dump CommPeak or Wasabi
-    credentials out of the database. Output is the bare value with no label, so
-    it can be used directly:
-
-        export SHADCNIO_TOKEN=$(c2w-admin settings reveal integrations.shadcn_mcp_token)
-    """
-    spec = SETTINGS.get(args.key)
-    if spec is None:
-        _out(f"Unknown setting: {args.key}")
-        return EXIT_ERROR
-    if not spec.shell_exportable:
-        _out(f"{args.key} may not be revealed.")
-        _out("Only settings marked shell_exportable can be printed in clear text;")
-        _out("stored credentials are readable by the application, not by this command.")
-        return EXIT_ERROR
-
-    async with platform_session() as session:
-        value = await settings_service.get_secret(session, args.key, brand_id=args.brand)
-        if not value:
-            _out("")
-            return EXIT_ERROR
-        print(value)
-    return EXIT_OK
-
-
 async def cmd_settings_unset(args: argparse.Namespace) -> int:
     async with platform_session() as session:
         if args.key not in SETTINGS:
@@ -555,13 +526,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--brand", type=int, help="set as a brand override")
     p.add_argument("--actor", help="who is making this change (recorded in history)")
     p.set_defaults(func=cmd_settings_set)
-
-    p = st.add_parser(
-        "reveal", help="print a shell-exportable setting in clear text"
-    )
-    p.add_argument("key")
-    p.add_argument("--brand", type=int)
-    p.set_defaults(func=cmd_settings_reveal)
 
     p = st.add_parser("unset", help="remove an override")
     p.add_argument("key")

@@ -55,7 +55,7 @@ from c2w.db.models.auth import User
 from c2w.db.models.core import Brand, CommPeakConnection, StorageDestination
 from c2w.logging import get_logger
 from c2w.settings import SettingsError, settings_service
-from c2w.settings_spec import specs_by_category
+from c2w.settings_spec import SETTINGS, SettingType, specs_by_category
 from c2w.storage.errors import ErrorClass
 from c2w.sync import queue
 from c2w.web.filters import register as register_filters
@@ -647,6 +647,174 @@ async def admin_storage(request: Request, user: CurrentUser, session: ScopedSess
     )
 
 
+#: A one-line orientation for each card, above its fields.
+_CATEGORY_NOTES = {
+    "Organisation": "Who this organisation is, and where its recordings may live.",
+    "CommPeak (source)": "An organisation can have as many CommPeak accounts as "
+    "it has PBXes and dialers -- each with its own bucket and its own "
+    "credentials, added on the CommPeak page. What follows is shared by all of "
+    "them.",
+    "Wasabi (archive)": "An organisation can have as many Wasabi accounts and "
+    "buckets as it needs; they are added on the Archive page, each with its own "
+    "keys. What follows applies to all of them.",
+    "Archiving": "How hard to work while copying, and what to do when a copy fails.",
+    "Retention": "How long recordings stay where.",
+    "Playback and downloads": "How a recording reaches a browser.",
+    "Notifications": "Where alerts go. Leave the tokens blank to send none.",
+    "Scheduling": "When unattended work happens.",
+    "Microsoft 365": "Let staff sign in with their Microsoft work account "
+    "instead of a password kept here.",
+    "Google Workspace": "Let staff sign in with their Google work account.",
+    "Active Directory": "Take the list of people, and who is an administrator, "
+    "from a domain controller you run.",
+    "Two-factor and passwords": "Applies to accounts kept here. Accounts from "
+    "Microsoft, Google or your directory follow that system's rules.",
+    "Cloudflare": "Reaching this console from outside, and keeping robots off "
+    "the sign-in page.",
+    "General": "This installation itself.",
+    "Logging and metrics": "What the services write down.",
+}
+
+#: Fields whose value is long enough to want two columns.
+_WIDE_FIELDS = frozenset(
+    {
+        "core.base_url",
+        "org.data_region_note",
+        "commpeak.s3_endpoint",
+        "commpeak.cdr_api_base",
+        "auth.entra_redirect_note",
+        "auth.entra_allowed_domains",
+        "auth.google_allowed_domains",
+        "ldap.server_uri",
+        "ldap.bind_dn",
+        "ldap.base_dn",
+        "media.ffmpeg_path",
+        "transfer.retry_backoff_seconds",
+        "tunnel.hostname",
+        "turnstile.site_key",
+    }
+)
+
+#: Switches the software does not let a setting override.
+_LOCKED_SETTINGS = frozenset({"source.read_only", "retention.allow_source_deletion"})
+
+#: Where a card's real work is done, when it is not on this page.
+_MANAGE_LINKS = {
+    "CommPeak (source)": ("/admin/connections", "Manage CommPeak accounts"),
+    "Wasabi (archive)": ("/admin/storage", "Manage archive storage"),
+    "Two-factor and passwords": ("/admin/users", "Manage people"),
+}
+
+
+async def _setup_steps(session: AsyncSession, brand: Brand | None) -> list[dict[str, Any]]:
+    """The checklist between "installed" and "archiving".
+
+    Each step reports what it found rather than just done/not-done, because
+    "2 of 2 accounts reachable" answers the next question too.
+    """
+    users = (await session.execute(text("SELECT count(*) FROM users"))).scalar_one()
+    conns = (
+        await session.execute(
+            text("SELECT count(*), count(*) FILTER (WHERE status = 'OK') FROM commpeak_connections")
+        )
+    ).one()
+    dests = (
+        await session.execute(
+            text("SELECT count(*), count(*) FILTER (WHERE status = 'OK') FROM storage_destinations")
+        )
+    ).one()
+    recordings = (await session.execute(text("SELECT count(*) FROM recordings"))).scalar_one()
+    transfers_on = await settings_service.get_bool(session, "transfer.enabled")
+    telegram = await settings_service.get_secret(session, "alerts.telegram_bot_token")
+    slack = await settings_service.get_secret(session, "alerts.slack_webhook_url")
+    cdr_base = await settings_service.get_str(
+        session, "commpeak.cdr_api_base", brand_id=brand.id if brand else None
+    )
+
+    steps: list[dict[str, Any]] = [
+        {
+            "label": "Create this organisation",
+            "detail": f"{brand.name}" if brand else "No organisation exists yet.",
+            "done": brand is not None,
+            "href": None,
+            "action": "",
+        },
+        {
+            "label": "Add a CommPeak account",
+            "detail": (
+                f"{conns[1]} of {conns[0]} reachable"
+                if conns[0]
+                else "No CommPeak account added yet."
+            ),
+            "done": conns[0] > 0 and conns[1] == conns[0],
+            "href": "/admin/connections",
+            "action": "Manage" if conns[0] else "Add",
+        },
+        {
+            "label": "Point it at the call records",
+            "detail": (
+                "Fetching call details"
+                if cdr_base
+                else "Recordings will be archived without call details until this is set."
+            ),
+            "done": bool(cdr_base),
+            "href": None,
+            "action": "",
+        },
+        {
+            "label": "Add archive storage",
+            "detail": (
+                f"{dests[1]} of {dests[0]} reachable"
+                if dests[0]
+                else "Nothing is copied anywhere until storage exists."
+            ),
+            "done": dests[0] > 0 and dests[1] == dests[0],
+            "href": "/admin/storage",
+            "action": "Manage" if dests[0] else "Add",
+        },
+        {
+            "label": "Start copying",
+            "detail": (
+                f"On — {recordings:,} recording(s) known"
+                if transfers_on
+                else "Recordings are being found but not copied."
+            ),
+            "done": transfers_on,
+            "href": None,
+            "action": "",
+        },
+        {
+            "label": "Send alerts somewhere",
+            "detail": (
+                "Configured"
+                if (telegram or slack)
+                else "Failures will be visible on the Sync page but nobody will be told."
+            ),
+            "done": bool(telegram or slack),
+            "optional": True,
+            "href": None,
+            "action": "",
+        },
+        {
+            "label": "Add the people who need access",
+            "detail": f"{users} account(s)",
+            "done": users > 1,
+            "optional": True,
+            "href": "/admin/users",
+            "action": "Manage",
+        },
+    ]
+    number = 0
+    for step in steps:
+        step.setdefault("optional", False)
+        if not step["done"] and not step["optional"]:
+            number += 1
+            step["number"] = number
+        else:
+            step["number"] = ""
+    return steps
+
+
 @router.get("/admin/settings", response_class=HTMLResponse)
 async def admin_settings(
     request: Request,
@@ -658,13 +826,51 @@ async def admin_settings(
 ) -> Response:
     if Permission.SETTINGS_VIEW not in permissions_for(user.role):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not view settings")
+
     values = await settings_service.all_effective(session, brand_id=brand_id)
+    brand = (
+        await session.execute(select(Brand).where(Brand.id == brand_id))
+    ).scalar_one_or_none()
+
+    # The last few characters of a stored secret, so it can be checked against
+    # the console it was copied from without being revealed.
+    tails: dict[str, str] = {}
+    for key, spec in SETTINGS.items():
+        if not spec.sensitive:
+            continue
+        current = await settings_service.get_secret(session, key, brand_id=brand_id)
+        if current:
+            tails[key] = f"stored, ending …{current[-4:]}"
+
+    counts = (
+        await session.execute(
+            text(
+                "SELECT (SELECT count(*) FROM commpeak_connections) AS commpeak, "
+                "       (SELECT count(*) FROM storage_destinations)  AS wasabi"
+            )
+        )
+    ).mappings().one()
+
     return templates.TemplateResponse(
         request,
         "settings.html",
         await _shell(
-            request, session, user, "settings",
-            categories=specs_by_category(), values=values, saved=saved, error=error,
+            request,
+            session,
+            user,
+            "settings",
+            account_counts=dict(counts),
+            categories=specs_by_category(),
+            values=values,
+            secret_tails=tails,
+            category_notes=_CATEGORY_NOTES,
+            wide_fields=_WIDE_FIELDS,
+            locked_settings=_LOCKED_SETTINGS,
+            manage_links={k: v[0] for k, v in _MANAGE_LINKS.items()},
+            manage_link_labels={k: v[1] for k, v in _MANAGE_LINKS.items()},
+            setup_steps=await _setup_steps(session, brand),
+            saved=saved,
+            error=error,
         ),
     )
 
@@ -674,16 +880,47 @@ async def admin_settings_save(
     request: Request,
     user: CurrentUser,
     session: ScopedSession,
-    key: Annotated[str, Form()],
-    value: Annotated[str, Form()] = "",
+    brand_id: Annotated[int, Depends(active_brand_id)],
 ) -> Response:
+    """Save one card at a time.
+
+    The whole card posts together, so a switch that is off can be told apart
+    from a field the form never mentioned: every setting in the named category
+    is considered, and an absent checkbox means false rather than unchanged.
+    """
     if Permission.SETTINGS_MANAGE not in permissions_for(user.role):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not change settings")
-    try:
-        await settings_service.set(session, key, value, changed_by=user.email)
-        params = urlencode({"saved": key})
-    except (SettingsError, KeyError) as exc:
-        params = urlencode({"error": str(exc)})
+
+    form = await request.form()
+    category = str(form.get("category") or "")
+    problems: list[str] = []
+
+    for spec in specs_by_category().get(category, []):
+        if spec.key in _LOCKED_SETTINGS:
+            continue
+        field = f"set:{spec.key}"
+        scope = brand_id if spec.brand_overridable else None
+
+        if spec.type == SettingType.BOOL:
+            submitted: Any = field in form
+        else:
+            if field not in form:
+                continue
+            submitted = str(form.get(field) or "")
+            # An empty secret box means "keep what is stored", not "clear it" --
+            # the box is always empty on load, so treating blank as a clear
+            # would wipe every secret on the card each time it is saved.
+            if spec.sensitive and not submitted:
+                continue
+
+        try:
+            await settings_service.set(
+                session, spec.key, submitted, brand_id=scope, changed_by=user.email
+            )
+        except (SettingsError, KeyError) as exc:
+            problems.append(str(exc))
+
+    params = urlencode({"error": "; ".join(problems)} if problems else {"saved": category})
     return RedirectResponse(f"/admin/settings?{params}", status_code=status.HTTP_303_SEE_OTHER)
 
 

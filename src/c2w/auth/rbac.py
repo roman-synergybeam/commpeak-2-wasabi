@@ -8,9 +8,10 @@ organisations permit staff to listen to a call for quality review but forbid
 taking a copy off the platform, and collapsing the two would make that policy
 unexpressible.
 
-``recordings.delete`` is granted to nobody below ``SUPER_ADMIN``, and deleting
-at the CommPeak source additionally requires two settings to be turned on.
-Recording deletion there is irreversible.
+``recordings.delete`` separates the two roles that matter: an admin has it, an
+operator does not. It only ever removes the archive copy -- deleting at the
+CommPeak source is not implemented at all, and CommPeak documents its deletions
+as irreversible.
 """
 
 from __future__ import annotations
@@ -49,59 +50,27 @@ class Permission(enum.StrEnum):
 
 _ALL: Final[frozenset[Permission]] = frozenset(Permission)
 
-ROLE_PERMISSIONS: Final[dict[Role, frozenset[Permission]]] = {
-    Role.SUPER_ADMIN: _ALL,
-    Role.TENANT_ADMIN: frozenset(_ALL - {Permission.BRANDS_MANAGE, Permission.RECORDINGS_DELETE}),
-    Role.RECORDING_ADMIN: frozenset(
-        {
-            Permission.RECORDINGS_VIEW,
-            Permission.RECORDINGS_PLAY,
-            Permission.RECORDINGS_DOWNLOAD,
-            Permission.RECORDINGS_EXPORT,
-            Permission.CDR_VIEW,
-            Permission.CDR_EXPORT,
-            Permission.STORAGE_VIEW,
-            Permission.SYNC_VIEW,
-            Permission.SYNC_MANAGE,
-            Permission.SETTINGS_VIEW,
-            Permission.AUDIT_VIEW,
-        }
-    ),
-    Role.SUPERVISOR: frozenset(
-        {
-            Permission.RECORDINGS_VIEW,
-            Permission.RECORDINGS_PLAY,
-            Permission.RECORDINGS_DOWNLOAD,
-            Permission.CDR_VIEW,
-            Permission.CDR_EXPORT,
-            Permission.SYNC_VIEW,
-        }
-    ),
-    # An agent may review their own calls but not take copies away.
-    Role.AGENT: frozenset(
-        {
-            Permission.RECORDINGS_VIEW,
-            Permission.RECORDINGS_PLAY,
-            Permission.CDR_VIEW,
-        }
-    ),
-    # An auditor's job is to inspect the trail, including who listened to what,
-    # but not to remove anything from it.
-    Role.AUDITOR: frozenset(
-        {
-            Permission.RECORDINGS_VIEW,
-            Permission.RECORDINGS_PLAY,
-            Permission.CDR_VIEW,
-            Permission.CDR_EXPORT,
-            Permission.AUDIT_VIEW,
-            Permission.SYNC_VIEW,
-            Permission.STORAGE_VIEW,
-            Permission.SETTINGS_VIEW,
-        }
-    ),
-    Role.READ_ONLY: frozenset({Permission.RECORDINGS_VIEW, Permission.CDR_VIEW}),
-}
+#: Everything an operator does: find a call, hear it, take a copy of it.
+_OPERATOR: Final[frozenset[Permission]] = frozenset(
+    {
+        Permission.RECORDINGS_VIEW,
+        Permission.RECORDINGS_PLAY,
+        Permission.RECORDINGS_DOWNLOAD,
+        Permission.RECORDINGS_EXPORT,
+        Permission.CDR_VIEW,
+        Permission.CDR_EXPORT,
+        Permission.SYNC_VIEW,
+    }
+)
 
+ROLE_PERMISSIONS: Final[dict[Role, frozenset[Permission]]] = {
+    # Runs the platform: every organisation, everything in each.
+    Role.SUPER_ADMIN: _ALL,
+    # Runs one organisation. The only role there that can delete a recording,
+    # which is why it is the one that is handed out sparingly.
+    Role.ADMIN: frozenset(_ALL - {Permission.BRANDS_MANAGE}),
+    Role.OPERATOR: _OPERATOR,
+}
 
 def permissions_for(role: Role | str) -> frozenset[Permission]:
     return ROLE_PERMISSIONS.get(Role(role), frozenset())

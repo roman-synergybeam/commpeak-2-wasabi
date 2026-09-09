@@ -1,64 +1,180 @@
 {% extends "base.html" %}
+{% block frame %}measured{% endblock %}
 {% block title %}Settings — c2w{% endblock %}
 {% block body %}
 
 <h1>Settings</h1>
-<p class="sub">Stored in the database. There are no configuration files to edit.</p>
+<p class="sub">
+  Everything is stored in the database, not in files on the server.
+  {% if active_brand %}These apply to <strong>{{ active_brand.name }}</strong>
+  unless a setting says otherwise.{% endif %}
+</p>
 
-{# The result of what you just did: a flash, gone on the next navigation. #}
-{% if saved %}<div class="flash ok">Saved <strong>{{ saved }}</strong>.</div>{% endif %}
+{% if saved %}<div class="flash ok">Saved.</div>{% endif %}
 {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+
+{# The gap between "installed" and "working", with each step remembering
+   whether it is done. #}
+<h2>Setup</h2>
+<div class="card">
+  <ul class="steps">
+    {% for step in setup_steps %}
+      <li>
+        {% if step.done %}
+          <span class="mark done">&check;</span>
+        {% elif step.optional %}
+          <span class="mark opt">!</span>
+        {% else %}
+          <span class="mark">{{ step.number }}</span>
+        {% endif %}
+        <div>
+          <div class="lbl">
+            {{ step.label }}
+            {% if step.optional %}<span class="pill idle">optional</span>{% endif %}
+          </div>
+          <div class="det">{{ step.detail }}</div>
+        </div>
+        {% if step.href %}
+          <span class="go">
+            <a class="btn {{ 'ghost' if step.done else '' }} small" href="{{ step.href }}">
+              {{ step.action }}
+            </a>
+          </span>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+</div>
 
 <div class="note">
   <h3>CommPeak is only ever read</h3>
-  <p>Nothing here can enable deleting or changing anything on the CommPeak side.
-     The capability is not present in the software.</p>
+  <p>Nothing on this page can delete or change anything on the CommPeak side.
+     The ability is not in the software.</p>
 </div>
 
 {% for category, specs in categories.items() %}
   <h2>{{ category }}</h2>
-  <div class="tw">
-    {% for spec in specs %}
-      <form class="setrow" method="post" action="/admin/settings">
-        <input type="hidden" name="key" value="{{ spec.key }}">
+  <form class="card" method="post" action="/admin/settings">
+    <input type="hidden" name="category" value="{{ category }}">
+
+    {% if category_notes.get(category) %}
+      <p class="hint" style="margin:0 0 16px">{{ category_notes[category] }}</p>
+    {% endif %}
+
+    {# How many of these this organisation already has, so the page states the
+       model rather than implying one of each. #}
+    {% if category == 'CommPeak (source)' %}
+      <div class="summarygrid">
         <div>
-          <div class="setname">
-            {{ spec.label }}
-            {% if spec.restart_required %}
-              <span class="pill idle" title="Takes effect when services restart">restart</span>
+          <span class="hint">CommPeak accounts here</span>
+          <strong>{{ account_counts.commpeak }}</strong>
+        </div>
+        <div>
+          <span class="hint">Each has its own</span>
+          <strong>bucket and credentials</strong>
+        </div>
+      </div>
+    {% elif category == 'Wasabi (archive)' %}
+      <div class="summarygrid">
+        <div>
+          <span class="hint">Archive buckets here</span>
+          <strong>{{ account_counts.wasabi }}</strong>
+        </div>
+        <div>
+          <span class="hint">Each has its own</span>
+          <strong>region, bucket and keys</strong>
+        </div>
+      </div>
+    {% endif %}
+
+    {# Values first, switches after: a switch reads as a statement about the
+       card, and mixed into a grid of text boxes it gets lost. #}
+    {% set fields = specs | rejectattr('type', 'equalto', 'bool') | list %}
+    {% set switches = specs | selectattr('type', 'equalto', 'bool') | list %}
+
+    {% if fields %}
+      <div class="row">
+        {% for spec in fields %}
+          <div {% if spec.type == 'json' or spec.key in wide_fields %}class="wide"{% endif %}>
+            <label for="f-{{ spec.key }}">
+              {{ spec.label }}{% if spec.unit %} <span class="hint" style="display:inline">({{ spec.unit }})</span>{% endif %}
+            </label>
+
+            {% if spec.choices %}
+              <select id="f-{{ spec.key }}" name="set:{{ spec.key }}">
+                {% for choice in spec.choices %}
+                  <option value="{{ choice }}" {{ 'selected' if values[spec.key]|string == choice }}>
+                    {{ choice }}
+                  </option>
+                {% endfor %}
+              </select>
+            {% elif spec.type == 'secret' %}
+              {# Monospace and a tail of what is stored, so it can be checked
+                 against the console it was copied from without revealing it. #}
+              <input id="f-{{ spec.key }}" name="set:{{ spec.key }}" type="password"
+                     class="mono" autocomplete="new-password"
+                     placeholder="{{ secret_tails.get(spec.key) or 'not set' }}">
+            {% elif spec.type == 'json' %}
+              <input id="f-{{ spec.key }}" name="set:{{ spec.key }}" class="mono"
+                     value="{{ values[spec.key] | tojson }}">
+            {% else %}
+              <input id="f-{{ spec.key }}" name="set:{{ spec.key }}"
+                     value="{{ values[spec.key] }}"
+                     {% if spec.type in ('int', 'float') %}type="number" step="any"{% endif %}>
             {% endif %}
-            {% if spec.brand_overridable %}
-              <span class="pill idle" title="Can differ per organisation">per-org</span>
-            {% endif %}
+
+            <p class="hint">
+              {{ spec.description }}
+              {% if spec.help_url %}
+                <a href="{{ spec.help_url }}" target="_blank" rel="noopener">{{ spec.help_label or 'more' }}</a>.
+              {% endif %}
+              {% if spec.restart_required %}
+                <span class="pill idle">needs a restart</span>
+              {% endif %}
+              {% if not spec.brand_overridable %}
+                <span class="pill idle">all organisations</span>
+              {% endif %}
+            </p>
           </div>
-          <p class="hint">{{ spec.description }}</p>
-          <div class="setkey">{{ spec.key }}</div>
-        </div>
-        <div class="setcontrol">
-          {% if spec.type == 'bool' %}
-            <select name="value" aria-label="{{ spec.label }}">
-              <option value="true" {{ 'selected' if values[spec.key] }}>On</option>
-              <option value="false" {{ '' if values[spec.key] else 'selected' }}>Off</option>
-            </select>
-          {% elif spec.type == 'secret' %}
-            {# Monospace, so a transposed character in a key is visible. #}
-            <input name="value" type="password" class="mono" autocomplete="new-password"
-                   aria-label="{{ spec.label }}"
-                   placeholder="{{ 'Saved — type to replace' if values[spec.key] else 'Not set' }}">
-          {% elif spec.type == 'json' %}
-            <input name="value" class="mono" value="{{ values[spec.key] | tojson }}"
-                   aria-label="{{ spec.label }}">
-          {% else %}
-            <input name="value" value="{{ values[spec.key] }}" aria-label="{{ spec.label }}"
-                   {% if spec.type in ('int', 'float') %}type="number" step="any"{% endif %}>
-          {% endif %}
-          {% if spec.unit %}<span class="unit">{{ spec.unit }}</span>{% endif %}
-          {% if 'settings.manage' in permissions %}
-            <button type="submit" class="ghost small">Save</button>
-          {% endif %}
-        </div>
-      </form>
-    {% endfor %}
-  </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if switches %}
+      <div class="checkrow" style="flex-direction:column;align-items:stretch;gap:14px">
+        {% for spec in switches %}
+          <div>
+            <label>
+              <input type="checkbox" name="set:{{ spec.key }}" value="true"
+                     {{ 'checked' if values[spec.key] }}
+                     {{ 'disabled' if spec.key in locked_settings }}>
+              {{ spec.label }}
+              {% if spec.key in locked_settings %}
+                <span class="pill ok">enforced in the software</span>
+              {% endif %}
+              {% if not spec.brand_overridable %}
+                <span class="pill idle">all organisations</span>
+              {% endif %}
+            </label>
+            <p class="hint" style="margin-left:26px">
+              {{ spec.description }}
+              {% if spec.help_url %}
+                <a href="{{ spec.help_url }}" target="_blank" rel="noopener">{{ spec.help_label or 'more' }}</a>.
+              {% endif %}
+            </p>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if 'settings.manage' in permissions %}
+      <div class="actions">
+        <button type="submit">Save {{ category | lower }}</button>
+        {% if category in manage_links %}
+          <a class="btn ghost" href="{{ manage_links[category] }}">{{ manage_link_labels[category] }}</a>
+        {% endif %}
+      </div>
+    {% endif %}
+  </form>
 {% endfor %}
 {% endblock %}

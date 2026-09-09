@@ -140,7 +140,7 @@ async def scenario(db):
                 brand_id=brand_id,
                 email=agent_email,
                 display_name="Agent",
-                role=Role.AGENT,
+                role=Role.OPERATOR,
                 auth_source=AuthSource.LOCAL,
                 password_hash=hash_password("a-long-enough-password"),
             )
@@ -295,27 +295,28 @@ class TestCallsUi:
 
 
 class TestPermissions:
-    async def test_agent_may_play_but_not_download(self, app_client, scenario):
-        """Some organisations allow listening but forbid taking copies away, so
-        play and download are separate permissions."""
+    async def test_operator_may_listen_and_export(self, app_client, scenario):
+        """An operator's job is to find a call, hear it and take a copy."""
         await _login(app_client, scenario["agent_email"], scenario["password"])
         detail = await app_client.get(f"/calls/{scenario['cdr_id']}")
         assert detail.status_code == 200
         assert f"/api/v1/recordings/{scenario['recording_id']}/stream" in detail.text
-        assert f"/api/v1/recordings/{scenario['recording_id']}/download" not in detail.text
+        assert f"/api/v1/recordings/{scenario['recording_id']}/download" in detail.text
 
-        refused = await app_client.get(
+        allowed = await app_client.get(
             f"/api/v1/recordings/{scenario['recording_id']}/download",
             follow_redirects=False,
         )
-        assert refused.status_code == 403
+        # 409 rather than 403: the role permits it, this recording has no
+        # archive copy in the fixture.
+        assert allowed.status_code in (307, 409)
 
-    async def test_agent_cannot_reach_settings(self, app_client, scenario):
+    async def test_operator_cannot_reach_settings(self, app_client, scenario):
         await _login(app_client, scenario["agent_email"], scenario["password"])
         response = await app_client.get("/admin/settings")
         assert response.status_code == 403
 
-    async def test_agent_cannot_reach_the_audit_log(self, app_client, scenario):
+    async def test_operator_cannot_reach_the_audit_log(self, app_client, scenario):
         await _login(app_client, scenario["agent_email"], scenario["password"])
         assert (await app_client.get("/audit")).status_code == 403
 

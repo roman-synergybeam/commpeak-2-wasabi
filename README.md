@@ -47,7 +47,7 @@ All credential settings ship empty, to be filled in by an operator.
 | Credential sealing | done — AES-256-GCM envelope encryption, per-brand keys, AAD binding |
 | Schema + brand isolation | done — RLS with `FORCE`, LIST partitioning, append-only audit |
 | Settings in the database | done — registry, validation, brand overrides, sealed secrets, history |
-| Local auth + RBAC | done — Argon2id, revocable sessions, lockout, 7 roles, 17 permissions |
+| Local auth + roles | done — Argon2id, revocable sessions, lockout. Three roles: platform admin, admin (the only one that can delete), operator (search, listen, export) |
 | Inventory scanner | done — hour-prefix, resumable, idempotent, works with no archive configured |
 | Job queue | done — PostgreSQL `SKIP LOCKED`, leases, classified retry ladder |
 | Transfer + verification | done — stream, verify, sidecar metadata, re-queue on archive loss |
@@ -58,12 +58,46 @@ All credential settings ship empty, to be filled in by an operator.
 | Alerts | done — Telegram + Slack, per-brand, severity routing, deduplication |
 | Deployment | done — systemd units, nginx, idempotent installer |
 
-**Not yet built:** Entra ID / Google Workspace SSO (schema and settings are in
-place, the flow is not), M365/Drive export, FLAC→MP3 transcoding, and a
-`connection test` CLI subcommand.
+**Not yet built.** The settings and the schema are in place for each of these,
+so nothing has to be migrated when the work happens — but no code runs yet, and
+each setting says so where it could be mistaken for working:
 
-**Deliberately out of scope for v1:** voice transcription/analysis, FXRide CRM,
-Zendesk.
+- **Transcription and voice analysis.** `transcripts` and `transcript_segments`
+  exist, partitioned and isolated like everything else, with full-text indexes
+  for English, Spanish and Brazilian Portuguese — the three languages these
+  calls are in. The recogniser adapter is the remaining work; Whisper on this
+  server keeps recordings and transcripts inside your own infrastructure, which
+  is why it is the default in the settings.
+- **Single sign-on** through Microsoft 365, Google Workspace or Active
+  Directory. Columns, group-to-role mapping and settings are there; the sign-in
+  flow is not.
+- **Two-factor** for local accounts. Single sign-on already carries whatever
+  second factor your directory enforces.
+- **Cloudflare** tunnel and Turnstile.
+- Microsoft 365 / Google Drive export, FLAC→MP3 transcoding for older browsers,
+  and a `connection test` CLI subcommand.
+
+**Still out of scope:** FXRide CRM and Zendesk.
+
+## Organisations, accounts and people
+
+An **organisation** is a customer company, and the hard isolation boundary —
+Go4Rex and InterMagnum share nothing, enforced by row-level security rather
+than by application filtering.
+
+Each organisation can have **as many CommPeak accounts as it has PBXes and
+dialers**, each with its own bucket and credentials, and **as many Wasabi
+buckets as it needs**, each with its own region and keys. Settings apply across
+an organisation's accounts; the accounts themselves are managed on the CommPeak
+and Archive pages.
+
+Three roles, each describable in a sentence:
+
+| Role | Can |
+|---|---|
+| Platform admin | Every organisation, everything in each |
+| Admin | One organisation, everything there — the only role that can delete a recording |
+| Operator | Search calls, listen, download and export |
 
 Transfers stay disabled until an archive destination exists — no Wasabi buckets
 are provisioned yet. Inventory, correlation and CDR search all work without one,

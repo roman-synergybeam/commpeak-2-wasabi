@@ -28,6 +28,71 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
+#: Offered in the time-zone menu. Deliberately short -- a menu of all 486 IANA
+#: names is harder to use than a text box. Add to it as customers appear.
+TIMEZONE_CHOICES: Final[tuple[str, ...]] = (
+    "UTC",
+    "Europe/Lisbon",
+    "Europe/London",
+    "Europe/Dublin",
+    "Europe/Madrid",
+    "Europe/Paris",
+    "Europe/Berlin",
+    "Europe/Amsterdam",
+    "Europe/Warsaw",
+    "Europe/Prague",
+    "Europe/Bucharest",
+    "Europe/Athens",
+    "Europe/Kyiv",
+    "Europe/Istanbul",
+    "Asia/Jerusalem",
+    "Asia/Dubai",
+    "Asia/Nicosia",
+    "America/New_York",
+    "America/Chicago",
+    "America/Denver",
+    "America/Los_Angeles",
+    "America/Sao_Paulo",
+    "America/Guayaquil",
+    "Africa/Johannesburg",
+    "Asia/Kolkata",
+    "Asia/Manila",
+    "Australia/Sydney",
+)
+
+#: Wasabi's regional endpoints, so the region is chosen rather than typed --
+#: a mistyped region is a bucket that cannot be reached at all.
+WASABI_REGION_CHOICES: Final[tuple[str, ...]] = (
+    "eu-central-1",
+    "eu-central-2",
+    "eu-west-1",
+    "eu-west-2",
+    "eu-south-1",
+    "us-east-1",
+    "us-east-2",
+    "us-central-1",
+    "us-west-1",
+    "ca-central-1",
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-southeast-1",
+    "ap-southeast-2",
+)
+
+_HOURS: Final[tuple[str, ...]] = tuple(str(h) for h in range(24))
+
+#: The languages these calls are actually in. Naming them matters for accuracy:
+#: a recogniser told the language beats one guessing, and Brazilian Portuguese
+#: and European Portuguese are different enough to be worth separating.
+LANGUAGE_CHOICES: Final[tuple[str, ...]] = (
+    "auto-detect",
+    "en — English",
+    "es — Spanish (Latin America)",
+    "es-ES — Spanish (Spain)",
+    "pt-BR — Portuguese (Brazil)",
+    "pt-PT — Portuguese (Portugal)",
+)
+
 __all__ = [
     "CATEGORY_ORDER",
     "SETTINGS",
@@ -69,11 +134,13 @@ class SettingSpec:
     validator: Callable[[Any], None] | None = None
     #: True when changing the value requires a service restart to take effect.
     restart_required: bool = False
-    #: Whether ``c2w-admin settings reveal`` may print this in clear text.
-    #: Off for everything by default: the CLI must never become a way to dump
-    #: CommPeak or Wasabi credentials.  Opt in only for values that exist to be
-    #: handed to another process, and say why in the description.
-    shell_exportable: bool = False
+    #: Where to read more. Some of these settings are a value copied out of
+    #: someone else's admin console, and the useful help is a link to the page
+    #: it comes from rather than a paraphrase of it.
+    help_url: str = ""
+    help_label: str = ""
+    #: Fixed set of acceptable values, rendered as a menu instead of a text box.
+    choices: tuple[str, ...] = ()
 
 
 def _positive(value: Any) -> None:
@@ -109,6 +176,38 @@ def _hour(value: Any) -> None:
         raise ValueError("must be an hour between 0 and 23")
 
 
+def _http_url(value: Any) -> None:
+    """Reject an address that will not work as one.
+
+    Worth checking on write: a malformed public address does not fail here, it
+    fails later as a rejected single sign-on redirect, which is a much harder
+    thing to trace back to a typed slash.
+    """
+    from urllib.parse import urlparse
+
+    text_ = str(value or "").strip()
+    if not text_:
+        return
+    parsed = urlparse(text_)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("must start with http:// or https://")
+    if not parsed.netloc:
+        raise ValueError("no host in the address")
+    if "//" in parsed.path:
+        raise ValueError("looks like it has a doubled slash")
+    if parsed.netloc.endswith(":") or parsed.netloc.startswith(":"):
+        raise ValueError("the port looks wrong")
+
+
+def _hostname(value: Any) -> None:
+    """A bare host name, not a full address."""
+    text_ = str(value or "").strip()
+    if not text_:
+        return
+    if "://" in text_ or "/" in text_:
+        raise ValueError("just the host name, without http:// or a path")
+
+
 def _log_level(value: Any) -> None:
     if str(value).upper() not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
         raise ValueError("must be DEBUG, INFO, WARNING or ERROR")
@@ -122,11 +221,14 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         default="http://localhost:8000",
         category="General",
         label="Public web address",
-        description="Where this system is reachable. Used to build links in "
-        "alerts and to complete single sign-on.",
+        description="Where this system is reachable, for example "
+        "https://recordings.example.com. Alerts link to it, and single sign-on "
+        "returns to it -- so a wrong value here shows up as a refused login.",
+        validator=_http_url,
     ),
     SettingSpec(
         key="core.environment",
+        choices=('production', 'staging', 'dev'),
         type=SettingType.STRING,
         default="production",
         category="General",
@@ -136,6 +238,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="core.session_ttl_seconds",
+        choices=('3600', '14400', '28800', '43200', '86400'),
         type=SettingType.INT,
         default=8 * 3600,
         category="General",
@@ -145,63 +248,6 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         validator=_positive,
     ),
     # -- CommPeak (source) -------------------------------------------------
-    SettingSpec(
-        key="source.read_only",
-        type=SettingType.BOOL,
-        default=True,
-        category="CommPeak (source)",
-        label="Never write to CommPeak",
-        description="This system only ever reads from CommPeak. The ability to "
-        "write or delete there is not present in the code at all, so this "
-        "switch is a statement of intent rather than something to turn off.",
-    ),
-    SettingSpec(
-        key="source.concurrency_per_connection",
-        type=SettingType.INT,
-        default=5,
-        category="CommPeak (source)",
-        label="Simultaneous downloads per CommPeak account",
-        description="CommPeak recommends 5 and throttles above it, so higher "
-        "values make a migration slower, not faster.",
-        unit="at a time",
-        validator=_commpeak_concurrency,
-    ),
-    SettingSpec(
-        key="source.list_page_size",
-        type=SettingType.INT,
-        default=1000,
-        category="CommPeak (source)",
-        label="Recordings listed per request",
-        description="How many objects to ask CommPeak for at once while "
-        "scanning a bucket.",
-        unit="objects",
-        validator=_positive,
-    ),
-    SettingSpec(
-        key="source.incremental_poll_seconds",
-        type=SettingType.INT,
-        default=300,
-        category="CommPeak (source)",
-        label="Look for new recordings every",
-        description="How often to check CommPeak for recordings that have "
-        "appeared since the last scan.",
-        unit="seconds",
-        validator=_positive,
-        brand_overridable=True,
-    ),
-    SettingSpec(
-        key="source.incremental_overlap_hours",
-        type=SettingType.INT,
-        default=3,
-        category="CommPeak (source)",
-        label="Re-check the most recent",
-        description="A call that starts at 10:59 and runs for ten minutes is "
-        "filed under 10:00 well after that hour has passed. Re-scanning a few "
-        "hours of already-seen time is what stops those being missed.",
-        unit="hours",
-        validator=_non_negative,
-    ),
-    # -- Archiving ---------------------------------------------------------
     SettingSpec(
         key="transfer.enabled",
         type=SettingType.BOOL,
@@ -214,16 +260,20 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="transfer.concurrency_global",
+        choices=('5', '10', '20', '30', '50', '100'),
         type=SettingType.INT,
         default=20,
         category="Archiving",
         label="Total simultaneous transfers",
-        description="Across every account and organisation.",
+        description="The ceiling across every account and every organisation. "
+        "The per-account and per-organisation limits sit under this one, so "
+        "lowering it slows everything down at once.",
         unit="at a time",
         validator=_concurrency,
     ),
     SettingSpec(
         key="transfer.concurrency_per_destination",
+        choices=('2', '5', '10', '20', '30'),
         type=SettingType.INT,
         default=10,
         category="Archiving",
@@ -234,6 +284,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="transfer.concurrency_per_brand",
+        choices=('1', '2', '5', '10', '20'),
         type=SettingType.INT,
         default=5,
         category="Archiving",
@@ -244,17 +295,20 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="transfer.bandwidth_limit_mbps",
+        choices=('0', '50', '100', '200', '500', '1000'),
         type=SettingType.FLOAT,
         default=0.0,
         category="Archiving",
         label="Bandwidth limit",
         description="Set this when recordings are pulled over the same "
-        "connection that carries live calls.",
+        "connection that carries live calls. Zero means take everything "
+        "available.",
         unit="Mbit/s (0 = unlimited)",
         validator=_non_negative,
     ),
     SettingSpec(
         key="transfer.multipart_threshold_bytes",
+        choices=('8388608', '16777216', '33554432', '67108864'),
         type=SettingType.INT,
         default=16 * 1024 * 1024,
         category="Archiving",
@@ -266,6 +320,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="transfer.multipart_chunk_bytes",
+        choices=('5242880', '8388608', '16777216', '33554432'),
         type=SettingType.INT,
         default=16 * 1024 * 1024,
         category="Archiving",
@@ -277,6 +332,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="transfer.max_attempts",
+        choices=('3', '5', '8', '10'),
         type=SettingType.INT,
         default=5,
         category="Archiving",
@@ -300,6 +356,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="transfer.job_claim_batch",
+        choices=('1', '4', '8', '16', '32'),
         type=SettingType.INT,
         default=8,
         category="Archiving",
@@ -310,6 +367,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="transfer.job_lease_seconds",
+        choices=('300', '600', '900', '1800', '3600'),
         type=SettingType.INT,
         default=900,
         category="Archiving",
@@ -333,6 +391,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     # -- Retention ---------------------------------------------------------
     SettingSpec(
         key="retention.offload_after_days",
+        choices=('0', '7', '30', '60', '90', '180', '365'),
         type=SettingType.INT,
         default=90,
         category="Retention",
@@ -355,6 +414,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="retention.keep_archive_years",
+        choices=('1', '2', '3', '5', '7', '10'),
         type=SettingType.INT,
         default=7,
         category="Retention",
@@ -367,6 +427,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     # -- Playback and downloads --------------------------------------------
     SettingSpec(
         key="media.presign_ttl_seconds",
+        choices=('60', '300', '900', '1800', '3600'),
         type=SettingType.INT,
         default=300,
         category="Playback and downloads",
@@ -395,6 +456,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="media.ffmpeg_path",
+        choices=('/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/snap/bin/ffmpeg'),
         type=SettingType.STRING,
         default="/usr/bin/ffmpeg",
         category="Playback and downloads",
@@ -412,6 +474,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="alerts.dedupe_window_seconds",
+        choices=('300', '900', '1800', '3600', '21600'),
         type=SettingType.INT,
         default=1800,
         category="Notifications",
@@ -454,6 +517,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="alerts.daily_digest_hour",
+        choices=_HOURS,
         type=SettingType.INT,
         default=8,
         category="Notifications",
@@ -465,6 +529,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     # -- Scheduling --------------------------------------------------------
     SettingSpec(
         key="schedule.reconcile_hour",
+        choices=_HOURS,
         type=SettingType.INT,
         default=3,
         category="Scheduling",
@@ -476,6 +541,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="schedule.cdr_poll_seconds",
+        choices=('60', '300', '600', '900', '1800'),
         type=SettingType.INT,
         default=300,
         category="Scheduling",
@@ -487,11 +553,14 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     # -- Logging and metrics -----------------------------------------------
     SettingSpec(
         key="observability.log_level",
+        choices=('DEBUG', 'INFO', 'WARNING', 'ERROR'),
         type=SettingType.STRING,
         default="INFO",
         category="Logging and metrics",
         label="Log detail",
-        description="DEBUG, INFO, WARNING or ERROR.",
+        description="INFO is right for normal running. DEBUG is very noisy and "
+        "will include every S3 request; use it while diagnosing something and "
+        "put it back afterwards.",
         validator=_log_level,
         restart_required=True,
     ),
@@ -516,86 +585,742 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     # -- Sign-in and access ------------------------------------------------
     SettingSpec(
-        key="auth.local_accounts_enabled",
+        key="org.display_name",
+        type=SettingType.STRING,
+        default="",
+        category="Organisation",
+        label="Company name",
+        description="How this organisation is named in alerts, exports and the "
+        "daily summary. Leave blank to use the name it was created with.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="org.contact_email",
+        type=SettingType.STRING,
+        default="",
+        category="Organisation",
+        label="Where to reach someone here",
+        description="Included in alerts so whoever receives one knows who to "
+        "contact. Not used to send mail.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="org.timezone",
+        choices=TIMEZONE_CHOICES,
+        type=SettingType.STRING,
+        default="UTC",
+        category="Organisation",
+        label="Time zone",
+        description="Schedules for this organisation run in this zone, and times "
+        "on its pages are shown in it. Any IANA name, for example "
+        "Europe/Lisbon. The server's own clock is not used.",
+        help_url="https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
+        help_label="list of time-zone names",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="org.data_region_note",
+        choices=('', 'No restriction', 'EU only', 'UK only', 'US only', 'Customer country only'),
+        type=SettingType.STRING,
+        default="",
+        category="Organisation",
+        label="Where recordings may be stored",
+        description="A note for whoever configures storage next -- for example "
+        "\"EU only\". Recorded here so the requirement is not carried in "
+        "somebody's memory. It is not enforced.",
+        brand_overridable=True,
+    ),
+    # -- CommPeak (source) -------------------------------------------------
+    SettingSpec(
+        key="commpeak.s3_endpoint",
+        choices=('https://recordings.commpeak.com',),
+        type=SettingType.STRING,
+        default="https://recordings.commpeak.com",
+        category="CommPeak (source)",
+        label="Recordings address",
+        validator=_http_url,
+        description="Where recordings are read from, for every CommPeak account "
+        "this organisation has. Each account has its own bucket and its own "
+        "credentials; the address is the same for all of them.",
+        help_url="https://docs.commpeak.com/docs/recordings-access-accounts-out",
+        help_label="CommPeak's own instructions",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="commpeak.cdr_api_base",
+        type=SettingType.STRING,
+        default="",
+        category="CommPeak (source)",
+        label="Call records address",
+        description="Where the list of calls is fetched from, usually this "
+        "organisation's CommPeak domain. Without it recordings are still "
+        "archived, but with no call details attached. If its accounts sit on "
+        "different domains, set this on each account instead.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="commpeak.cdr_api_path",
+        choices=('/api/v1/cdrs', '/api/cdrs', '/rest/cdrs'),
+        type=SettingType.STRING,
+        default="/api/v1/cdrs",
+        category="CommPeak (source)",
+        label="Call records path",
+        description="The part of the address that returns the list of calls. Ask "
+        "CommPeak support if you are unsure.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="commpeak.cdr_auth_scheme",
+        type=SettingType.STRING,
+        default="bearer",
+        category="CommPeak (source)",
+        label="How to authenticate",
+        description="How the token below is presented. Bearer is the most common. "
+        "Basic uses the user name as well.",
+        choices=("bearer", "header", "basic", "query", "none"),
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="commpeak.cdr_api_user",
+        type=SettingType.STRING,
+        default="",
+        category="CommPeak (source)",
+        label="Call records user name",
+        description="Only needed when authentication is set to Basic.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="commpeak.cdr_api_token",
+        type=SettingType.SECRET,
+        default="",
+        category="CommPeak (source)",
+        label="Call records token",
+        description="The API key or password for the call records address. "
+        "Encrypted before it is stored and never shown again.",
+        sensitive=True,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="source.read_only",
         type=SettingType.BOOL,
         default=True,
-        category="Sign-in and access",
-        label="Allow email and password sign-in",
-        description="Switch off once staff sign in through your directory. The "
-        "main administrator keeps password sign-in either way, as a way back in "
-        "if single sign-on breaks.",
+        category="CommPeak (source)",
+        label="Never write to CommPeak",
+        description="This system only ever reads from CommPeak. The ability to "
+        "write or delete there is not in the software at all, so this cannot be "
+        "switched off from here.",
+        help_url="https://docs.commpeak.com/docs/recordings-access-accounts-out",
+        help_label="CommPeak: deleted recordings cannot be restored",
     ),
+    SettingSpec(
+        key="source.concurrency_per_connection",
+        choices=('1', '2', '3', '4', '5', '6', '8', '10'),
+        type=SettingType.INT,
+        default=5,
+        category="CommPeak (source)",
+        label="Simultaneous downloads per account",
+        description="CommPeak recommends five and slows you down above it, so a "
+        "higher number makes a migration take longer, not less.",
+        unit="at a time",
+        validator=_commpeak_concurrency,
+    ),
+    SettingSpec(
+        key="source.list_page_size",
+        choices=('100', '250', '500', '1000'),
+        type=SettingType.INT,
+        default=1000,
+        category="CommPeak (source)",
+        label="Recordings listed per request",
+        description="How many recordings to ask CommPeak about at once while "
+        "looking for new ones.",
+        unit="recordings",
+        validator=_positive,
+    ),
+    SettingSpec(
+        key="source.incremental_poll_seconds",
+        choices=('60', '300', '600', '900', '1800', '3600'),
+        type=SettingType.INT,
+        default=300,
+        category="CommPeak (source)",
+        label="Look for new recordings every",
+        description="How often to check CommPeak for recordings that have "
+        "appeared since the last look.",
+        unit="seconds",
+        validator=_positive,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="source.incremental_overlap_hours",
+        choices=('0', '1', '2', '3', '6', '12', '24'),
+        type=SettingType.INT,
+        default=3,
+        category="CommPeak (source)",
+        label="Re-check the most recent",
+        description="A call that starts at 10:59 and runs ten minutes is filed "
+        "under 10:00 well after that hour has passed. Looking again at a few "
+        "hours already seen is what stops those being missed.",
+        unit="hours",
+        validator=_non_negative,
+    ),
+    # -- Wasabi (archive) --------------------------------------------------
+    SettingSpec(
+        key="wasabi.region",
+        choices=WASABI_REGION_CHOICES,
+        type=SettingType.STRING,
+        default="eu-central-1",
+        category="Wasabi (archive)",
+        label="Region suggested for new storage",
+        description="An organisation can have as many Wasabi accounts and "
+        "buckets as it needs; this is only the region offered first when adding "
+        "one. Pick where its recordings are allowed to live -- moving terabytes "
+        "afterwards is slow and is charged for.",
+        help_url="https://docs.wasabi.com/v1/docs/what-are-the-service-urls-for-wasabis-different-storage-regions",
+        help_label="Wasabi's list of regions",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="wasabi.path_prefix",
+        choices=('archive', 'recordings', 'c2w'),
+        type=SettingType.STRING,
+        default="archive",
+        category="Wasabi (archive)",
+        label="Folder inside each bucket",
+        description="In every one of this organisation's buckets, recordings go "
+        "under this folder, then by tenant and date. Keeping an organisation to "
+        "its own folder is what makes per-organisation lifecycle rules and usage "
+        "reporting possible.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="wasabi.verify_after_upload",
+        type=SettingType.BOOL,
+        default=True,
+        category="Wasabi (archive)",
+        label="Read the copy back and check it",
+        description="A successful upload is not proof that what arrived matches "
+        "what was sent. Leave this on: the archive is eventually the only copy.",
+    ),
+    SettingSpec(
+        key="wasabi.min_free_gb",
+        choices=('1', '2', '5', '10', '20', '50'),
+        type=SettingType.INT,
+        default=5,
+        category="Wasabi (archive)",
+        label="Refuse to run below",
+        description="Stops a copy starting when the server itself is nearly out "
+        "of disk, since a part-written file has to go somewhere.",
+        unit="GB free",
+        validator=_non_negative,
+    ),
+    # -- Microsoft 365 -----------------------------------------------------
     SettingSpec(
         key="auth.oidc_entra_enabled",
         type=SettingType.BOOL,
         default=False,
-        category="Sign-in and access",
-        label="Sign in with Microsoft Entra ID",
-        description="Lets staff use their Microsoft work account. Directory "
-        "groups can then decide what each person may do.",
+        category="Microsoft 365",
+        label="Let people sign in with Microsoft",
+        description="Staff use their existing work account instead of a password "
+        "kept here. Fill in the three values below first.",
+        help_url="https://learn.microsoft.com/entra/identity-platform/quickstart-register-app",
+        help_label="how to register the application",
+        brand_overridable=True,
     ),
     SettingSpec(
         key="auth.oidc_entra_tenant_id",
         type=SettingType.STRING,
         default="",
-        category="Sign-in and access",
-        label="Entra directory (tenant) ID",
-        description="From the Microsoft Entra admin centre.",
+        category="Microsoft 365",
+        label="Directory (tenant) ID",
+        description="Identifies your Microsoft organisation. Copy it from the "
+        "overview page of the Entra admin centre.",
+        help_url="https://entra.microsoft.com",
+        help_label="Entra admin centre",
+        brand_overridable=True,
     ),
     SettingSpec(
         key="auth.oidc_entra_client_id",
         type=SettingType.STRING,
         default="",
-        category="Sign-in and access",
-        label="Entra application (client) ID",
+        category="Microsoft 365",
+        label="Application (client) ID",
         description="From the app registration you create for this system.",
+        brand_overridable=True,
     ),
     SettingSpec(
         key="auth.oidc_entra_client_secret",
         type=SettingType.SECRET,
         default="",
-        category="Sign-in and access",
-        label="Entra client secret",
-        description="Stored encrypted and never shown again.",
+        category="Microsoft 365",
+        label="Client secret",
+        description="Created under Certificates & secrets on that registration. "
+        "Encrypted before it is stored and never shown again. Note its expiry -- "
+        "sign-in stops working the day it lapses.",
         sensitive=True,
+        brand_overridable=True,
     ),
+    SettingSpec(
+        key="auth.entra_redirect_note",
+        type=SettingType.STRING,
+        default="",
+        category="Microsoft 365",
+        label="Redirect address to register",
+        description="Add this exact address to the app registration as a Web "
+        "redirect URI, or sign-in is refused. It is your public address followed "
+        "by /auth/entra/callback.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="auth.entra_allowed_domains",
+        type=SettingType.STRING,
+        default="",
+        category="Microsoft 365",
+        label="Only allow these email domains",
+        description="Comma separated, for example contoso.com. Leave blank to "
+        "accept anyone your directory lets through.",
+        brand_overridable=True,
+    ),
+    # -- Google Workspace --------------------------------------------------
     SettingSpec(
         key="auth.oidc_google_enabled",
         type=SettingType.BOOL,
         default=False,
-        category="Sign-in and access",
-        label="Sign in with Google Workspace",
-        description="Lets staff use their Google work account.",
+        category="Google Workspace",
+        label="Let people sign in with Google",
+        description="Staff use their existing Google work account. Fill in the "
+        "two values below first.",
+        help_url="https://developers.google.com/identity/openid-connect/openid-connect",
+        help_label="how to create the credentials",
+        brand_overridable=True,
     ),
     SettingSpec(
         key="auth.oidc_google_client_id",
         type=SettingType.STRING,
         default="",
-        category="Sign-in and access",
-        label="Google client ID",
-        description="From the Google Cloud console.",
+        category="Google Workspace",
+        label="Client ID",
+        description="From an OAuth client of type Web application in the Google "
+        "Cloud console.",
+        help_url="https://console.cloud.google.com/apis/credentials",
+        help_label="Google Cloud credentials",
+        brand_overridable=True,
     ),
     SettingSpec(
         key="auth.oidc_google_client_secret",
         type=SettingType.SECRET,
         default="",
-        category="Sign-in and access",
-        label="Google client secret",
-        description="Stored encrypted and never shown again.",
+        category="Google Workspace",
+        label="Client secret",
+        description="Shown once when the client is created. Encrypted before it "
+        "is stored and never shown again.",
         sensitive=True,
+        brand_overridable=True,
     ),
-    # -- Developer tools ---------------------------------------------------
     SettingSpec(
-        key="integrations.shadcn_mcp_token",
+        key="auth.google_allowed_domains",
+        type=SettingType.STRING,
+        default="",
+        category="Google Workspace",
+        label="Only allow these email domains",
+        description="Comma separated. Without this, any Google account can "
+        "attempt to sign in -- set it to your own domain.",
+        brand_overridable=True,
+    ),
+    # -- Active Directory --------------------------------------------------
+    SettingSpec(
+        key="ldap.enabled",
+        type=SettingType.BOOL,
+        default=False,
+        category="Active Directory",
+        label="Take the list of people from Active Directory",
+        description="For an on-premises directory. If your accounts are in "
+        "Microsoft 365, use that section instead -- this is for a domain "
+        "controller you run yourself.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="ldap.server_uri",
+        type=SettingType.STRING,
+        default="",
+        category="Active Directory",
+        label="Domain controller address",
+        description="For example ldaps://dc01.corp.example:636. Use ldaps, or "
+        "the password below crosses your network in the clear.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="ldap.bind_dn",
+        type=SettingType.STRING,
+        default="",
+        category="Active Directory",
+        label="Account used to read the directory",
+        description="A read-only service account, for example "
+        "CN=svc-c2w,OU=Service,DC=corp,DC=example. It needs no privileges beyond "
+        "reading users and groups.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="ldap.bind_password",
         type=SettingType.SECRET,
         default="",
-        category="Developer tools",
-        label="shadcn.io access token",
-        description="Kept here so it lives in the database rather than in a "
-        "configuration file. Nothing in this system reads it at runtime; it is "
-        "handed to development tooling on demand.",
+        category="Active Directory",
+        label="Its password",
+        description="Encrypted before it is stored and never shown again.",
         sensitive=True,
-        shell_exportable=True,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="ldap.base_dn",
+        type=SettingType.STRING,
+        default="",
+        category="Active Directory",
+        label="Where to start searching",
+        description="For example DC=corp,DC=example. Narrow it to the part of "
+        "the tree your staff are in.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="ldap.admin_group",
+        type=SettingType.STRING,
+        default="",
+        category="Active Directory",
+        label="Group that gets full access",
+        description="Members become administrators here: they can change "
+        "settings, add storage and see the audit log.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="ldap.user_group",
+        type=SettingType.STRING,
+        default="",
+        category="Active Directory",
+        label="Group that gets ordinary access",
+        description="Members can search calls and listen to recordings, but not "
+        "download them or change anything. Anyone in neither group cannot sign "
+        "in at all.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="ldap.sync_interval_hours",
+        choices=('1', '3', '6', '12', '24'),
+        type=SettingType.INT,
+        default=6,
+        category="Active Directory",
+        label="Re-read the directory every",
+        description="Someone removed from a group loses access at the next read, "
+        "so keep this short enough for your offboarding process.",
+        unit="hours",
+        validator=_positive,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="ldap.remove_when_gone",
+        type=SettingType.BOOL,
+        default=True,
+        category="Active Directory",
+        label="Switch off accounts that leave the groups",
+        description="Their history in the audit log is kept -- only the ability "
+        "to sign in is withdrawn.",
+        brand_overridable=True,
+    ),
+    # -- Two-factor --------------------------------------------------------
+    SettingSpec(
+        key="auth.local_accounts_enabled",
+        type=SettingType.BOOL,
+        default=True,
+        category="Two-factor and passwords",
+        label="Allow email and password sign-in",
+        description="Switch this off once staff sign in through Microsoft, Google "
+        "or your directory. The main administrator keeps password sign-in either "
+        "way, as a way back in if single sign-on breaks.",
+    ),
+    SettingSpec(
+        key="mfa.require_totp",
+        type=SettingType.BOOL,
+        default=False,
+        category="Two-factor and passwords",
+        label="Require an authenticator app",
+        description="Not yet enforced -- the enrolment flow is still to be built, "
+        "so switching this on does nothing today. Single sign-on already carries "
+        "whatever second factor your directory requires.",
+    ),
+    SettingSpec(
+        key="mfa.issuer_name",
+        type=SettingType.STRING,
+        default="c2w",
+        category="Two-factor and passwords",
+        label="Name shown in the authenticator",
+        description="What people see next to the code in their app.",
+    ),
+    SettingSpec(
+        key="auth.password_min_length",
+        choices=('8', '10', '12', '14', '16', '20'),
+        type=SettingType.INT,
+        default=12,
+        category="Two-factor and passwords",
+        label="Shortest password allowed",
+        description="Applies to accounts kept here. Accounts from Microsoft, "
+        "Google or your directory follow that system's own rules.",
+        unit="characters",
+        validator=_positive,
+    ),
+    SettingSpec(
+        key="auth.lockout_attempts",
+        choices=('3', '5', '8', '10', '20'),
+        type=SettingType.INT,
+        default=8,
+        category="Two-factor and passwords",
+        label="Lock an account after",
+        description="Wrong passwords in a row before sign-in is refused for a "
+        "while. These credentials open recorded phone calls, so an unlimited "
+        "number of guesses is not acceptable.",
+        unit="wrong attempts",
+        validator=_positive,
+    ),
+    SettingSpec(
+        key="auth.lockout_minutes",
+        choices=('5', '15', '30', '60'),
+        type=SettingType.INT,
+        default=15,
+        category="Two-factor and passwords",
+        label="Keep it locked for",
+        description="The lock clears itself, so nobody has to be called out to "
+        "release it.",
+        unit="minutes",
+        validator=_positive,
+    ),
+    # -- Cloudflare --------------------------------------------------------
+    SettingSpec(
+        key="turnstile.enabled",
+        type=SettingType.BOOL,
+        default=False,
+        category="Cloudflare",
+        label="Check visitors are human at sign-in",
+        description="Adds Cloudflare's Turnstile challenge to the sign-in page. "
+        "Worth having if the console is reachable from the internet.",
+        help_url="https://developers.cloudflare.com/turnstile/get-started/",
+        help_label="how to get the two keys",
+    ),
+    SettingSpec(
+        key="turnstile.site_key",
+        type=SettingType.STRING,
+        default="",
+        category="Cloudflare",
+        label="Turnstile site key",
+        description="The public half. It appears in the page, so it is not a "
+        "secret.",
+    ),
+    SettingSpec(
+        key="turnstile.secret_key",
+        type=SettingType.SECRET,
+        default="",
+        category="Cloudflare",
+        label="Turnstile secret key",
+        description="The private half, used by this server to check the "
+        "challenge. Encrypted before it is stored.",
+        sensitive=True,
+    ),
+    SettingSpec(
+        key="turnstile.skip_on_lan",
+        type=SettingType.BOOL,
+        default=True,
+        category="Cloudflare",
+        label="Skip the challenge on the local network",
+        description="Keeps you able to sign in from the office if Cloudflare is "
+        "unreachable. Leave on unless you have another way in.",
+    ),
+    SettingSpec(
+        key="tunnel.enabled",
+        type=SettingType.BOOL,
+        default=False,
+        category="Cloudflare",
+        label="Publish through a Cloudflare tunnel",
+        description="Reaches the console from outside without opening a port on "
+        "your firewall. The tunnel runs as its own service; this only records "
+        "how it is set up.",
+        help_url="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/",
+        help_label="how to create a tunnel",
+    ),
+    SettingSpec(
+        key="tunnel.hostname",
+        type=SettingType.STRING,
+        default="",
+        category="Cloudflare",
+        label="Public address",
+        description="The name people use to reach the console, for example "
+        "recordings.example.com. Host name only -- no https:// and no path.",
+        validator=_hostname,
+    ),
+    SettingSpec(
+        key="tunnel.token",
+        type=SettingType.SECRET,
+        default="",
+        category="Cloudflare",
+        label="Tunnel token",
+        description="Issued when you create the tunnel. Encrypted before it is "
+        "stored and never shown again.",
+        sensitive=True,
+    ),
+    # -- Transcription -----------------------------------------------------
+    SettingSpec(
+        key="transcribe.enabled",
+        type=SettingType.BOOL,
+        default=False,
+        category="Transcription and voice analysis",
+        label="Transcribe archived recordings",
+        description="Not yet built. The settings are here so the shape of it is "
+        "agreed and the schema is in place; no recogniser is wired up, so "
+        "switching this on transcribes nothing today.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="transcribe.engine",
+        type=SettingType.STRING,
+        default="whisper-local",
+        category="Transcription and voice analysis",
+        label="Which recogniser to use",
+        description="Running Whisper on this server keeps recordings and their "
+        "transcripts inside your own infrastructure, which matters for call "
+        "recordings. The hosted options are faster and cost per minute.",
+        choices=(
+            "whisper-local",
+            "faster-whisper-local",
+            "openai-whisper-api",
+            "azure-speech",
+            "google-speech",
+            "aws-transcribe",
+        ),
+        help_url="https://github.com/openai/whisper#available-models-and-languages",
+        help_label="Whisper's models and languages",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="transcribe.model",
+        type=SettingType.STRING,
+        default="medium",
+        category="Transcription and voice analysis",
+        label="Model size",
+        description="Larger is more accurate and much slower. For Spanish and "
+        "Portuguese over a phone line, medium is the usual floor -- small and "
+        "below lose accented speech and names.",
+        choices=("tiny", "base", "small", "medium", "large-v3", "turbo"),
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="transcribe.primary_language",
+        type=SettingType.STRING,
+        default="auto-detect",
+        category="Transcription and voice analysis",
+        label="Main language on these calls",
+        description="Telling the recogniser the language beats letting it "
+        "guess, especially on short calls. Choose auto-detect only if the calls "
+        "are genuinely mixed.",
+        choices=LANGUAGE_CHOICES,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="transcribe.also_expect",
+        type=SettingType.STRING,
+        default="",
+        category="Transcription and voice analysis",
+        label="Also expect",
+        description="A second language that turns up on these calls. With "
+        "auto-detect this narrows the guess; with a fixed main language it is "
+        "used when detection disagrees strongly.",
+        choices=("", *LANGUAGE_CHOICES[1:]),
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="transcribe.diarize",
+        type=SettingType.BOOL,
+        default=True,
+        category="Transcription and voice analysis",
+        label="Separate the speakers",
+        description="Marks who is speaking when, so a transcript reads as a "
+        "conversation. Where the call has an agent extension the agent's turns "
+        "are labelled with their name.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="transcribe.word_timestamps",
+        type=SettingType.BOOL,
+        default=True,
+        category="Transcription and voice analysis",
+        label="Timestamp every phrase",
+        description="Lets the player jump to a phrase found by searching, which "
+        "is most of the value of having a transcript at all.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="transcribe.redact_numbers",
+        type=SettingType.BOOL,
+        default=False,
+        category="Transcription and voice analysis",
+        label="Mask long digit sequences",
+        description="Replaces card-length and account-length runs of digits in "
+        "the stored text. The audio is untouched -- this only limits what a "
+        "text search can turn up.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="transcribe.only_longer_than",
+        type=SettingType.INT,
+        default=15,
+        category="Transcription and voice analysis",
+        label="Skip calls shorter than",
+        description="Very short calls are ring-outs and wrong numbers. Skipping "
+        "them saves most of the cost for none of the value.",
+        unit="seconds",
+        choices=("0", "5", "10", "15", "30", "60"),
+        validator=_non_negative,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="transcribe.concurrency",
+        type=SettingType.INT,
+        default=1,
+        category="Transcription and voice analysis",
+        label="Recordings transcribed at once",
+        description="Transcription is the heaviest thing this server will do. "
+        "Keep it low, or it competes with the copying that has a deadline.",
+        unit="at a time",
+        choices=("1", "2", "3", "4", "6", "8"),
+        validator=_positive,
+    ),
+    SettingSpec(
+        key="analysis.sentiment",
+        type=SettingType.BOOL,
+        default=False,
+        category="Transcription and voice analysis",
+        label="Score how the call went",
+        description="Not yet built. Intended as a per-call reading from the "
+        "transcript, for finding calls worth listening to rather than for "
+        "judging anyone by.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="analysis.keywords",
+        type=SettingType.STRING,
+        default="",
+        category="Transcription and voice analysis",
+        label="Flag calls mentioning",
+        description="Comma separated words or phrases. A call whose transcript "
+        "contains one is marked so it can be found later -- complaint words, a "
+        "competitor's name, a compliance phrase.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="analysis.retain_transcript_years",
+        type=SettingType.INT,
+        default=7,
+        category="Transcription and voice analysis",
+        label="Keep transcripts for",
+        description="A transcript is personal data in its own right and is far "
+        "easier to search than audio, so it is worth keeping for no longer than "
+        "the recording it came from.",
+        unit="years",
+        choices=("1", "2", "3", "5", "7", "10"),
+        validator=_non_negative,
+        brand_overridable=True,
     ),
 )
 
@@ -604,16 +1329,22 @@ SETTINGS: Final[dict[str, SettingSpec]] = {s.key: s for s in _SPECS}
 #: Order the settings page presents categories in: the things an operator
 #: touches while getting started first, machinery afterwards.
 CATEGORY_ORDER: Final[tuple[str, ...]] = (
-    "General",
+    "Organisation",
     "CommPeak (source)",
+    "Wasabi (archive)",
     "Archiving",
     "Retention",
     "Playback and downloads",
     "Notifications",
     "Scheduling",
-    "Sign-in and access",
+    "Microsoft 365",
+    "Google Workspace",
+    "Active Directory",
+    "Two-factor and passwords",
+    "Transcription and voice analysis",
+    "Cloudflare",
+    "General",
     "Logging and metrics",
-    "Developer tools",
 )
 
 
