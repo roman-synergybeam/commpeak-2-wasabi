@@ -575,3 +575,48 @@ a file containing a fake AWS key past its own guard:
 Voice transcription and analysis, FXRide CRM, Zendesk. Do not build these; do
 not add dependencies for them. Keep the recording/CDR model open enough that a
 transcript can attach to a recording later.
+
+## CommPeak's IP ACL cannot be automated
+
+Checked against all three relevant specs (`cloud-pbx-api-v201`,
+`dialer-api-v201`, and the `llms.txt` index): **there is no endpoint for
+Recordings Access Accounts, S3 accounts, or the IP ACL.** The Cloud PBX API
+manages calls, users, desks, roles, devices, caller ids, CDRs and speech
+recognition, and nothing about storage access. So whitelisting this host is
+eight visits to the portal, one per S3 account, and no amount of API work
+shortens it. Do not go looking again.
+
+Confirmed working, which is what makes the rest diagnosable: after
+`145.239.102.215` was added to the ACL of `b7ac3a8c…` (`go4rex.pbx`) that
+connection alone reports `OK`, while the other seven report `ERROR`. One green
+row against seven red ones is the proof that the credentials are fine and the
+ACL is the only thing missing.
+
+**An unsigned `curl` of `https://recordings.commpeak.com/` is not the test the
+IP ACL section above implies.** With path-style addressing the bucket is in the
+path, so a request to `/` names no account and nginx has no ACL to consult --
+it returns its HTML 403 whether or not this host is whitelisted. To test one
+account, request its bucket: `curl -s -i
+https://recordings.commpeak.com/<bucket>/`. nginx HTML means blocked; S3 XML
+(`AccessDenied`) means the address is allowed and only the signature is
+missing.
+
+## The tunnel check, and inferring instead of proving
+
+`_check_tunnel` used to resolve the tunnel hostname and expect a CNAME to
+`<tunnel-id>.cfargotunnel.com`. **That record is never publicly visible.** A
+tunnel route is always proxied, so Cloudflare answers with its own anycast A
+records -- meaning the check returned "does not point into this tunnel"
+exactly when the tunnel was configured correctly, and it `return`ed on that
+verdict, so the end-to-end fetch that would have disproved it never ran. The
+page sent an operator to fix something that worked.
+
+What replaced it is the shape to copy: fetch `https://<hostname>/api/health`,
+require *our own* health JSON back (a stranger's 200 is not a pass), and prove
+the request travelled through *this* cloudflared by reading
+`cloudflared_tunnel_total_requests` from its local metrics before and after.
+A counter that does not move is reported as a note, not a failure -- the
+console demonstrably answers, and calling that an error would be the original
+mistake pointed the other way. `tests/test_tunnel_check.py` pins the
+proxied-hostname case and strips docstrings before asserting the DNS inference
+is gone, so the explanation above cannot be what satisfies the guard.

@@ -440,12 +440,21 @@ async def _check_tunnel(
     out: SectionTest,
     notes: list[str],
 ) -> None:
-    """The tunnel half: is it configured, is it connected, is it routed?
+    """Is the tunnel configured, connected, and actually carrying our traffic?
 
-    Three separate answers because they fail separately, and the most common
-    outcome by far is "connected but nothing routed to it" -- a connector
-    token authorises the daemon to join the tunnel and cannot create the DNS
-    record, so the hostname keeps pointing wherever it did before.
+    The last one is proved rather than inferred, and that distinction cost a
+    false alarm. An earlier version looked up the hostname's public DNS and
+    expected a CNAME to `<tunnel-id>.cfargotunnel.com`. That can never be
+    seen: a tunnel route is always *proxied*, so public DNS returns
+    Cloudflare's anycast A records and no CNAME at all. The check therefore
+    reported "does not point into this tunnel" for a hostname that was
+    serving perfectly -- and, worse, it returned early on that verdict, so the
+    end-to-end fetch that would have shown the truth never ran.
+
+    What is checked now: fetch the hostname, confirm the reply is *this*
+    process, and confirm the request went through *this* cloudflared by
+    watching its own request counter move. A hostname answered by some other
+    server cannot make that counter change.
     """
     enabled = await settings_service.get_bool(session, "tunnel.enabled", brand_id=brand_id)
     token = await settings_service.get_secret(session, "tunnel.token", brand_id=brand_id)
@@ -466,15 +475,15 @@ async def _check_tunnel(
     tunnel_id = _tunnel_id(token)
     out.add("tunnel token", True, f"tunnel {tunnel_id[:8]}…" if tunnel_id else "stored")
 
-    status = await _tunnel_status()
-    if status is None:
+    before = await _tunnel_status()
+    if before is None:
         out.ok = False
         out.add(
             "tunnel running", False, "no cloudflared on this server is answering",
             "Start it with: systemctl --user start c2w-tunnel",
         )
         return
-    ready = int(status.get("readyConnections") or 0)
+    ready = int(before.get("readyConnections") or 0)
     out.add(
         "tunnel connected", ready > 0,
         f"{ready} connection(s) to Cloudflare's edge",
@@ -488,39 +497,65 @@ async def _check_tunnel(
                 "Set it here and add the same hostname to the tunnel in Cloudflare")
         return
 
-    routed = await _hostname_routed(hostname, tunnel_id)
-    if routed is True:
-        out.add("public address", True, f"{hostname} points into this tunnel")
-    elif routed is False:
-        out.ok = False
-        out.add(
-            "public address", False, f"{hostname} does not point into this tunnel",
-            "A connector token cannot create the DNS record. In Cloudflare Zero "
-            "Trust open this tunnel, add a Public Hostname for it, and point it "
-            "at http://localhost:8000",
-        )
-        return
-    else:
-        out.add("public address", None, f"{hostname} could not be resolved from here")
-
-    # The only check that proves the whole path: out through Cloudflare and
-    # back into this process.
+    requests_before = await _tunnel_requests()
+    reached_us = False
+    detail = ""
     try:
-        async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             reply = await client.get(f"https://{hostname}/api/health")
-        reached = reply.status_code < 500
-        out.add(
-            "reachable from outside", reached, f"HTTP {reply.status_code}",
-            "" if reached else "Cloudflare answered but could not reach this server; "
-                               "check the tunnel's service address is http://localhost:8000",
-        )
-        if reached:
-            notes.append(f"The console is reachable at https://{hostname}.")
-        else:
-            out.ok = False
+        detail = f"HTTP {reply.status_code}"
+        if reply.status_code < 400:
+            with contextlib.suppress(Exception):
+                body = reply.json()
+                # Our own health endpoint, so a different server answering
+                # this hostname does not read as success.
+                reached_us = str(body.get("status")) == "ok" and "version" in body
+                if reached_us:
+                    detail = f"HTTP {reply.status_code}, version {body.get('version')}"
     except Exception as exc:
+        detail = str(exc)[:110]
+
+    out.add(
+        "answers on the public address", reached_us, detail,
+        "" if reached_us else
+        "Cloudflare could not reach this console. In Cloudflare Zero Trust open "
+        "this tunnel, add a Public Hostname for it, and point it at "
+        "http://localhost:8000",
+    )
+    if not reached_us:
         out.ok = False
-        out.add("reachable from outside", False, str(exc)[:120])
+        return
+
+    # Proof it came through *this* tunnel rather than some other route to the
+    # same name: cloudflared counts the requests it forwards.
+    requests_after = await _tunnel_requests()
+    if requests_before is not None and requests_after is not None:
+        moved = requests_after > requests_before
+        out.add(
+            "routed through this tunnel", moved or None,
+            "this cloudflared forwarded the request" if moved
+            else "the request did not pass through this cloudflared",
+            "" if moved else
+            "The hostname answers, but something other than this tunnel is "
+            "serving it -- worth knowing before you rely on it",
+        )
+    notes.append(f"The console is reachable at https://{hostname}.")
+
+
+async def _tunnel_requests() -> int | None:
+    """How many requests this cloudflared has forwarded, from its own metrics."""
+    async with httpx.AsyncClient(timeout=3) as client:
+        for port in _CLOUDFLARED_PORTS:
+            reply = None
+            with contextlib.suppress(Exception):
+                reply = await client.get(f"http://127.0.0.1:{port}/metrics")
+            if reply is None or reply.status_code >= 400:
+                continue
+            for line in reply.text.splitlines():
+                if line.startswith("cloudflared_tunnel_total_requests"):
+                    with contextlib.suppress(ValueError):
+                        return int(float(line.rsplit(" ", 1)[1]))
+    return None
 
 
 def _tunnel_id(token: str) -> str:
@@ -538,26 +573,3 @@ def _tunnel_id(token: str) -> str:
         body = json.loads(base64.b64decode(token + "=" * (-len(token) % 4)))
         return str(body.get("t") or "")
     return ""
-
-
-async def _hostname_routed(hostname: str, tunnel_id: str) -> bool | None:
-    """Whether the hostname is a CNAME into this tunnel.
-
-    True, False, or None when it cannot be resolved at all. Uses a public
-    resolver over HTTPS because the answer wanted is what the *internet* sees,
-    which a split-horizon resolver on the LAN may not give.
-    """
-    if not tunnel_id:
-        return None
-    try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            reply = await client.get(
-                "https://dns.google/resolve",
-                params={"name": hostname, "type": "CNAME"},
-            )
-        answers = (reply.json() or {}).get("Answer") or []
-    except Exception:
-        return None
-    if not answers:
-        return False
-    return any(f"{tunnel_id}.cfargotunnel.com" in str(a.get("data", "")) for a in answers)
