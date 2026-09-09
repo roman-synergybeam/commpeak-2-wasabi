@@ -1,0 +1,38 @@
+[Unit]
+Description=c2w API and web UI
+Documentation=file:/home/c2w/commpeak-2-wasabi/AGENTS.md
+After=c2w-postgres.service
+Requires=c2w-postgres.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/c2w/commpeak-2-wasabi
+
+# The only two values that cannot live in the database, because they are what a
+# process needs before it can read the database. Everything else is configured
+# in the app itself. There is deliberately no .env file.
+Environment=C2W_DATABASE_URL=postgresql+asyncpg://c2w@127.0.0.1:5432/c2w
+Environment=C2W_MASTER_KEY_FILE=/home/c2w/.config/c2w/master.key
+
+# Bound to every interface because there is no reverse proxy in front of it
+# yet. Once nginx terminates TLS, change this back to 127.0.0.1 and let nginx
+# do the listening -- serving the console unencrypted over the LAN means
+# passwords and recordings cross it in clear.
+ExecStart=/home/c2w/commpeak-2-wasabi/.venv/bin/uvicorn c2w.api.app:app \
+    --host 0.0.0.0 --port 8000 \
+    --proxy-headers --forwarded-allow-ips=127.0.0.1 \
+    --timeout-graceful-shutdown 30
+
+Restart=always
+RestartSec=5s
+TimeoutStopSec=45s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target

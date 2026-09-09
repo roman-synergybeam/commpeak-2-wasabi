@@ -193,6 +193,49 @@ names it explicitly.
 Back up `/etc/c2w/master.key` somewhere the database backup is not. Without
 it, every stored credential is unrecoverable.
 
+**Back up as a superuser, not as the `c2w` role.** Every brand-scoped table has
+`FORCE ROW LEVEL SECURITY`, which applies to the table's owner as well — so
+`pg_dump` running as `c2w` fails on `audit_events` and produces a *partial*
+dump. Use `postgres`, or a role with `BYPASSRLS`.
+
+### Running without root
+
+The production path above needs root. On a host where that is not available
+yet, the same thing runs entirely out of `$HOME` — this is what is deployed
+today:
+
+| | Path |
+|---|---|
+| PostgreSQL binaries | `/home/c2w/pgsql-venv` (`pgserver`, PostgreSQL 16.2) |
+| Data directory | `/home/c2w/pgdata`, listening on `127.0.0.1:5432` |
+| Socket, logs | `/home/c2w/pgrun`, `/home/c2w/pglog` |
+| Master key | `/home/c2w/.config/c2w/master.key` (0600) |
+| Services | `systemctl --user` units in `~/.config/systemd/user` |
+| Backups | `/home/c2w/backups` |
+
+```bash
+systemctl --user status c2w-postgres c2w-api
+systemctl --user restart c2w-api
+journalctl --user -u c2w-api -n 50
+```
+
+Three things this arrangement still needs, and none can be done without root:
+
+1. **`sudo loginctl enable-linger c2w`.** Without it, `systemctl --user`
+   services stop when the last session for the account ends, and do not start
+   at boot. This is the single command that makes the console survive a
+   reboot.
+2. **TLS.** The API currently binds `0.0.0.0:8000` directly because there is no
+   reverse proxy, so sign-ins and recordings cross the network in clear. Put
+   nginx (`deploy/nginx/`) in front, then change the unit back to
+   `--host 127.0.0.1`.
+3. **`pg_trgm`.** Searching for *part* of a phone number works but scans
+   instead of using an index. `apt-get install postgresql-contrib`, then
+   `CREATE EXTENSION pg_trgm;` and the two GIN indexes named in migration 0001.
+
+**Never put the data directory under `/tmp`.** It was there, and `/tmp` on this
+host is tmpfs — the entire database was in RAM and did not survive a reboot.
+
 ## Security
 
 - Brand isolation is enforced by PostgreSQL RLS with `FORCE`, not by application
