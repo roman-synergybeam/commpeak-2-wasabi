@@ -233,3 +233,56 @@ class TestSourceIsReadOnly:
             async for chunk in src.open_stream(key):
                 got.extend(chunk)
             assert bytes(got) == b"recording-bytes"
+
+
+class TestTheAclHintDoesNotPickAFavourite:
+    """The nginx 403 has two causes and the hint must offer both.
+
+    It used to read "this server's public IP is probably missing from this S3
+    account's Access Control List", and that was wrong in the field: the
+    address had been added to all eight lists, a different address on the same
+    list worked, and one account had completed a full authenticated listing an
+    hour earlier -- yet every account still got nginx's 403. Asserting the ACL
+    sent the operator back round the portal to re-check lists that were
+    already correct.
+
+    An address absent from the list and an address blocked after repeated
+    attempts produce a byte-for-byte identical response, so no wording that
+    commits to one of them can be right. These assertions are on that
+    property rather than on the exact prose.
+    """
+
+    @staticmethod
+    def _hint() -> str:
+        # Through TransferError rather than the private table, so this checks
+        # the text an operator is actually shown.
+        from c2w.storage.errors import ErrorClass, TransferError
+
+        return (TransferError(ErrorClass.ACL_ERROR, "Forbidden").hint or "").lower()
+
+    def test_it_names_both_causes(self) -> None:
+        hint = self._hint()
+        assert "access control list" in hint, "the ACL cause is missing"
+        assert "blocked" in hint, "the blocked-address cause is missing"
+
+    def test_it_does_not_hedge_towards_one_cause(self) -> None:
+        """"Probably" is how the wrong diagnosis got stated as the likely one."""
+        for weasel in ("probably", "most likely", "usually", "almost always"):
+            assert weasel not in self._hint(), weasel
+
+    def test_it_says_the_keys_are_not_implicated(self) -> None:
+        """The refusal is before S3, so a key or secret cannot be the cause."""
+        hint = self._hint()
+        assert "nginx" in hint
+        assert "signaturedoesnotmatch" in hint.replace(" ", "")
+
+    def test_it_points_at_the_one_place_that_can_settle_it(self) -> None:
+        assert "access summary" in self._hint()
+
+    def test_it_does_not_recommend_an_unsigned_curl(self) -> None:
+        """An unsigned request names no account, so it has no ACL to consult.
+
+        Recommending it produced a check that returns the same answer either
+        way, which is worse than no check.
+        """
+        assert "curl" not in self._hint()

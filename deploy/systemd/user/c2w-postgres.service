@@ -1,0 +1,25 @@
+[Unit]
+Description=PostgreSQL for c2w (userland cluster)
+Documentation=file:/home/c2w/commpeak-2-wasabi/README.md
+After=network.target
+
+[Service]
+# Type=exec, not notify: this PostgreSQL is not built with systemd support, so
+# it never sends a readiness notification and Type=notify simply times out.
+# Readiness is proved by pg_isready instead, which is what dependents need.
+Type=exec
+Environment=PGDATA=/home/c2w/pgdata
+# Loopback only, and the socket lives under $HOME so no privileged path is
+# needed. The data directory is on real storage rather than /tmp, which is
+# tmpfs here -- the previous cluster lived in RAM and did not survive a reboot.
+ExecStart=/home/c2w/pgsql-venv/lib/python3.12/site-packages/pgserver/pginstall/bin/postgres -D /home/c2w/pgdata
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 30); do /home/c2w/pgsql-venv/lib/python3.12/site-packages/pgserver/pginstall/bin/pg_isready -h /home/c2w/pgrun -p 5432 -q && exit 0; sleep 1; done; exit 1'
+ExecReload=/home/c2w/pgsql-venv/lib/python3.12/site-packages/pgserver/pginstall/bin/pg_ctl -D /home/c2w/pgdata reload
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=90s
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

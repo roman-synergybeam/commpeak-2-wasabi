@@ -1,0 +1,25 @@
+[Unit]
+Description=Cloudflare tunnel for the c2w console
+Documentation=file:/home/c2w/commpeak-2-wasabi/README.md
+After=c2w-api.service
+Wants=c2w-api.service
+
+[Service]
+Type=simple
+# The wrapper reads the token out of the database and passes it by
+# environment, so it never appears in this unit, in `systemctl show`, or in
+# the process list.
+ExecStart=/home/c2w/bin/c2w-tunnel
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target

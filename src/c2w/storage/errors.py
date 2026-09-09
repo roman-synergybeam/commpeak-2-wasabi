@@ -97,9 +97,11 @@ class TransferError(Exception):
     """A classified storage failure.
 
     ``hint`` carries operator-facing guidance -- for CommPeak the overwhelmingly
-    common cause of ``ACL_ERROR`` is the server's public IP missing from the
-    account's Access Control List, which is worth saying explicitly rather than
-    making someone rediscover it.
+    ``ACL_ERROR`` carries a hint that deliberately names *both* refusals
+    behind CommPeak's nginx 403 -- an address missing from the account's
+    Access Control List, and an address on the list that has been blocked
+    anyway -- because the response cannot tell them apart and the hint used to
+    assert the first.
     """
 
     def __init__(
@@ -132,29 +134,45 @@ class TransferError(Exception):
 
 
 _HINTS: Final[dict[ErrorClass, str]] = {
-    # Deliberately a way to *check*, not just a cause. The overwhelmingly
-    # common reason is the IP allow list, but asserting that and being wrong
-    # sends somebody round the portal for nothing -- so the hint names what
-    # this message does and does not prove. CommPeak's endpoint sits behind
-    # nginx, which answers a blocked address with its own HTML page rather
-    # than an S3 XML error.
+    # Two causes, one page, and this hint must not pick a favourite.
     #
-    # This hint used to recommend an unsigned `curl` of the recordings host as
-    # a credential-free way to see that difference. Measured against live
-    # accounts, it is not: nginx refuses an unsigned request with the same HTML
-    # 403 whether or not the address is on the list, for the root and for a
-    # specific bucket alike. The distinction only appears on a signed request,
-    # so the account probe is the only place it can be read.
+    # CommPeak's endpoint sits behind nginx, which answers a refused address
+    # with its own HTML page rather than an S3 XML error. That much is solid.
+    # What is *not* knowable from the response is which refusal it was: an
+    # address absent from the account's IP ACL and an address that has been
+    # blocked -- after repeated attempts, for instance -- produce a byte-for-
+    # byte identical 403.
+    #
+    # This hint said "probably missing from the Access Control List" and was
+    # wrong in the field. The address had been added to all eight lists, a
+    # different address on the same list worked, and one of these accounts had
+    # completed a full authenticated listing an hour earlier; every account
+    # still got nginx's 403. Naming the ACL first sent the operator back round
+    # the portal to re-check lists that were already correct. So the two causes
+    # are given in the order the evidence favours: if the address is on the
+    # list, believe that and look at being blocked instead.
+    #
+    # A previous version also recommended an unsigned `curl` as a
+    # credential-free way to tell them apart. Measured: it cannot. nginx
+    # refuses an unsigned request identically whether or not the address is
+    # listed -- and it must, because an unsigned request names no account, so
+    # there is no ACL to consult. Only a signed request carries the account,
+    # which makes this probe the only place the distinction can appear at all.
     ErrorClass.ACL_ERROR: (
-        "this server's public IP is probably missing from this S3 account's "
-        "Access Control List at CommPeak (Recordings Access Accounts -> IP ACL "
-        "tab, per instance, address with a /32 mask). This is nginx's own 403, "
-        "so the request was refused before the S3 layer saw it; an "
-        "\"Access Denied\" instead would mean the address is accepted and only "
-        "the keys or permissions are wrong. The account's Access Summary tab "
-        "logs the IP it saw for each refused attempt. Space repeated tests out "
-        "before concluding the list is wrong -- a burst of them can be "
-        "rate-limited into this same 403"
+        "CommPeak refused this before the S3 layer saw it -- this is nginx's "
+        "own 403, not an S3 error, so the keys are not the problem (a wrong "
+        "key gives \"SignatureDoesNotMatch\" and a permission problem gives "
+        "\"Access Denied\", both as S3 XML). Two different refusals look "
+        "exactly like this and the response cannot tell them apart. Either "
+        "this server's public IP is not on this S3 account's Access Control "
+        "List (Recordings Access Accounts -> IP ACL tab, per instance, "
+        "address with a /32 mask), or the address is on the list and has been "
+        "blocked anyway, which is what repeated attempts in quick succession "
+        "cause and it can persist for a long time. Check the list once: if "
+        "the address is there -- especially if a different address on the same "
+        "list works -- it is the second, so stop testing and give it time. "
+        "The account's Access Summary tab logs the IP, time and error for "
+        "every refused attempt and is the only place that says which it was"
     ),
     ErrorClass.AUTH_ERROR: "the S3 token/secret is wrong or has been rotated; re-enter it",
     ErrorClass.CONFIG_ERROR: (

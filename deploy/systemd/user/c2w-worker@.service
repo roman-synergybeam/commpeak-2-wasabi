@@ -1,0 +1,34 @@
+[Unit]
+Description=c2w transfer worker %i
+Documentation=file:/home/c2w/commpeak-2-wasabi/AGENTS.md
+After=c2w-postgres.service
+Requires=c2w-postgres.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/c2w/commpeak-2-wasabi
+
+# The deploy/systemd/ copies of these units were written for a root install
+# under /opt/c2w with /etc/c2w/master.key, so they could not run here at all:
+# User=/Group= are meaningless in a --user unit, ProtectHome=yes would hide the
+# checkout, and /etc/c2w/database.env does not exist. These mirror
+# c2w-api.service instead, which is the unit that actually works on this host.
+Environment=C2W_DATABASE_URL=postgresql+asyncpg://c2w@127.0.0.1:5432/c2w
+Environment=C2W_MASTER_KEY_FILE=/home/c2w/.config/c2w/master.key
+Environment=C2W_WORKER_ID=%i
+ExecStart=/home/c2w/commpeak-2-wasabi/.venv/bin/python -m c2w.workers.worker
+
+Restart=always
+RestartSec=10s
+KillSignal=SIGTERM
+TimeoutStopSec=120s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target
