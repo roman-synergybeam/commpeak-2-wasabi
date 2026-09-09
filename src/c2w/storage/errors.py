@@ -134,19 +134,27 @@ class TransferError(Exception):
 _HINTS: Final[dict[ErrorClass, str]] = {
     # Deliberately a way to *check*, not just a cause. The overwhelmingly
     # common reason is the IP allow list, but asserting that and being wrong
-    # sends somebody round the portal for nothing -- so the hint names the
-    # test that distinguishes it. CommPeak's endpoint sits behind nginx, which
-    # answers a blocked address with its own HTML page rather than an S3 XML
-    # error, and that difference is visible without any credential.
+    # sends somebody round the portal for nothing -- so the hint names what
+    # this message does and does not prove. CommPeak's endpoint sits behind
+    # nginx, which answers a blocked address with its own HTML page rather
+    # than an S3 XML error.
+    #
+    # This hint used to recommend an unsigned `curl` of the recordings host as
+    # a credential-free way to see that difference. Measured against live
+    # accounts, it is not: nginx refuses an unsigned request with the same HTML
+    # 403 whether or not the address is on the list, for the root and for a
+    # specific bucket alike. The distinction only appears on a signed request,
+    # so the account probe is the only place it can be read.
     ErrorClass.ACL_ERROR: (
         "this server's public IP is probably missing from this S3 account's "
         "Access Control List at CommPeak (Recordings Access Accounts -> IP ACL "
-        "tab, per instance, address with a /32 mask). To confirm rather than "
-        "guess, run `curl -i https://recordings.commpeak.com/` from this server "
-        "and from a machine that already works: an nginx HTML 403 means the "
-        "address is blocked before S3 sees it, whereas an S3 XML error means "
-        "the address is allowed and something else is wrong. The account's "
-        "Access Summary tab also logs the IP it saw for each refused attempt"
+        "tab, per instance, address with a /32 mask). This is nginx's own 403, "
+        "so the request was refused before the S3 layer saw it; an "
+        "\"Access Denied\" instead would mean the address is accepted and only "
+        "the keys or permissions are wrong. The account's Access Summary tab "
+        "logs the IP it saw for each refused attempt. Space repeated tests out "
+        "before concluding the list is wrong -- a burst of them can be "
+        "rate-limited into this same 403"
     ),
     ErrorClass.AUTH_ERROR: "the S3 token/secret is wrong or has been rotated; re-enter it",
     ErrorClass.CONFIG_ERROR: (

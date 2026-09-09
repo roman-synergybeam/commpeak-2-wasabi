@@ -586,20 +586,52 @@ recognition, and nothing about storage access. So whitelisting this host is
 eight visits to the portal, one per S3 account, and no amount of API work
 shortens it. Do not go looking again.
 
-Confirmed working, which is what makes the rest diagnosable: after
-`145.239.102.215` was added to the ACL of `b7ac3a8c…` (`go4rex.pbx`) that
-connection alone reports `OK`, while the other seven report `ERROR`. One green
-row against seven red ones is the proof that the credentials are fine and the
-ACL is the only thing missing.
+The ACL work does take effect, which is worth knowing before spending a day on
+the credentials instead: after `145.239.102.215` was added to the ACL of
+`b7ac3a8c…` (`go4rex.pbx`), that account probed `OK` -- a complete, signed,
+authenticated listing. The sealed tokens and secrets are therefore correct, and
+nothing about them needs revisiting. See the paragraph below on how that access
+then disappeared again.
 
-**An unsigned `curl` of `https://recordings.commpeak.com/` is not the test the
-IP ACL section above implies.** With path-style addressing the bucket is in the
-path, so a request to `/` names no account and nginx has no ACL to consult --
-it returns its HTML 403 whether or not this host is whitelisted. To test one
-account, request its bucket: `curl -s -i
-https://recordings.commpeak.com/<bucket>/`. nginx HTML means blocked; S3 XML
-(`AccessDenied`) means the address is allowed and only the signature is
-missing.
+**An unsigned `curl` does not test the IP ACL, in either form.** The IP ACL
+section above suggests `curl -i https://recordings.commpeak.com/` as the quick
+check, and `storage/errors.py` used to say so in its ACL hint. Measured: a request to `/`
+and a request to a specific bucket both return nginx's HTML 403 *regardless* of
+whether the address is on that account's list -- nginx refuses an unsigned
+request before any ACL decision is reached. The contrast the hint describes is
+real, but only on a **signed** request, which means the account probe on the
+page is the only way to see it. The hint in `storage/errors.py` was corrected
+to say so.
+
+**The discriminator, confirmed on live accounts.** Both shapes were observed
+within one minute of each other on 2026-09-09, which is what makes them
+trustworthy rather than assumed:
+
+| `status_detail` | Reached | Means |
+|---|---|---|
+| `Forbidden` (nginx HTML, no S3 code) | nginx only | address not accepted |
+| `Access Denied.` (S3 XML) | the S3 layer | address accepted, keys or permission wrong |
+
+So `Access Denied.` is *progress*, not a worse failure. It is the message that
+says the ACL work landed.
+
+**Access appeared and then went away again, from an unchanged address.** At
+19:51 local, `b7ac3a8c` (`go4rex.pbx`) probed `OK` outright and `b38e533f`
+(`go4rex.td`) got S3 XML `Access Denied.` -- both had reached S3. Within
+minutes, and on four probes spaced twenty seconds apart, every account returned
+nginx `Forbidden`, with this host's egress address still `145.239.102.215` on
+two independent checks. Two explanations fit and this end cannot separate them:
+the ACL entries were changed at CommPeak, or the roughly twenty probe clicks
+between 19:20 and 19:51 tripped a rate limit that answers with the same nginx
+403 as a block. **Do not read a single `Forbidden` as proof the ACL is
+unset** -- that is what the persisted `status` column implies and it is not
+sound. Space the probes out and re-check before concluding anything.
+
+**`status` on `commpeak_connections` is a record of the last probe, not a live
+reading.** `test_connection` writes it, so a row can say `OK` long after access
+has stopped working, which is exactly how the page came to show one green
+account that a probe seconds later refused. Treat it as a timestamped history
+and read `updated_at` beside it.
 
 ## The tunnel check, and inferring instead of proving
 
