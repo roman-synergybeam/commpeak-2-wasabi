@@ -23,6 +23,7 @@ Two rules the tests here follow:
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -294,46 +295,210 @@ async def _test_directory(
 async def _test_turnstile(
     session: AsyncSession, brand_id: int | None, actor: str
 ) -> SectionTest:
-    """Ask Cloudflare whether the Turnstile secret is one it recognises.
+    """Check the Turnstile keys and the state of the tunnel.
 
-    Verified with a deliberately invalid response token: a wrong secret comes
-    back `invalid-input-secret`, while a good secret comes back
-    `invalid-input-response` -- so the error distinguishes the two without
-    needing somebody to solve a challenge.
+    Both halves of the Cloudflare card, because both are things somebody
+    configures here and then wants to know whether they work. The tunnel half
+    used to say "nothing runs a tunnel yet", which stopped being true the day
+    the tunnel was built -- a stale reassurance is worse than no message,
+    because it stops you looking.
     """
     out = SectionTest(True, "")
+    notes: list[str] = []
+
     secret = await settings_service.get_secret(
         session, "turnstile.secret_key", brand_id=brand_id
     )
     site = await settings_service.get_str(session, "turnstile.site_key", brand_id=brand_id)
     if not secret:
-        return SectionTest(False, "No Turnstile secret key is set.")
-    out.add("site key", bool(site), site or "not set",
-            "" if site else "The public half, which the sign-in page needs")
+        out.add("turnstile", None, "no secret key set",
+                "The sign-in challenge is off until both keys are here")
+    else:
+        out.add("turnstile site key", bool(site), site or "not set",
+                "" if site else "The public half, which the sign-in page needs")
+        # Verified with a deliberately invalid response token: a wrong secret
+        # answers `invalid-input-secret`, a good one `invalid-input-response`,
+        # so the error tells them apart without anybody solving a challenge.
+        async with httpx.AsyncClient(timeout=10) as client:
+            reply = await client.post(
+                "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+                data={"secret": secret, "response": "c2w-settings-test"},
+            )
+        codes = (reply.json() or {}).get("error-codes") or []
+        if "invalid-input-secret" in codes:
+            out.ok = False
+            out.add("turnstile secret key", False, "Cloudflare does not recognise it",
+                    "Copy it again from the Turnstile widget's settings")
+        else:
+            out.add("turnstile secret key", True, "accepted by Cloudflare")
+            enforced = await settings_service.get_bool(
+                session, "turnstile.enabled", brand_id=brand_id
+            )
+            out.add(
+                "challenge enforced at sign-in", enforced or None,
+                "on" if enforced else "off",
+                "" if enforced else "The keys work; switch it on above to use them",
+            )
 
-    url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-    async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.post(
-            url, data={"secret": secret, "response": "c2w-settings-test"}
-        )
-    payload = response.json()
-    codes = payload.get("error-codes") or []
-    if "invalid-input-secret" in codes:
-        out.ok = False
-        out.summary = "Cloudflare does not recognise that secret key."
-        out.add("secret key", False, "invalid-input-secret",
-                "Copy it again from the Turnstile widget's settings")
-        return out
-    out.add("secret key", True, "accepted by Cloudflare")
-    out.summary = (
-        "Cloudflare accepted the secret key. It rejected the dummy challenge "
-        "response, which is exactly what should happen."
-    )
-
-    tunnel = await settings_service.get_secret(session, "tunnel.token", brand_id=brand_id)
-    if tunnel:
-        out.add(
-            "tunnel token", None, "stored, but nothing runs a tunnel yet",
-            "The token is kept for when the tunnel is built; it does nothing today",
+    await _check_tunnel(session, brand_id, out, notes)
+    if not out.summary:
+        out.summary = " ".join(notes) or (
+            "Cloudflare settings check complete." if out.ok
+            else "Something on this card is not working; see below."
         )
     return out
+
+
+#: cloudflared serves its own status on the first free port in this range when
+#: none is given. Probed rather than assumed, because the port shifts if
+#: something else already holds one.
+_CLOUDFLARED_PORTS = (20241, 20242, 20243, 20244, 20245)
+
+
+async def _tunnel_status() -> dict[str, Any] | None:
+    """What the local cloudflared says about itself, or None if none is running.
+
+    Asked of the daemon rather than of systemd: a unit can be `active` while
+    the tunnel has no connections, and "four connections to Cloudflare's edge"
+    is the fact worth reporting.
+    """
+    async with httpx.AsyncClient(timeout=3) as client:
+        for port in _CLOUDFLARED_PORTS:
+            # Nothing listening is the normal case for four of the five, so
+            # the miss is suppressed rather than logged five times a click.
+            reply = None
+            with contextlib.suppress(Exception):
+                reply = await client.get(f"http://127.0.0.1:{port}/ready")
+            if reply is not None and reply.status_code < 500:
+                with contextlib.suppress(Exception):
+                    return dict(reply.json())
+    return None
+
+
+async def _check_tunnel(
+    session: AsyncSession,
+    brand_id: int | None,
+    out: SectionTest,
+    notes: list[str],
+) -> None:
+    """The tunnel half: is it configured, is it connected, is it routed?
+
+    Three separate answers because they fail separately, and the most common
+    outcome by far is "connected but nothing routed to it" -- a connector
+    token authorises the daemon to join the tunnel and cannot create the DNS
+    record, so the hostname keeps pointing wherever it did before.
+    """
+    enabled = await settings_service.get_bool(session, "tunnel.enabled", brand_id=brand_id)
+    token = await settings_service.get_secret(session, "tunnel.token", brand_id=brand_id)
+    hostname = (
+        await settings_service.get_str(session, "tunnel.hostname", brand_id=brand_id) or ""
+    ).strip()
+
+    if not enabled and not token:
+        out.add("tunnel", None, "not configured",
+                "Only needed to reach this console from outside your network")
+        return
+    if not token:
+        out.ok = False
+        out.add("tunnel token", False, "not set",
+                "Create a tunnel in Cloudflare Zero Trust and paste its connector token")
+        return
+
+    tunnel_id = _tunnel_id(token)
+    out.add("tunnel token", True, f"tunnel {tunnel_id[:8]}…" if tunnel_id else "stored")
+
+    status = await _tunnel_status()
+    if status is None:
+        out.ok = False
+        out.add(
+            "tunnel running", False, "no cloudflared on this server is answering",
+            "Start it with: systemctl --user start c2w-tunnel",
+        )
+        return
+    ready = int(status.get("readyConnections") or 0)
+    out.add(
+        "tunnel connected", ready > 0,
+        f"{ready} connection(s) to Cloudflare's edge",
+        "" if ready else "The daemon is running but has not registered; check its log",
+    )
+    if not ready:
+        out.ok = False
+
+    if not hostname:
+        out.add("public address", None, "not set",
+                "Set it here and add the same hostname to the tunnel in Cloudflare")
+        return
+
+    routed = await _hostname_routed(hostname, tunnel_id)
+    if routed is True:
+        out.add("public address", True, f"{hostname} points into this tunnel")
+    elif routed is False:
+        out.ok = False
+        out.add(
+            "public address", False, f"{hostname} does not point into this tunnel",
+            "A connector token cannot create the DNS record. In Cloudflare Zero "
+            "Trust open this tunnel, add a Public Hostname for it, and point it "
+            "at http://localhost:8000",
+        )
+        return
+    else:
+        out.add("public address", None, f"{hostname} could not be resolved from here")
+
+    # The only check that proves the whole path: out through Cloudflare and
+    # back into this process.
+    try:
+        async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+            reply = await client.get(f"https://{hostname}/api/health")
+        reached = reply.status_code < 500
+        out.add(
+            "reachable from outside", reached, f"HTTP {reply.status_code}",
+            "" if reached else "Cloudflare answered but could not reach this server; "
+                               "check the tunnel's service address is http://localhost:8000",
+        )
+        if reached:
+            notes.append(f"The console is reachable at https://{hostname}.")
+        else:
+            out.ok = False
+    except Exception as exc:
+        out.ok = False
+        out.add("reachable from outside", False, str(exc)[:120])
+
+
+def _tunnel_id(token: str) -> str:
+    """The tunnel id a connector token carries.
+
+    Decoded locally so the check can say *which* tunnel is configured, and so
+    the DNS comparison below has something to compare against. The token is
+    base64 JSON; a token that will not decode is worth saying early rather
+    than after starting a daemon that can only fail.
+    """
+    import base64
+    import json
+
+    with contextlib.suppress(Exception):
+        body = json.loads(base64.b64decode(token + "=" * (-len(token) % 4)))
+        return str(body.get("t") or "")
+    return ""
+
+
+async def _hostname_routed(hostname: str, tunnel_id: str) -> bool | None:
+    """Whether the hostname is a CNAME into this tunnel.
+
+    True, False, or None when it cannot be resolved at all. Uses a public
+    resolver over HTTPS because the answer wanted is what the *internet* sees,
+    which a split-horizon resolver on the LAN may not give.
+    """
+    if not tunnel_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            reply = await client.get(
+                "https://dns.google/resolve",
+                params={"name": hostname, "type": "CNAME"},
+            )
+        answers = (reply.json() or {}).get("Answer") or []
+    except Exception:
+        return None
+    if not answers:
+        return False
+    return any(f"{tunnel_id}.cfargotunnel.com" in str(a.get("data", "")) for a in answers)

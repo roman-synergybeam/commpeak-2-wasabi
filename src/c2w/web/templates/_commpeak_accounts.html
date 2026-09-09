@@ -133,9 +133,20 @@
                 </form>
                 <form method="post" action="/admin/connections"
                       onsubmit="return confirm('Stop using {{ c.name }}? Its recordings and their archive copies are kept.')">
-                  <input type="hidden" name="action" value="remove">
+                  <input type="hidden" name="action" value="stop">
                   <input type="hidden" name="connection_id" value="{{ c.id }}">
-                  <button type="submit" class="danger small">Remove</button>
+                  <button type="submit" class="danger small">Stop using</button>
+                </form>
+                {# Stop is the safe action and stays first. Delete only works
+                   when nothing points at this account -- the server counts the
+                   calls and recordings and refuses with the numbers, because
+                   removing what they came from would orphan them. #}
+                <form method="post" action="/admin/connections"
+                      onsubmit="return confirm('Delete {{ c.name }} completely? This cannot be undone. Nothing on the CommPeak side is touched.')">
+                  {% if return_to %}<input type="hidden" name="return_to" value="{{ return_to }}">{% endif %}
+                  <input type="hidden" name="action" value="delete">
+                  <input type="hidden" name="connection_id" value="{{ c.id }}">
+                  <button type="submit" class="danger small">Delete</button>
                 </form>
               </div>
             </details>

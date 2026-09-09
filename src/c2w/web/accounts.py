@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from c2w.crypto import CryptoError, generate_data_key, seal
@@ -456,6 +456,105 @@ async def delete_destination(
     dest.status_detail = f"stopped by {actor}"
     await session.flush()
     log.info("accounts.destination_disabled", destination_id=destination_id, actor=actor)
+    return name
+
+
+async def purge_destination(
+    session: AsyncSession, brand_id: int, destination_id: int, *, actor: str
+) -> str:
+    """Delete a bucket's registration outright.
+
+    "Stop using" is the safe action and stays the default, because a recording
+    that has been verified into a bucket points at this row -- delete it and
+    that recording has nowhere to be played from. But a bucket added by mistake
+    has nothing pointing at it, and refusing to remove *that* is just a page
+    that will not tidy up after itself.
+
+    So: counted first, and refused with the count when anything depends on it.
+    Nothing is touched in the bucket itself either way.
+    """
+    dest = (
+        await session.execute(
+            select(StorageDestination).where(
+                StorageDestination.id == destination_id,
+                StorageDestination.brand_id == brand_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if dest is None:
+        raise AccountError("that storage no longer exists")
+
+    depends = (
+        await session.execute(
+            text(
+                "SELECT count(*) FROM recordings "
+                "WHERE brand_id = :b AND destination_id = :d"
+            ),
+            {"b": brand_id, "d": destination_id},
+        )
+    ).scalar_one()
+    if depends:
+        raise AccountError(
+            f"{depends:,} recording(s) are archived in {dest.name} and point at it; "
+            "removing it would leave them with nowhere to play from. Use "
+            "\u201cstop using\u201d instead, which keeps them playable and sends no "
+            "new copies there"
+        )
+
+    name = dest.name
+    await session.execute(
+        delete(StorageDestination).where(StorageDestination.id == destination_id)
+    )
+    await session.flush()
+    log.info("accounts.destination_removed", destination_id=destination_id, actor=actor)
+    return name
+
+
+async def purge_connection(
+    session: AsyncSession, brand_id: int, connection_id: int, *, actor: str
+) -> str:
+    """Delete a CommPeak account's registration outright.
+
+    Same rule as a bucket, for the same reason: recordings and call records
+    carry this connection's id, and they describe calls that really happened.
+    An account registered by mistake has nothing pointing at it and can go.
+    """
+    conn = (
+        await session.execute(
+            select(CommPeakConnection).where(
+                CommPeakConnection.id == connection_id,
+                CommPeakConnection.brand_id == brand_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if conn is None:
+        raise AccountError("that CommPeak account no longer exists")
+
+    counts = (
+        await session.execute(
+            text(
+                "SELECT (SELECT count(*) FROM recordings "
+                "         WHERE brand_id = :b AND connection_id = :c) AS recordings, "
+                "       (SELECT count(*) FROM cdrs "
+                "         WHERE brand_id = :b AND connection_id = :c) AS calls"
+            ),
+            {"b": brand_id, "c": connection_id},
+        )
+    ).mappings().one()
+    if counts["recordings"] or counts["calls"]:
+        raise AccountError(
+            f"{counts['recordings']:,} recording(s) and {counts['calls']:,} call "
+            f"record(s) came from {conn.name} and point at it. Use "
+            "\u201cstop using\u201d instead, which leaves them intact and stops "
+            "reading anything new"
+        )
+
+    name = conn.name
+    await session.execute(
+        delete(CommPeakConnection).where(CommPeakConnection.id == connection_id)
+    )
+    await session.flush()
+    log.info("accounts.connection_removed", connection_id=connection_id, actor=actor)
     return name
 
 

@@ -89,6 +89,8 @@ from c2w.web.accounts import (
     add_destination,
     delete_connection,
     delete_destination,
+    purge_connection,
+    purge_destination,
     test_connection,
     test_destination,
     update_connection,
@@ -1174,12 +1176,19 @@ async def admin_connections_save(
             target = _account_target(
                 form, "/admin/connections", tested=connection_id
             )
-        elif action == "remove":
+        elif action == "stop":
             name = await delete_connection(
                 session, brand_id, int(form["connection_id"]), actor=user.email
             )
             target = _account_target(
-                form, "/admin/connections", saved=f"{name} removed"
+                form, "/admin/connections", saved=f"{name} stopped"
+            )
+        elif action == "delete":
+            name = await purge_connection(
+                session, brand_id, int(form["connection_id"]), actor=user.email
+            )
+            target = _account_target(
+                form, "/admin/connections", saved=f"{name} deleted"
             )
         else:
             target = "/admin/connections"
@@ -1248,12 +1257,19 @@ async def admin_storage_save(
             outcome = await test_destination(session, brand_id, destination_id)
             _PROBE_RESULTS[("destination", destination_id)] = outcome
             target = _account_target(form, "/admin/storage", tested=destination_id)
-        elif action == "remove":
+        elif action == "stop":
             name = await delete_destination(
                 session, brand_id, int(form["destination_id"]), actor=user.email
             )
             target = _account_target(
                 form, "/admin/storage", saved=f"{name} stopped"
+            )
+        elif action == "delete":
+            name = await purge_destination(
+                session, brand_id, int(form["destination_id"]), actor=user.email
+            )
+            target = _account_target(
+                form, "/admin/storage", saved=f"{name} deleted"
             )
         else:
             target = "/admin/storage"

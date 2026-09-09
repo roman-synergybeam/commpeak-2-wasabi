@@ -109,9 +109,20 @@
                 </form>
                 <form method="post" action="/admin/storage"
                       onsubmit="return confirm('Stop copying to {{ d.name }}? The bucket and everything in it are left untouched.')">
-                  <input type="hidden" name="action" value="remove">
+                  <input type="hidden" name="action" value="stop">
                   <input type="hidden" name="destination_id" value="{{ d.id }}">
                   <button type="submit" class="danger small">Stop using</button>
+                </form>
+                {# Stop is the safe action and stays first. Delete only works
+                   when nothing points at this bucket -- the server counts and
+                   refuses with the number, because removing something a
+                   recording depends on would leave it nowhere to play from. #}
+                <form method="post" action="/admin/storage"
+                      onsubmit="return confirm('Delete {{ d.name }} completely? This cannot be undone. The bucket and everything in it are left untouched.')">
+                  {% if return_to %}<input type="hidden" name="return_to" value="{{ return_to }}">{% endif %}
+                  <input type="hidden" name="action" value="delete">
+                  <input type="hidden" name="destination_id" value="{{ d.id }}">
+                  <button type="submit" class="danger small">Delete</button>
                 </form>
               </div>
             </details>
