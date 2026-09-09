@@ -13,11 +13,11 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
-from cprec.config import get_bootstrap
-from cprec.db.base import Base
-from cprec.db.models import auth as _auth  # noqa: F401 - registers the models
-from cprec.db.models import core as _core  # noqa: F401
-from cprec.db.models import settings as _settings  # noqa: F401
+from c2w.config import get_bootstrap
+from c2w.db.base import Base
+from c2w.db.models import auth as _auth  # noqa: F401 - registers the models
+from c2w.db.models import core as _core  # noqa: F401
+from c2w.db.models import settings as _settings  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:

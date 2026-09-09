@@ -729,7 +729,7 @@ wheels = [
 ]
 
 [[package]]
-name = "cprec"
+name = "c2w"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

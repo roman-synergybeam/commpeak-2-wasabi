@@ -18,26 +18,26 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from cprec.auth.local import create_super_admin, hash_password
-from cprec.db.models.auth import AuthSource, Role, User
+from c2w.auth.local import create_super_admin, hash_password
+from c2w.db.models.auth import AuthSource, Role, User
 
-TEST_DB = os.environ.get("CPREC_TEST_DATABASE_URL")
+TEST_DB = os.environ.get("C2W_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
-    not TEST_DB, reason="set CPREC_TEST_DATABASE_URL to a migrated scratch database"
+    not TEST_DB, reason="set C2W_TEST_DATABASE_URL to a migrated scratch database"
 )
 
 
 @pytest.fixture
 async def app_client(monkeypatch):
     """The real app, wired to the scratch database."""
-    monkeypatch.setenv("CPREC_DATABASE_URL", TEST_DB)
-    import cprec.config
-    import cprec.db.session as session_mod
+    monkeypatch.setenv("C2W_DATABASE_URL", TEST_DB)
+    import c2w.config
+    import c2w.db.session as session_mod
 
-    cprec.config.get_bootstrap.cache_clear()
+    c2w.config.get_bootstrap.cache_clear()
     await session_mod.dispose_engine()
 
-    from cprec.api.app import create_app
+    from c2w.api.app import create_app
 
     app = create_app()
     transport = ASGITransport(app=app)
@@ -75,7 +75,7 @@ async def scenario(db):
         await s.commit()
 
         await s.execute(
-            text("SELECT set_config('cprec.brand_id', :b, false)"), {"b": str(brand_id)}
+            text("SELECT set_config('c2w.brand_id', :b, false)"), {"b": str(brand_id)}
         )
         tenant_id = (
             await s.execute(
@@ -169,7 +169,7 @@ async def _login(
         # A super admin is not scoped to a brand, so they land on the first one
         # and switch from the sidebar. Tests pick the brand explicitly, the same
         # way a real super admin would.
-        client.cookies.set("cprec_brand", str(brand_id))
+        client.cookies.set("c2w_brand", str(brand_id))
     return response
 
 
@@ -228,14 +228,14 @@ class TestCallsUi:
         assert "441632960770" in response.text
         assert f'/calls/{scenario["cdr_id"]}' in response.text
 
-    async def test_media_badge_renders_as_html_not_escaped(self, app_client, scenario):
+    async def test_media_pill_renders_as_html_not_escaped(self, app_client, scenario):
         """A filter returning HTML must return Markup, or the table shows tags."""
         await _login(
             app_client, scenario["admin_email"], scenario["password"],
             brand_id=scenario["brand_id"],
         )
         response = await app_client.get("/calls")
-        assert '<span class="badge ok">playable</span>' in response.text
+        assert '<span class="pill ok">playable</span>' in response.text
         assert "&lt;span" not in response.text
 
     async def test_number_search_filters(self, app_client, scenario):
@@ -275,7 +275,11 @@ class TestCallsUi:
         )
         response = await app_client.get(f"/calls/{scenario['cdr_id']}")
         assert response.status_code == 200
-        assert "epoch_exact" in response.text
+        # The correlation tier is shown as a human label, not as the stored
+        # machine value: the database says epoch_exact, the operator reads
+        # "matched exactly".
+        assert "matched exactly" in response.text
+        assert "epoch_exact" not in response.text
         assert f"/api/v1/recordings/{scenario['recording_id']}/stream" in response.text
 
     async def test_csv_export(self, app_client, scenario):
@@ -323,7 +327,7 @@ class TestPermissions:
 
     async def test_settings_page_never_renders_a_secret(self, app_client, scenario, db):
         """The page shows whether a token is configured, never its value."""
-        from cprec.settings import settings_service
+        from c2w.settings import settings_service
 
         async with db() as s:
             await settings_service.set(s, "alerts.telegram_bot_token", "123:super-secret-value")
@@ -368,7 +372,7 @@ class TestBrandIsolationOverHttp:
             await s.commit()
 
         await _login(app_client, scenario["agent_email"], scenario["password"])
-        app_client.cookies.set("cprec_brand", str(other))
+        app_client.cookies.set("c2w_brand", str(other))
         response = await app_client.get("/calls")
         assert response.status_code == 200
         # Still their own brand's data, because the cookie is ignored for

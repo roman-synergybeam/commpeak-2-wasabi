@@ -18,8 +18,8 @@ MASTER_KEY_FOR_TESTS = "8Z0aVQ4jJm1r-9xKpQ2sTuVwXyZaBcDeFgHiJkLmNoP="
 def _test_env() -> None:
     import os
 
-    os.environ.setdefault("CPREC_MASTER_KEY", MASTER_KEY_FOR_TESTS)
-    os.environ.setdefault("CPREC_ENVIRONMENT", "dev")
+    os.environ.setdefault("C2W_MASTER_KEY", MASTER_KEY_FOR_TESTS)
+    os.environ.setdefault("C2W_ENVIRONMENT", "dev")
 
 
 def _free_port() -> int:
@@ -45,7 +45,7 @@ def moto_endpoint() -> str:
 @pytest.fixture
 def s3_creds(moto_endpoint: str):
     """Credentials factory pointing at the moto server."""
-    from cprec.storage.base import S3Credentials
+    from c2w.storage.base import S3Credentials
 
     def make(bucket: str) -> S3Credentials:
         return S3Credentials(
@@ -65,7 +65,7 @@ async def bucket(s3_creds):
     """Create a uniquely named bucket and return its credentials."""
     import uuid
 
-    from cprec.storage.s3_adapter import S3Client
+    from c2w.storage.s3_adapter import S3Client
 
     name = f"test-{uuid.uuid4().hex[:12]}"
     creds = s3_creds(name)

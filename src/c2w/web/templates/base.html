@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}c2w{% endblock %}</title>
+  {# Applied before the stylesheet so a dark-mode viewer never sees a white
+     flash on navigation. Wrapped because storage access throws outright in
+     some contexts (private windows, blocked site data). #}
+  <script>
+    try {
+      var t = localStorage.getItem("c2w-theme");
+      if (t) document.documentElement.dataset.theme = t;
+    } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/vendor/htmx.min.js" defer></script>
+  <script src="/static/vendor/alpine.min.js" defer></script>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    CommPeak &rarr; Wasabi
+    <span>call recording archive</span>
+  </div>
+
+  {# The underline means "you are here" at every level, so the same idiom is
+     used again in .subnav one level down. #}
+  <nav class="top">
+    <a href="/" class="{{ 'on' if nav == 'dashboard' }}">Dashboard</a>
+    <a href="/calls" class="{{ 'on' if nav == 'calls' }}">Calls</a>
+    <a href="/sync" class="{{ 'on' if nav == 'sync' }}">Sync</a>
+    {% if 'storage.view' in permissions %}
+      <a href="/admin/connections" class="{{ 'on' if nav == 'connections' }}">CommPeak</a>
+      <a href="/admin/storage" class="{{ 'on' if nav == 'storage' }}">Archive</a>
+    {% endif %}
+    {% if 'settings.view' in permissions %}
+      <a href="/admin/settings" class="{{ 'on' if nav == 'settings' }}">Settings</a>
+    {% endif %}
+    {% if 'users.manage' in permissions %}
+      <a href="/admin/users" class="{{ 'on' if nav == 'users' }}">Users</a>
+    {% endif %}
+    {% if 'audit.view' in permissions %}
+      <a href="/audit" class="{{ 'on' if nav == 'audit' }}">Audit</a>
+    {% endif %}
+  </nav>
+
+  <div class="who">
+    {% if brands|length > 1 %}
+      <form method="post" action="/switch-brand">
+        <select name="brand_id" onchange="this.form.submit()"
+                aria-label="Organisation">
+          {% for b in brands %}
+            <option value="{{ b.id }}" {{ 'selected' if active_brand and b.id == active_brand.id }}>
+              {{ b.name }}
+            </option>
+          {% endfor %}
+        </select>
+      </form>
+    {% elif active_brand %}
+      <span class="whoami">{{ active_brand.name }}</span>
+    {% endif %}
+    <span class="whoami">{{ user.display_name or user.email }}</span>
+    <button type="button" class="ghost small" title="Switch between light and dark"
+            onclick="c2wToggleTheme()">&#9680;</button>
+    <a class="btn ghost small" href="/logout">Sign out</a>
+  </div>
+</header>
+
+<main class="{% block frame %}{% endblock %}">
+  {% block body %}{% endblock %}
+</main>
+
+<script>
+  // Three states, matching how the stylesheet is written: no stored value
+  // follows the OS, and an explicit choice pins light or dark.
+  function c2wToggleTheme() {
+    var root = document.documentElement;
+    var dark = root.dataset.theme
+      ? root.dataset.theme === "dark"
+      : window.matchMedia("(prefers-color-scheme: dark)").matches;
+    var next = dark ? "light" : "dark";
+    root.dataset.theme = next;
+    try { localStorage.setItem("c2w-theme", next); } catch (e) {}
+  }
+</script>
+</body>
+</html>

@@ -543,15 +543,15 @@ def upgrade() -> None:
     op.create_index("ix_audit_events_recording", "audit_events", ["brand_id", "recording_id"])
 
     # ---- roles + RLS -----------------------------------------------------
-    # cprec_platform is the cross-brand role used by workers, the scheduler and
+    # c2w_platform is the cross-brand role used by workers, the scheduler and
     # the reconciler. It is a role rather than an in-SQL escape hatch so the
     # privilege is visible in pg_roles and shows up in an audit.
     op.execute(
         """
         DO $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cprec_platform') THEN
-                CREATE ROLE cprec_platform;
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'c2w_platform') THEN
+                CREATE ROLE c2w_platform;
             END IF;
         END $$
         """
@@ -575,14 +575,14 @@ def upgrade() -> None:
             f"""
             CREATE POLICY {table}_brand_isolation ON {table}
                 USING (
-                    brand_id = NULLIF(current_setting('cprec.brand_id', true), '')::bigint
+                    brand_id = NULLIF(current_setting('c2w.brand_id', true), '')::bigint
                 )
                 WITH CHECK (
-                    brand_id = NULLIF(current_setting('cprec.brand_id', true), '')::bigint
+                    brand_id = NULLIF(current_setting('c2w.brand_id', true), '')::bigint
                 )
             """
         )
-        op.execute(f"CREATE POLICY {table}_platform ON {table} TO cprec_platform USING (true)")
+        op.execute(f"CREATE POLICY {table}_platform ON {table} TO c2w_platform USING (true)")
 
     # audit_events is append-only: an audit trail you can edit is not one.
     op.execute("REVOKE UPDATE, DELETE ON audit_events FROM PUBLIC")

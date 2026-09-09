@@ -1,0 +1,65 @@
+[Unit]
+Description=c2w transfer worker %i
+Documentation=file:/opt/c2w/AGENTS.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+PartOf=c2w.target
+
+[Service]
+Type=simple
+User=c2w
+Group=c2w
+WorkingDirectory=/opt/c2w
+
+# Only two values can live outside the database, because they are what a process
+# needs in order to reach it and to make sense of what it finds there. Everything
+# else is configured in the app itself (Settings page, or c2w-admin settings).
+# There is deliberately no .env file: configuration that lives in two places
+# eventually disagrees with itself.
+Environment=C2W_DATABASE_URL=postgresql+asyncpg://c2w@127.0.0.1:5432/c2w
+Environment=C2W_PLATFORM_DATABASE_URL=postgresql+asyncpg://c2w_platform@127.0.0.1:5432/c2w
+
+# The master key unseals every stored credential. Delivered as a systemd
+# credential so it never appears in this unit file, in `systemctl show`, or in
+# the environment of a child process.
+LoadCredential=master_key:/etc/c2w/master.key
+Environment=C2W_MASTER_KEY_FILE=%d/master_key
+
+# The database password is the one value that must reach the process as text;
+# it lives in a 0600 root-owned file rather than in this unit.
+EnvironmentFile=/etc/c2w/database.env
+Environment=C2W_WORKER_ID=%i
+
+# Workers connect as the BYPASSRLS platform role: transfers legitimately span
+# brands. That privilege lives in a named role so it is visible in pg_roles.
+ExecStart=/opt/c2w/.venv/bin/python -m c2w.workers.worker
+
+Restart=always
+RestartSec=10s
+# A worker killed mid-transfer must be allowed to abort its multipart upload,
+# or the abandoned parts keep accruing storage cost at the destination.
+KillSignal=SIGTERM
+TimeoutStopSec=120s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+StateDirectory=c2w
+LogsDirectory=c2w
+ReadWritePaths=/var/lib/c2w
+
+[Install]
+WantedBy=multi-user.target

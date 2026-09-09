@@ -7,9 +7,9 @@ import os
 
 import pytest
 
-from cprec.storage.base import ObjectRef
-from cprec.storage.errors import ErrorClass, TransferError
-from cprec.storage.s3_adapter import RateLimiter, S3Client
+from c2w.storage.base import ObjectRef
+from c2w.storage.errors import ErrorClass, TransferError
+from c2w.storage.s3_adapter import RateLimiter, S3Client
 
 
 async def _seed(creds, key: str, data: bytes) -> None:
@@ -200,7 +200,7 @@ class TestSourceIsReadOnly:
     """
 
     async def test_delete_is_refused(self, bucket):
-        from cprec.storage.commpeak import CommPeakSource, SourceIsReadOnly
+        from c2w.storage.commpeak import CommPeakSource, SourceIsReadOnly
 
         await _seed(bucket, "2026/09/08/00/out-1-101-20260908-000000-1757292737.0.flac", b"audio")
         async with CommPeakSource(bucket) as src:
@@ -212,7 +212,7 @@ class TestSourceIsReadOnly:
             assert meta.size == 5
 
     async def test_writes_are_refused(self, bucket):
-        from cprec.storage.commpeak import CommPeakSource, SourceIsReadOnly
+        from c2w.storage.commpeak import CommPeakSource, SourceIsReadOnly
 
         async with CommPeakSource(bucket) as src:
             with pytest.raises(SourceIsReadOnly):
@@ -222,7 +222,7 @@ class TestSourceIsReadOnly:
 
     async def test_reads_still_work(self, bucket):
         """Read-only must not mean crippled -- listing and streaming are the job."""
-        from cprec.storage.commpeak import CommPeakSource
+        from c2w.storage.commpeak import CommPeakSource
 
         key = "2026/09/08/01/in-441632960770-101-20260908-010000-1757296337.0.flac"
         await _seed(bucket, key, b"recording-bytes")

@@ -1,5 +1,5 @@
 [project]
-name = "cprec"
+name = "c2w"
 version = "0.1.0"
 description = "CommPeak -> Wasabi call-recording offload and CDR platform"
 requires-python = ">=3.12"
@@ -37,18 +37,18 @@ dev = [
 ]
 
 [project.scripts]
-cprec-api = "cprec.workers.api_entry:main"
-cprec-worker = "cprec.workers.worker:main"
-cprec-scheduler = "cprec.workers.scheduler:main"
-cprec-reconciler = "cprec.workers.reconciler:main"
-cprec-admin = "cprec.cli:main"
+c2w-api = "c2w.workers.api_entry:main"
+c2w-worker = "c2w.workers.worker:main"
+c2w-scheduler = "c2w.workers.scheduler:main"
+c2w-reconciler = "c2w.workers.reconciler:main"
+c2w-admin = "c2w.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cprec"]
+packages = ["src/c2w"]
 
 [tool.ruff]
 line-length = 100

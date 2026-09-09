@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Sync status — c2w{% endblock %}
+{% block body %}
+
+<h1>Sync status</h1>
+<p class="sub">What is queued, running and failing. <span class="spin">refreshing…</span></p>
+
+{# Polling rather than pushing: the figures move steadily during a backfill,
+   and a socket would add a moving part for no real gain. #}
+<div hx-get="/sync/panel" hx-trigger="load, every 10s" hx-indicator=".spin">
+  {% include "_sync_panel.html" %}
+</div>
+{% endblock %}

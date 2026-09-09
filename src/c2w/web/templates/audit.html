@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Audit log — c2w{% endblock %}
+{% block body %}
+
+<h1>Audit log</h1>
+<p class="sub">Who listened to what, and when. Append-only &mdash; entries cannot be edited or removed.</p>
+
+<form class="card" method="get" action="/audit">
+  <div class="row">
+    <div>
+      <label for="action">Action</label>
+      <select id="action" name="action">
+        <option value="">Any</option>
+        {% for a in actions %}
+          <option value="{{ a }}" {{ 'selected' if selected_action == a }}>{{ a | lower }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="actor">Person</label>
+      <input id="actor" name="actor" type="search" value="{{ selected_actor or '' }}"
+             placeholder="email">
+    </div>
+  </div>
+  <div class="actions">
+    <button type="submit">Filter</button>
+    <a class="btn ghost" href="/audit">Reset</a>
+  </div>
+</form>
+
+<div class="tw stack logwrap">
+  <table class="log">
+    <thead>
+      <tr><th>When</th><th>Person</th><th>Address</th><th>Action</th><th>Result</th>
+          <th>Recording</th><th>Call</th></tr>
+    </thead>
+    <tbody>
+    {% for e in events %}
+      <tr class="{{ 'lvl-warn' if e.result != 'SUCCESS' }}">
+        <td class="nowrap mono" data-label="When">{{ e.at | dt }}</td>
+        <td data-label="Person">{{ e.actor_label or '—' }}</td>
+        <td class="mono" data-label="Address">{{ e.ip or '—' }}</td>
+        <td data-label="Action">{{ e.action | lower }}</td>
+        <td data-label="Result">
+          <span class="pill {{ 'ok' if e.result == 'SUCCESS' else 'err' }}">{{ e.result | lower }}</span>
+        </td>
+        <td class="mono" data-label="Recording">{{ e.recording_id or '—' }}</td>
+        <td class="mono" data-label="Call">{{ (e.call_uuid or '')[:8] or '—' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="empty">Nothing has been accessed yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -5,7 +5,7 @@ partitioned tables) and a real moto S3 server standing in for both CommPeak and
 the archive.  Mocking either would hide precisely the behaviour that matters:
 concurrent job claims, multipart assembly, and read-back verification.
 
-Skipped unless CPREC_TEST_DATABASE_URL is set; see tests/test_brand_isolation.py.
+Skipped unless C2W_TEST_DATABASE_URL is set; see tests/test_brand_isolation.py.
 """
 
 from __future__ import annotations
@@ -18,18 +18,18 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from cprec.db.base import JobState, RecordingState
-from cprec.db.models.core import CommPeakConnection, Recording, StorageDestination, TransferJob
-from cprec.storage.commpeak import CommPeakSource
-from cprec.storage.s3_adapter import S3Client
-from cprec.storage.wasabi import WasabiDestination
-from cprec.sync import queue
-from cprec.sync.inventory import backfill_priority, plan_incremental, scan_hour
-from cprec.sync.transfer import build_sidecar, transfer_recording, verify_recording
+from c2w.db.base import JobState, RecordingState
+from c2w.db.models.core import CommPeakConnection, Recording, StorageDestination, TransferJob
+from c2w.storage.commpeak import CommPeakSource
+from c2w.storage.s3_adapter import S3Client
+from c2w.storage.wasabi import WasabiDestination
+from c2w.sync import queue
+from c2w.sync.inventory import backfill_priority, plan_incremental, scan_hour
+from c2w.sync.transfer import build_sidecar, transfer_recording, verify_recording
 
-TEST_DB = os.environ.get("CPREC_TEST_DATABASE_URL")
+TEST_DB = os.environ.get("C2W_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
-    not TEST_DB, reason="set CPREC_TEST_DATABASE_URL to a migrated scratch database"
+    not TEST_DB, reason="set C2W_TEST_DATABASE_URL to a migrated scratch database"
 )
 
 HOUR = datetime(2026, 9, 8, 0, tzinfo=UTC)
@@ -59,10 +59,16 @@ async def scenario(db, s3_creds, moto_endpoint):
     async with db() as s:
         await s.execute(
             text(
-                "INSERT INTO brands (id, name, slug) VALUES (:i,'Go4Rex','go4rex') "
+                "INSERT INTO brands (id, name, slug) VALUES (:i,'Pipeline','pipeline') "
                 "ON CONFLICT (id) DO NOTHING"
             ),
             {"i": brand_id},
+        )
+        # An explicit id leaves brands_id_seq behind it; repair it so a later
+        # sequence-assigned insert cannot collide. See test_brand_isolation.
+        await s.execute(
+            text("SELECT setval('brands_id_seq', GREATEST(:n, (SELECT max(id) FROM brands)))"),
+            {"n": brand_id},
         )
         await s.commit()
         for table in ("cdrs", "recordings"):
@@ -76,7 +82,7 @@ async def scenario(db, s3_creds, moto_endpoint):
         # purpose, so each starts from an empty working set.
         await s.execute(text("TRUNCATE transfer_attempts, transfer_jobs, recordings, cdrs CASCADE"))
         await s.execute(
-            text("SELECT set_config('cprec.brand_id', :b, false)"), {"b": str(brand_id)}
+            text("SELECT set_config('c2w.brand_id', :b, false)"), {"b": str(brand_id)}
         )
 
         tenant_id = (
@@ -150,7 +156,7 @@ async def _seed_recording(creds, key: str, data: bytes) -> None:
 
 async def _scoped(db, brand_id: int):
     s = db()
-    await s.execute(text("SELECT set_config('cprec.brand_id', :b, false)"), {"b": str(brand_id)})
+    await s.execute(text("SELECT set_config('c2w.brand_id', :b, false)"), {"b": str(brand_id)})
     return s
 
 
@@ -358,7 +364,7 @@ class TestTransfer:
             import json
 
             payload = json.loads(await side["Body"].read())
-            assert payload["schema"] == "cprec.sidecar/1"
+            assert payload["schema"] == "c2w.sidecar/1"
             assert payload["recording"]["source_key"] == SRC_KEY
             assert payload["correlation"]["method"] == "epoch_exact"
             assert payload["cdr"]["dst"] == "0007281"
@@ -678,7 +684,7 @@ class TestQueue:
             assert job.claimed_by is None
 
     async def test_failure_retries_then_gives_up(self, db, scenario):
-        from cprec.storage.errors import ErrorClass
+        from c2w.storage.errors import ErrorClass
 
         async with await _scoped(db, scenario["brand_id"]) as s:
             rec = Recording(
@@ -717,7 +723,7 @@ class TestQueue:
 
     async def test_auth_errors_are_not_retried(self, db, scenario):
         """Retrying AccessDenied five times only delays the alert a human needs."""
-        from cprec.storage.errors import ErrorClass
+        from c2w.storage.errors import ErrorClass
 
         async with await _scoped(db, scenario["brand_id"]) as s:
             rec = Recording(

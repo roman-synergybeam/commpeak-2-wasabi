@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Idempotent installer for cprec on a single Debian/Ubuntu host.
+# Idempotent installer for c2w on a single Debian/Ubuntu host.
 # No containers -- systemd units against a local PostgreSQL, per the
 # deployment constraint.
 #
@@ -18,8 +18,8 @@ done
 
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 
-APP_DIR=/opt/cprec
-CONF_DIR=/etc/cprec
+APP_DIR=/opt/c2w
+CONF_DIR=/etc/c2w
 PG_VERSION=17
 
 echo "==> packages"
@@ -32,12 +32,22 @@ apt-get install -y -qq \
     nginx ffmpeg curl ca-certificates git
 
 echo "==> service account"
-id -u cprec &>/dev/null || useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin cprec
+# One system account per application, which is how apps on a shared host are
+# kept apart: c2w's files are unreadable to the next app's account and vice
+# versa. If the account already exists it is left exactly as it is -- this
+# script never changes an existing account's shell or home directory, because
+# c2w may well be a login account you use.
+if id -u c2w &>/dev/null; then
+    echo "    using the existing c2w account"
+else
+    useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin c2w
+    echo "    created a system account: c2w"
+fi
 
 echo "==> directories"
-install -d -o cprec -g cprec -m 0755 "$APP_DIR" /var/lib/cprec /var/lib/cprec/spool
-install -d -o cprec -g cprec -m 0750 /var/cache/cprec /var/cache/cprec/transcode /var/log/cprec
-install -d -o root  -g cprec -m 0750 "$CONF_DIR"
+install -d -o c2w -g c2w -m 0755 "$APP_DIR" /var/lib/c2w /var/lib/c2w/spool
+install -d -o c2w -g c2w -m 0750 /var/cache/c2w /var/cache/c2w/transcode /var/log/c2w
+install -d -o root  -g c2w -m 0750 "$CONF_DIR"
 
 echo "==> master key"
 # Losing this file makes every stored S3 credential unrecoverable, so it is
@@ -66,50 +76,50 @@ systemctl enable --now postgresql
 sudo -u postgres psql -qtA <<SQL
 DO \$\$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cprec') THEN
-        CREATE ROLE cprec LOGIN PASSWORD '${DB_PASS}';
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'c2w') THEN
+        CREATE ROLE c2w LOGIN PASSWORD '${DB_PASS}';
     ELSE
-        ALTER ROLE cprec PASSWORD '${DB_PASS}';
+        ALTER ROLE c2w PASSWORD '${DB_PASS}';
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cprec_platform') THEN
-        CREATE ROLE cprec_platform LOGIN PASSWORD '${DB_PASS}' BYPASSRLS;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'c2w_platform') THEN
+        CREATE ROLE c2w_platform LOGIN PASSWORD '${DB_PASS}' BYPASSRLS;
     ELSE
-        ALTER ROLE cprec_platform PASSWORD '${DB_PASS}' BYPASSRLS;
+        ALTER ROLE c2w_platform PASSWORD '${DB_PASS}' BYPASSRLS;
     END IF;
 END \$\$;
-SELECT 'CREATE DATABASE cprec OWNER cprec'
-WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'cprec')\gexec
+SELECT 'CREATE DATABASE c2w OWNER c2w'
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'c2w')\gexec
 SQL
-sudo -u postgres psql -d cprec -qc "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
-sudo -u postgres psql -d cprec -qc "GRANT ALL ON SCHEMA public TO cprec;"
+sudo -u postgres psql -d c2w -qc "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+sudo -u postgres psql -d c2w -qc "GRANT ALL ON SCHEMA public TO c2w;"
 
 echo "==> bootstrap configuration"
 # There is no application config file. Every setting lives in the database and
-# is edited in the UI (Settings) or with `cprec-admin settings set`. The only
+# is edited in the UI (Settings) or with `c2w-admin settings set`. The only
 # thing written here is how to reach the database, because that is what a
 # process needs before it can read anything else.
 cat > "$CONF_DIR/database.env" <<ENVEOF
-CPREC_DATABASE_URL=postgresql+asyncpg://cprec:${DB_PASS}@127.0.0.1:5432/cprec
-CPREC_PLATFORM_DATABASE_URL=postgresql+asyncpg://cprec_platform:${DB_PASS}@127.0.0.1:5432/cprec
+C2W_DATABASE_URL=postgresql+asyncpg://c2w:${DB_PASS}@127.0.0.1:5432/c2w
+C2W_PLATFORM_DATABASE_URL=postgresql+asyncpg://c2w_platform:${DB_PASS}@127.0.0.1:5432/c2w
 ENVEOF
 chown root:root "$CONF_DIR/database.env"
 chmod 0600 "$CONF_DIR/database.env"
 
 # Remove config files from earlier layouts so nothing reads stale values.
-rm -f "$CONF_DIR/cprec.env" "$CONF_DIR/secrets.env"
+rm -f "$CONF_DIR/c2w.env" "$CONF_DIR/secrets.env"
 
 echo "==> python environment"
 if [[ ! -x "$APP_DIR/.venv/bin/python" ]]; then
-    sudo -u cprec python3 -m venv "$APP_DIR/.venv"
+    sudo -u c2w python3 -m venv "$APP_DIR/.venv"
 fi
-sudo -u cprec "$APP_DIR/.venv/bin/pip" install --quiet --upgrade pip
-sudo -u cprec "$APP_DIR/.venv/bin/pip" install --quiet -e "$APP_DIR"
+sudo -u c2w "$APP_DIR/.venv/bin/pip" install --quiet --upgrade pip
+sudo -u c2w "$APP_DIR/.venv/bin/pip" install --quiet -e "$APP_DIR"
 
 echo "==> migrations"
 cd "$APP_DIR"
-sudo -u cprec env \
-    CPREC_DATABASE_URL="postgresql+asyncpg://cprec:${DB_PASS}@127.0.0.1:5432/cprec" \
-    CPREC_MASTER_KEY="$(cat "$CONF_DIR/master.key")" \
+sudo -u c2w env \
+    C2W_DATABASE_URL="postgresql+asyncpg://c2w:${DB_PASS}@127.0.0.1:5432/c2w" \
+    C2W_MASTER_KEY="$(cat "$CONF_DIR/master.key")" \
     "$APP_DIR/.venv/bin/alembic" upgrade head
 
 echo "==> systemd units"
@@ -117,46 +127,46 @@ install -m 0644 deploy/systemd/*.service deploy/systemd/*.target /etc/systemd/sy
 systemctl daemon-reload
 
 echo "==> nginx"
-install -m 0644 deploy/nginx/cprec_proxy_params.conf /etc/nginx/
-install -m 0644 deploy/nginx/cprec.conf /etc/nginx/sites-available/cprec.conf
-ln -sf /etc/nginx/sites-available/cprec.conf /etc/nginx/sites-enabled/cprec.conf
+install -m 0644 deploy/nginx/c2w_proxy_params.conf /etc/nginx/
+install -m 0644 deploy/nginx/c2w.conf /etc/nginx/sites-available/c2w.conf
+ln -sf /etc/nginx/sites-available/c2w.conf /etc/nginx/sites-enabled/c2w.conf
 if nginx -t 2>/dev/null; then
     systemctl reload nginx
 else
     echo "    nginx config not valid yet (TLS certificate and server_name still to set);"
-    echo "    edit /etc/nginx/sites-available/cprec.conf then: nginx -t && systemctl reload nginx"
+    echo "    edit /etc/nginx/sites-available/c2w.conf then: nginx -t && systemctl reload nginx"
 fi
 
 echo "==> services"
 # Scheduler and reconciler are singletons on purpose -- each takes a PostgreSQL
 # advisory lock and a second instance exits rather than double-queueing scans.
 # Workers are the scaling knob.
-systemctl enable --now cprec-api cprec-scheduler cprec-reconciler
-for i in $(seq 1 "$WORKERS"); do systemctl enable --now "cprec-worker@${i}"; done
+systemctl enable --now c2w-api c2w-scheduler c2w-reconciler
+for i in $(seq 1 "$WORKERS"); do systemctl enable --now "c2w-worker@${i}"; done
 
 echo
 echo "Installed. Next steps:"
 echo
 echo "  1. Create the administrator (local account; AD/Entra can be added later):"
-echo "       sudo -u cprec CPREC_DATABASE_URL=... CPREC_MASTER_KEY_FILE=$CONF_DIR/master.key \\"
-echo "         $APP_DIR/.venv/bin/cprec-admin superadmin create --email you@example.com"
+echo "       sudo -u c2w C2W_DATABASE_URL=... C2W_MASTER_KEY_FILE=$CONF_DIR/master.key \\"
+echo "         $APP_DIR/.venv/bin/c2w-admin superadmin create --email you@example.com"
 echo
 echo "  2. Add a brand per company, so their data can never mix:"
-echo "       cprec-admin brand add --name 'Go4Rex' --slug go4rex"
+echo "       c2w-admin brand add --name 'Go4Rex' --slug go4rex"
 echo
 echo "  3. Add tenants and CommPeak connections (credentials are prompted for and"
 echo "     sealed; nothing is written to or deleted from CommPeak, ever):"
-echo "       cprec-admin tenant add --brand go4rex --name '<domain>' --slug <slug>"
-echo "       cprec-admin connection add --brand go4rex --tenant <slug> --name '...' --bucket <uuid>"
+echo "       c2w-admin tenant add --brand go4rex --name '<domain>' --slug <slug>"
+echo "       c2w-admin connection add --brand go4rex --tenant <slug> --name '...' --bucket <uuid>"
 echo
 echo "  4. CommPeak requires this server's public IP on each account's ACL:"
 echo "       $(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || echo '<could not detect>')"
 echo
 echo "  5. Everything else is configured in the web UI under Settings, or with"
-echo "     'cprec-admin settings set'. Transfers stay off until an archive"
+echo "     'c2w-admin settings set'. Transfers stay off until an archive"
 echo "     destination exists and transfer.enabled is turned on."
 echo
 echo "  6. Back up $CONF_DIR/master.key somewhere the database backup is NOT."
 echo "     Without it, every stored credential is unrecoverable."
 echo
-echo "  Verify: cprec-admin doctor && curl -fsS localhost:8000/api/health"
+echo "  Verify: c2w-admin doctor && curl -fsS localhost:8000/api/health"

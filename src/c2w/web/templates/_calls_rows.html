@@ -1,0 +1,91 @@
+{# Table fragment only: htmx swaps this in, so it must stand alone.
+
+   `.tw.stack` is the single highest-value rule in the kit for this table --
+   nine columns on a phone is a sideways scroll into blank space, so below
+   820px each row becomes a small card and every cell takes its heading from
+   its own data-label. #}
+<div class="tw stack">
+  <table>
+    <thead>
+      <tr>
+        <th class="sortable {{ 'sorted' if q.sort == 'started' }}"
+            data-dir="{{ 'desc' if q.descending else 'asc' }}">
+          <a href="/calls?{{ query_string | sortlink('started') }}">Started</a>
+        </th>
+        <th>Dir</th>
+        <th>From</th>
+        <th>To</th>
+        <th>Agent</th>
+        <th class="right sortable {{ 'sorted' if q.sort == 'duration' }}"
+            data-dir="{{ 'desc' if q.descending else 'asc' }}">
+          <a href="/calls?{{ query_string | sortlink('duration') }}">Duration</a>
+        </th>
+        <th>Outcome</th>
+        <th>Recording</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in page.rows %}
+      <tr>
+        <td class="mono" data-label="Started">{{ row.start_at | dt }}</td>
+        <td data-label="Direction">
+          {% if row.direction %}<span class="dir-{{ row.direction }}">{{ row.direction }}</span>
+          {% else %}&mdash;{% endif %}
+        </td>
+        <td class="mono" data-label="From">{{ row.src | number }}</td>
+        <td class="mono" data-label="To">{{ row.dst | number }}</td>
+        <td data-label="Agent">{{ row.agent_name or row.agent_extension or '' }}</td>
+        <td class="right mono" data-label="Duration">{{ row.call_duration | duration }}</td>
+        <td data-label="Outcome">
+          {% if row.status %}
+            <span class="pill {{ row.status | status_class }}">{{ row.status | shorten_status }}</span>
+          {% endif %}
+        </td>
+        <td class="statuscell" data-label="Recording">{{ row | media_pill }}</td>
+        <td data-label=""><a class="btn ghost small" href="/calls/{{ row.id }}">Open</a></td>
+      </tr>
+    {% else %}
+      <tr>
+        <td colspan="9" class="empty">
+          {# "Nothing yet" and "nothing matches" are different sentences, and
+             only one is ever true. A list claiming "no calls yet" with a
+             filter active lies to someone hunting a missing call. #}
+          {% if not any_cdrs %}
+            No call records have been fetched from CommPeak yet.
+            <br><span class="det">Add a CommPeak account and its CDR API details to begin.</span>
+          {% else %}
+            No call matches these filters.
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="pager">
+  <div class="pagebtns">
+    {% if page.offset %}
+      <a class="btn" href="/calls?{{ query_string | offsetlink(page.offset - page.limit) }}"
+         hx-get="/calls/rows?{{ query_string | offsetlink(page.offset - page.limit) }}"
+         hx-target="#rows" hx-push-url="true">&lsaquo; Prev</a>
+    {% endif %}
+    {% if page.has_more %}
+      <a class="btn" href="/calls?{{ query_string | offsetlink(page.offset + page.limit) }}"
+         hx-get="/calls/rows?{{ query_string | offsetlink(page.offset + page.limit) }}"
+         hx-target="#rows" hx-push-url="true">Next &rsaquo;</a>
+    {% endif %}
+  </div>
+  <span class="range">
+    {% if page.rows %}
+      Showing {{ "{:,}".format(page.offset + 1) }}&ndash;{{ "{:,}".format(page.offset + page.rows|length) }}
+      of {{ count_label }}
+    {% else %}
+      Nothing to show
+    {% endif %}
+  </span>
+  {% if page.truncated %}
+    <span class="pill warn">too deep to page further &mdash; narrow the dates</span>
+  {% endif %}
+</div>

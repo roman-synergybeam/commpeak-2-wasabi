@@ -13,7 +13,7 @@ import httpx
 import pytest
 import respx
 
-from cprec.commpeak.cdr_client import (
+from c2w.commpeak.cdr_client import (
     AuthScheme,
     CdrApiConfig,
     CdrClient,

@@ -1,0 +1,69 @@
+<div class="stats">
+  <div><p class="hint">Queued</p><strong>{{ "{:,}".format(jobs.get('PENDING', 0)) }}</strong></div>
+  <div><p class="hint">Running now</p><strong>{{ "{:,}".format(jobs.get('RUNNING', 0)) }}</strong></div>
+  <div><p class="hint">Completed</p><strong>{{ "{:,}".format(jobs.get('DONE', 0)) }}</strong></div>
+  <div>
+    <p class="hint">Failed</p>
+    <strong {% if jobs.get('FAILED', 0) %}class="bad"{% endif %}>
+      {{ "{:,}".format(jobs.get('FAILED', 0)) }}
+    </strong>
+  </div>
+</div>
+
+{% if error_classes %}
+  <h2>Why copies are failing</h2>
+  <div class="tw stack">
+    <table>
+      <thead><tr><th>Cause</th><th class="right">Recordings</th><th>What to do</th></tr></thead>
+      <tbody>
+      {% for cause, count, hint in error_classes %}
+        <tr>
+          <td data-label="Cause"><span class="pill err">{{ cause | error_label }}</span></td>
+          <td class="right" data-label="Recordings">{{ "{:,}".format(count) }}</td>
+          <td data-label="What to do"><span class="det wrap">{{ hint }}</span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+
+<h2>Per CommPeak account</h2>
+<div class="tw stack">
+  <table>
+    <thead>
+      <tr>
+        <th>Account</th><th>Last scan</th><th>Scanned up to</th>
+        <th class="col-progress">Archived</th>
+        <th class="right">Found</th><th class="right">Waiting</th><th class="right">Failed</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in per_connection %}
+      <tr>
+        <td data-label="Account">{{ row.name }}</td>
+        <td class="mono" data-label="Last scan">{{ row.last_inventory_at | dt }}</td>
+        <td class="mono" data-label="Scanned up to">{{ row.inventory_cursor_hour | dt }}</td>
+        <td class="col-progress" data-label="Archived">
+          {# A meter, not a bare number: down a list of accounts the colour is
+             what gets noticed. .warn/.bad go on the fill *and* the percentage,
+             so the figure survives being read without the bar. #}
+          {% set pct = row | archived_pct %}
+          <div class="meter">
+            <div class="bar sm"><span class="{{ pct | meter_class }}" style="width: {{ pct }}%"></span></div>
+            <span class="pc {{ pct | meter_class }}">{{ pct }}%</span>
+          </div>
+        </td>
+        <td class="right" data-label="Found">{{ "{:,}".format(row.total) }}</td>
+        <td class="right" data-label="Waiting">{{ "{:,}".format(row.pending) }}</td>
+        <td class="right" data-label="Failed">
+          {% if row.failed %}<span class="pill err">{{ "{:,}".format(row.failed) }}</span>
+          {% else %}0{% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="empty">No CommPeak accounts configured yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>

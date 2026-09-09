@@ -1,0 +1,7 @@
+[Unit]
+Description=c2w recording platform
+Wants=c2w-api.service c2w-scheduler.service c2w-reconciler.service
+After=c2w-api.service
+
+[Install]
+WantedBy=multi-user.target

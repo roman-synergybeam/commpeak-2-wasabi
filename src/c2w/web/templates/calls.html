@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Calls — c2w{% endblock %}
+{% block body %}
+
+<h1>Calls &amp; recordings</h1>
+<p class="sub">{{ count_label }} in the selected range. <span class="spin">searching…</span></p>
+
+{# Chips are the state filter: one glance says which slice you are looking at.
+   Server-rendered links rather than client-side, because the row count here is
+   in the millions -- past a few thousand rows the page weight, not the
+   filtering, is the problem. #}
+<div class="filters" style="margin-bottom:14px">
+  {% for key, label in media_chips %}
+    <a class="chip {{ 'on' if (q.media or '') == key }}"
+       href="/calls?{{ query_string | chiplink('media', key) }}">{{ label }}</a>
+  {% endfor %}
+</div>
+
+{# A GET form so a filtered view is a URL you can bookmark or paste to a
+   colleague; htmx swaps only the table when a field changes. #}
+<form class="card" method="get" action="/calls"
+      hx-get="/calls/rows" hx-target="#rows" hx-swap="innerHTML"
+      hx-trigger="submit, change from:select, keyup changed delay:400ms from:input[type=search]"
+      hx-indicator=".spin" hx-push-url="true">
+  <input type="hidden" name="media" value="{{ q.media or '' }}">
+  <div class="row">
+    <div>
+      <label for="q">Number</label>
+      <input id="q" name="number" type="search" value="{{ q.number or '' }}"
+             placeholder="441632960770 or 9607">
+      <p class="hint">Full number, or any part of one.</p>
+    </div>
+    <div>
+      <label for="from">From</label>
+      <input id="from" name="date_from" type="datetime-local" value="{{ q.date_from | dtlocal }}">
+    </div>
+    <div>
+      <label for="to">To</label>
+      <input id="to" name="date_to" type="datetime-local" value="{{ q.date_to | dtlocal }}">
+    </div>
+    <div>
+      <label for="direction">Direction</label>
+      <select id="direction" name="direction">
+        <option value="">Any</option>
+        <option value="in" {{ 'selected' if q.direction == 'in' }}>Inbound</option>
+        <option value="out" {{ 'selected' if q.direction == 'out' }}>Outbound</option>
+      </select>
+    </div>
+    <div>
+      <label for="agent">Agent</label>
+      <input id="agent" name="agent" type="search" value="{{ q.agent or '' }}"
+             placeholder="extension or name">
+    </div>
+    <div>
+      <label for="min_duration">Longer than</label>
+      <input id="min_duration" name="min_duration" type="number" min="0"
+             value="{{ q.min_duration or '' }}" placeholder="seconds">
+    </div>
+    <div>
+      <label for="connection">CommPeak account</label>
+      <select id="connection" name="connection_id">
+        <option value="">All accounts</option>
+        {% for c in connections %}
+          <option value="{{ c.id }}" {{ 'selected' if q.connection_id == c.id }}>{{ c.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="limit">Rows</label>
+      <select id="limit" name="limit">
+        {% for n in [25, 50, 100, 200] %}
+          <option value="{{ n }}" {{ 'selected' if q.limit == n }}>{{ n }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+  <div class="actions">
+    <button type="submit">Search</button>
+    <a class="btn ghost" href="/calls">Reset</a>
+    {% if 'cdr.export' in permissions %}
+      <a class="btn ghost" href="/calls/export.csv?{{ query_string }}">Export CSV</a>
+    {% endif %}
+  </div>
+</form>
+
+<div id="rows">
+  {% include "_calls_rows.html" %}
+</div>
+{% endblock %}

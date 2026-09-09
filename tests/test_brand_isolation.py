@@ -2,12 +2,12 @@
 
 These tests need a real PostgreSQL with the migration applied, because the thing
 under test is a set of RLS policies -- there is nothing meaningful to assert
-against a mock.  They are skipped unless ``CPREC_TEST_DATABASE_URL`` points at a
+against a mock.  They are skipped unless ``C2W_TEST_DATABASE_URL`` points at a
 scratch database.
 
-    createdb cprec_test
-    CPREC_DATABASE_URL=postgresql+asyncpg://.../cprec_test uv run alembic upgrade head
-    CPREC_TEST_DATABASE_URL=postgresql+asyncpg://.../cprec_test \
+    createdb c2w_test
+    C2W_DATABASE_URL=postgresql+asyncpg://.../c2w_test uv run alembic upgrade head
+    C2W_TEST_DATABASE_URL=postgresql+asyncpg://.../c2w_test \
         uv run pytest tests/test_brand_isolation.py
 
 The connecting role must NOT be a superuser and must NOT hold BYPASSRLS;
@@ -23,14 +23,15 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-TEST_DB = os.environ.get("CPREC_TEST_DATABASE_URL")
+TEST_DB = os.environ.get("C2W_TEST_DATABASE_URL")
 
 pytestmark = pytest.mark.skipif(
-    not TEST_DB, reason="set CPREC_TEST_DATABASE_URL to a migrated scratch database"
+    not TEST_DB, reason="set C2W_TEST_DATABASE_URL to a migrated scratch database"
 )
 
-# Two fixed brand ids used only by this module. The names are deliberately
-# generic: what is under test is the isolation boundary, not the customers.
+# Two fixed brand ids, which keeps each test's intent readable. The names are
+# deliberately generic: what is under test is the isolation boundary, not the
+# customers.
 GO4REX, INTERMAGNUM = 1, 2
 
 
@@ -70,6 +71,14 @@ async def sessions():
                         f"PARTITION OF {table} FOR VALUES IN ({brand})"
                     )
                 )
+        # Inserting an explicit id does not advance the sequence, so the next
+        # caller that lets the sequence assign one gets a duplicate primary
+        # key. That shows up only against a fresh database, in whichever test
+        # happens to run next -- which reads as a flake somewhere unrelated.
+        await s.execute(
+            text("SELECT setval('brands_id_seq', GREATEST(:n, (SELECT max(id) FROM brands)))"),
+            {"n": max(GO4REX, INTERMAGNUM)},
+        )
         await s.commit()
     yield factory
     await engine.dispose()
@@ -79,7 +88,7 @@ async def _scoped(factory, brand_id: int | None):
     session = factory()
     if brand_id is not None:
         await session.execute(
-            text("SELECT set_config('cprec.brand_id', :b, true)"), {"b": str(brand_id)}
+            text("SELECT set_config('c2w.brand_id', :b, true)"), {"b": str(brand_id)}
         )
     return session
 
@@ -135,7 +144,7 @@ async def test_unscoped_session_sees_nothing_and_does_not_error(sessions):
     ``invalid input syntax for type bigint``.
     """
     async with await _scoped(sessions, None) as s:
-        await s.execute(text("RESET cprec.brand_id"))
+        await s.execute(text("RESET c2w.brand_id"))
         count = (await s.execute(text("SELECT count(*) FROM cdrs"))).scalar_one()
     assert count == 0
 

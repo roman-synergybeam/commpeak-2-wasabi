@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block frame %}measured{% endblock %}
+{% block title %}Call {{ (call.call_uuid or '')[:8] }} — c2w{% endblock %}
+{% block body %}
+
+<h1>Call detail</h1>
+<p class="sub"><a href="/calls">&larr; back to calls</a></p>
+
+{# .summarygrid rather than .stats: these are short strings — what the call
+   was wired to — not quantities. #}
+<div class="summarygrid">
+  <div><span class="hint">Started</span><strong class="mono">{{ call.start_at | dt }}</strong></div>
+  <div><span class="hint">Duration</span><strong class="mono">{{ call.call_duration | duration }}</strong></div>
+  <div><span class="hint">Direction</span><strong>{{ call.direction or '—' }}</strong></div>
+  <div><span class="hint">Outcome</span><strong>{{ call.status | shorten_status if call.status else '—' }}</strong></div>
+  <div><span class="hint">From</span><strong class="mono">{{ call.src | number }}</strong></div>
+  <div><span class="hint">To</span><strong class="mono">{{ call.dst | number }}</strong></div>
+  <div><span class="hint">Agent</span><strong>{{ call.agent_name or call.agent_extension or '—' }}</strong></div>
+  <div><span class="hint">CommPeak account</span><strong>{{ call.connection_name or '—' }}</strong></div>
+</div>
+
+<h2>Recordings{% if call.recordings %} ({{ call.recordings | length }}){% endif %}</h2>
+
+{% if not call.recordings %}
+  <div class="note">
+    <h3>No recording is matched to this call</h3>
+    <p>Either the call was not recorded, or its recording has not been discovered
+       yet. CommPeak object names do not carry the call identifier, so recordings
+       are matched to calls by their channel timestamp.</p>
+  </div>
+{% endif %}
+
+{% for rec in call.recordings %}
+  <div class="player">
+    <div class="part-head">
+      <div>
+        <strong>{% if call.recordings | length > 1 %}Part {{ loop.index }}{% else %}Recording{% endif %}</strong>
+        <span class="pill {{ rec.state | state_class }}">{{ rec.state | state_label }}</span>
+        {% if rec.match_method %}
+          <span class="pill {{ rec.match_method | match_class }}">
+            {{ rec.match_method | match_label }}{% if rec.match_confidence %}
+            {{ (rec.match_confidence * 100) | round | int }}%{% endif %}
+          </span>
+        {% endif %}
+        {% if rec.match_ambiguous %}
+          <span class="pill warn" title="Another call matched equally well">ambiguous</span>
+        {% endif %}
+      </div>
+      <span class="det mono">{{ rec.source_size | filesize }} &middot; {{ rec.file_ext or '' }}</span>
+    </div>
+
+    {% if rec.state in ('AVAILABLE', 'SOURCE_DELETED') %}
+      {% if 'recordings.play' in permissions %}
+        {# The src is a short-lived redirect to storage: the browser never sees
+           storage credentials, and the audio does not pass through here. #}
+        <audio controls preload="none" src="/api/v1/recordings/{{ rec.id }}/stream"></audio>
+        {% if 'recordings.download' in permissions %}
+          <div class="actions">
+            <a class="btn ghost" href="/api/v1/recordings/{{ rec.id }}/download">Download</a>
+          </div>
+        {% endif %}
+      {% else %}
+        <p class="hint">Your role may listen to recordings but not play this one.</p>
+      {% endif %}
+    {% elif rec.state in ('FAILED', 'MISSING_SOURCE') %}
+      <div class="note caution">
+        <h3>Not available</h3>
+        <p>{{ rec.last_error_class or 'error' }} &mdash; {{ rec.last_error_detail or 'no detail recorded' }}</p>
+      </div>
+    {% else %}
+      <div class="note">
+        <p>Being copied to the archive &mdash; {{ rec.state | state_label }}. This becomes
+           playable on its own once the copy has been verified.</p>
+      </div>
+    {% endif %}
+
+    <details class="quiet">
+      <summary>Technical detail</summary>
+      <table class="plain" style="margin-top:10px">
+        <tr><td>Source object<span class="det">at CommPeak</span></td>
+            <td class="mono">{{ rec.source_key }}</td></tr>
+        <tr><td>Archive object</td>
+            <td class="mono">{{ rec.destination_key or '—' }}</td></tr>
+        <tr><td>SHA-256<span class="det">computed while copying</span></td>
+            <td class="mono">{{ rec.checksum_sha256 or '—' }}</td></tr>
+        <tr><td>Verified</td><td class="mono">{{ rec.verified_at | dt }}</td></tr>
+        <tr><td>Call identifier</td><td class="mono">{{ call.call_uuid or '—' }}</td></tr>
+      </table>
+    </details>
+  </div>
+{% endfor %}
+{% endblock %}

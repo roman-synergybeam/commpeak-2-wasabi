@@ -1,9 +1,9 @@
-# cprec
+# c2w — CommPeak to Wasabi
 
 CommPeak → Wasabi call-recording offload and CDR platform.
 
 Recordings accumulate in CommPeak's S3-compatible storage — 8 buckets, ~19.3M
-objects, ~13.9 TB across two unrelated companies. `cprec` inventories those
+objects, ~13.9 TB across two unrelated companies. `c2w` inventories those
 buckets, polls the CommPeak CDR API for call metadata, correlates each recording
 to a call, streams it to an S3-compatible archive with byte-level verification,
 and serves a per-brand CDR UI with search, filter, sort, export and in-browser
@@ -15,6 +15,11 @@ source of truth for retained media.
 **The platform is strictly read-only against CommPeak.** It never writes there
 and never deletes there — enforced in code, not by convention.
 
+Everything is named **c2w**: the package, the CLI (`c2w-admin`), the systemd
+units, the database, the `C2W_` environment prefix, and the system account the
+services run as. One account per application is how apps on a shared host stay
+separated — the services need no privilege at runtime and never run as root.
+
 See [AGENTS.md](AGENTS.md) for architecture rules and the gotchas that have
 already bitten.
 
@@ -22,7 +27,7 @@ already bitten.
 
 There are no configuration files. Every setting lives in the database (46 of
 them, 9 categories) and is edited in the web UI under **Settings** or with
-`cprec-admin settings set`. Changes apply across every process within seconds.
+`c2w-admin settings set`. Changes apply across every process within seconds.
 
 Exactly two values come from the environment, because they are what a process
 needs *before* it can read a setting — the database URL and the master key that
@@ -49,7 +54,7 @@ All credential settings ship empty, to be filled in by an operator.
 | Workers | done — worker pool, scheduler, nightly reconciler (both singleton-locked) |
 | Media delivery | done — presigned URLs, separate play/download permissions, full audit |
 | CDR API client | done — field mapping pinned to the real payload; transport configurable |
-| Web UI | done — dashboard, call search, detail + player, sync status, settings, audit, users |
+| Web UI | done — built on the Console UI Kit design system; dashboard, call search, detail + player, sync status, settings, audit, people |
 | Alerts | done — Telegram + Slack, per-brand, severity routing, deduplication |
 | Deployment | done — systemd units, nginx, idempotent installer |
 
@@ -70,7 +75,7 @@ so the UI is useful in the meantime and nothing needs re-scanning later.
 uv sync --extra dev
 uv run pytest -q                     # 156 tests
 uv run ruff check src/ tests/
-uv run uvicorn cprec.api.app:app --reload
+uv run uvicorn c2w.api.app:app --reload
 ```
 
 Most tests need PostgreSQL, because what they test *is* database behaviour —
@@ -78,10 +83,10 @@ RLS policies, `SKIP LOCKED` claims, partition routing. They skip cleanly
 without one (75 pass, 81 skip):
 
 ```bash
-createdb cprec_test
-CPREC_DATABASE_URL=postgresql+asyncpg://user@localhost/cprec_test \
+createdb c2w_test
+C2W_DATABASE_URL=postgresql+asyncpg://user@localhost/c2w_test \
     uv run alembic upgrade head
-CPREC_TEST_DATABASE_URL=postgresql+asyncpg://user@localhost/cprec_test \
+C2W_TEST_DATABASE_URL=postgresql+asyncpg://user@localhost/c2w_test \
     uv run pytest
 ```
 
@@ -98,19 +103,19 @@ sudo ./deploy/install.sh --workers 2
 Then:
 
 ```bash
-cprec-admin superadmin create --email you@example.com
-cprec-admin brand add --name 'Go4Rex' --slug go4rex
-cprec-admin tenant add --brand go4rex --name 'go4rex.td.commpeak.com' --slug go4rex-td
-cprec-admin connection add --brand go4rex --tenant go4rex-td \
+c2w-admin superadmin create --email you@example.com
+c2w-admin brand add --name 'Go4Rex' --slug go4rex
+c2w-admin tenant add --brand go4rex --name 'go4rex.td.commpeak.com' --slug go4rex-td
+c2w-admin connection add --brand go4rex --tenant go4rex-td \
     --name 'Go4Rex TD' --bucket <account-uuid>      # prompts for token and secret
-cprec-admin doctor
+c2w-admin doctor
 ```
 
 CommPeak requires this server's public IP on each S3 account's Access Control
 List — that is the most common onboarding failure, and the connection self-test
 names it explicitly.
 
-Back up `/etc/cprec/master.key` somewhere the database backup is not. Without
+Back up `/etc/c2w/master.key` somewhere the database backup is not. Without
 it, every stored credential is unrecoverable.
 
 ## Security

@@ -1,4 +1,4 @@
-# cprec — agent instructions
+# c2w — agent instructions
 
 CommPeak → Wasabi call-recording offload and CDR platform.
 Read this before changing anything. `CLAUDE.md` is a symlink to this file.
@@ -27,7 +27,7 @@ Wasabi is the source of truth for **retained media**.
 | **CommPeak is strictly read-only** | We never write to or delete from CommPeak. `CommPeakSource` overrides every mutating method to raise `SourceIsReadOnly`, and the `delete_source_*` columns were dropped in migration 0002. There is no setting that re-enables it; doing so would be a deliberate code change with a review attached. |
 | **No Docker, no containers** | Explicit customer requirement. systemd units on one Linux VM. |
 | **No Redis, no extra daemons** | PostgreSQL is the job queue (`FOR UPDATE SKIP LOCKED`). Adding a broker re-introduces the operational surface the deployment rules out. |
-| **No `.env` files. All settings live in the database** | Declared in `cprec/settings_spec.py`, stored in `app_settings`, edited in the UI or via `cprec-admin settings`. The only exceptions are `CPREC_DATABASE_URL` and `CPREC_MASTER_KEY(_FILE)`, which are what a process needs *before* it can read settings; both come from the systemd unit. |
+| **No `.env` files. All settings live in the database** | Declared in `c2w/settings_spec.py`, stored in `app_settings`, edited in the UI or via `c2w-admin settings`. The only exceptions are `C2W_DATABASE_URL` and `C2W_MASTER_KEY(_FILE)`, which are what a process needs *before* it can read settings; both come from the systemd unit. |
 | **Brands never share data** | Go4Rex and InterMagnum are different companies. Enforced by RLS, not by `WHERE`. |
 | **No credentials in git, logs, templates, API responses or memory** | These are live telephony credentials. Store sealed; see "Secrets". |
 | **Never hide a recording because correlation failed** | Losing access to audio is worse than showing a call with thin metadata. Unmatched objects become `orphan` and stay playable. |
@@ -36,7 +36,7 @@ Wasabi is the source of truth for **retained media**.
 ## Architecture rules
 
 **Talk to storage through the protocols, never to a vendor.**
-`cprec.storage.base.ObjectSource` / `ObjectDestination` are the interface.
+`c2w.storage.base.ObjectSource` / `ObjectDestination` are the interface.
 `CommPeakSource` and `WasabiDestination` are thin configurations of `S3Client`.
 Never write `if provider == "wasabi"` in the engine, the scanner or the media
 gateway — a brand may move to MinIO or Backblaze, and CommPeak may not be the
@@ -44,7 +44,7 @@ only source forever.
 
 **Brand isolation is a database guarantee.**
 Every tenant-scoped table has `brand_id` and an RLS policy keyed off the
-`cprec.brand_id` session variable. Set it once per request/job via the session
+`c2w.brand_id` session variable. Set it once per request/job via the session
 helper; do not rely on application filtering. `cdrs` and `recordings` are
 `PARTITION BY LIST (brand_id)`. When you add a tenant-scoped table you must add
 `brand_id`, the RLS policy, and a test proving brand A cannot read brand B.
@@ -53,7 +53,7 @@ helper; do not rely on application filtering. `cdrs` and `recordings` are
 An upload is complete only when source size, destination size and the in-stream
 SHA-256 all agree and a destination `HEAD` confirms the object. HTTP 200 is not
 evidence. Multipart ETags are hashes of part hashes — never compare them to a
-whole-object digest; that is why we store `cprec-sha256` as object metadata.
+whole-object digest; that is why we store `c2w-sha256` as object metadata.
 
 **Never stage media on local disk.**
 13.9 TB moves through a 84 GB root volume. Source `GetObject` streams straight
@@ -61,7 +61,7 @@ into the destination multipart upload, with the digest computed in the same
 pass. Local spool is only for resuming a specific part.
 
 **Errors are classified before they are retried.**
-`cprec.storage.errors.classify_exception` maps every failure to an `ErrorClass`.
+`c2w.storage.errors.classify_exception` maps every failure to an `ErrorClass`.
 `AUTH_ERROR`/`ACL_ERROR`/`CONFIG_ERROR` fail fast and alert a human — retrying
 them five times only delays the alert. On CommPeak, `ACL_ERROR` almost always
 means this server's public IP is missing from the account's Access Control List;
@@ -83,7 +83,7 @@ Object keys look like:
 **Keys carry no `call_uuid`.** The trailing `1636635223` is a FreeSWITCH channel
 id — a unix epoch second at channel creation — and in the documented example it
 decodes to exactly the filename's wall clock (`2021-11-11 12:53:43Z`). That epoch
-is the strongest join key available, which is what `cprec.commpeak.correlate`
+is the strongest join key available, which is what `c2w.commpeak.correlate`
 is built on. Match tiers, best first:
 
 | Tier | Rule | Confidence |
@@ -108,7 +108,7 @@ primary source.
 
 ## Configuration
 
-Everything tunable is a `SettingSpec` in `cprec/settings_spec.py` (46 of them,
+Everything tunable is a `SettingSpec` in `c2w/settings_spec.py` (46 of them,
 9 categories) and is stored in `app_settings`. Resolution is **brand override →
 global row → registry default**. Read them through `settings_service`, never
 from the environment:
@@ -126,12 +126,12 @@ reported to the UI as configured/not, and never written to `setting_history`.
 All credential settings ship empty; the operator fills them in later.
 
 Two values are *not* settings, because they are how a process reaches the
-settings: `CPREC_DATABASE_URL` and `CPREC_MASTER_KEY_FILE`. See
-`cprec/config.py`.
+settings: `C2W_DATABASE_URL` and `C2W_MASTER_KEY_FILE`. See
+`c2w/config.py`.
 
 ## Authentication
 
-Local accounts now, Active Directory / Entra ID later. `cprec-admin superadmin
+Local accounts now, Active Directory / Entra ID later. `c2w-admin superadmin
 create` makes the first account; `SUPER_ADMIN` is the only brand-less role and
 remains the break-glass login once `auth.local_accounts_enabled` is turned off
 for everyone else. The Entra group → role mapping writes into the same `users`
@@ -142,15 +142,15 @@ deliberately separate permissions.
 ## Secrets
 
 - Per-connection S3 tokens and CDR API keys are sealed with AES-256-GCM under a
-  **per-brand data key**, which is itself wrapped by `CPREC_MASTER_KEY`
-  (delivered via systemd `LoadCredential=`). See `cprec.crypto`.
+  **per-brand data key**, which is itself wrapped by `C2W_MASTER_KEY`
+  (delivered via systemd `LoadCredential=`). See `c2w.crypto`.
 - Sealing binds AAD (`conn:<id>:<field>`), so a ciphertext cannot be moved to
   another connection or another column. Preserve that when you touch it.
 - `Settings.masked_dump()` is the only safe way to render configuration.
 - Columns holding sealed values are suffixed `_sealed`. Never add one to an API
   response model or a template context.
-- Credentials are entered through `cprec-admin` (prompted, no echo) or the UI,
-  never committed, never logged. `cprec/storage/factory.py` is the only place
+- Credentials are entered through `c2w-admin` (prompted, no echo) or the UI,
+  never committed, never logged. `c2w/storage/factory.py` is the only place
   they are unsealed.
 
 ## Conventions
@@ -174,18 +174,18 @@ uv run pytest tests/test_correlation.py # correlation only
 uv run ruff check --fix src/ tests/     # lint
 uv run alembic upgrade head             # migrate
 uv run alembic revision -m "..."        # new migration
-uv run uvicorn cprec.api.app:app --reload   # dev server
+uv run uvicorn c2w.api.app:app --reload   # dev server
 ```
 
 ## Layout
 
 ```
-src/cprec/
+src/c2w/
   config.py          bootstrap only (database URL + master key)
   settings_spec.py   the settings registry
   settings.py        DB-backed settings service, with a short-lived cache
   crypto.py          AES-GCM envelope encryption
-  cli.py             cprec-admin
+  cli.py             c2w-admin
   logging.py         structlog, with credential redaction
   storage/    base.py errors.py s3_adapter.py commpeak.py wasabi.py factory.py
   commpeak/   keyparse.py correlate.py cdr_client.py
@@ -204,12 +204,35 @@ The UI is server-rendered Jinja2 with htmx, and htmx/Alpine are **vendored** in
 `web/static/vendor/` — this runs on a private network and must not need
 outbound internet to render a page. There is no build step.
 
+## The design system
+
+`web/static/app.css` is the **Console UI Kit**, the customer's own house style
+for operator consoles. Plain CSS tokens, no dependencies. Its rules are not
+decoration and several are enforced in `web/filters.py`:
+
+- **Four pill meanings only** — `ok` / `warn` / `err` / `idle`. Every state
+  collapses into one. State colour is never used decoratively, so that amber on
+  the page always means something.
+- **No literal colours outside the token block.** Retheming is that block and
+  nothing else.
+- **Machine values get human labels.** The database stores `MISSING_SOURCE`;
+  the page reads "gone from source". The raw value stays only where it is
+  needed — a settings key, a technical-detail panel.
+- **`flash` vs `note` vs `note.caution`** are distinct: the result of an action,
+  an explainer, and the irreversible. Do not reach for caution to add emphasis.
+- **`.tw` wraps every table**; add `.stack` plus a `data-label` per cell when it
+  has more than about six columns, or it is unreadable on a phone.
+- **Every figure carries a caption and a unit**, `tabular-nums` if it updates.
+- Traps the kit names: `min-width:0` on grid and flex children;
+  `overflow-x:clip` on body, never `hidden`; a `<button>` rule with a
+  background will paint your chips.
+
 ## Gotchas that have already bitten
 
 - `SET LOCAL` / `set_config(..., true)` ends at **commit**. Each transaction must
-  set `cprec.brand_id` again. That transaction-bound lifetime is what stops a
+  set `c2w.brand_id` again. That transaction-bound lifetime is what stops a
   scope leaking to the next request on a pooled connection.
-- The RLS policy uses `NULLIF(current_setting('cprec.brand_id', true), '')` —
+- The RLS policy uses `NULLIF(current_setting('c2w.brand_id', true), '')` —
   without the `NULLIF`, an unscoped query on a reset connection *errors* instead
   of returning zero rows.
 - Queue claims use a **CTE**, not `UPDATE ... WHERE id IN (SELECT ... LIMIT n

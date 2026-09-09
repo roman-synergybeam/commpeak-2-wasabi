@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}CommPeak accounts — c2w{% endblock %}
+{% block body %}
+
+<h1>CommPeak accounts</h1>
+<p class="sub">Read-only sources. One recordings bucket, and its call records, per account.</p>
+
+<div class="note">
+  <h3>Adding an account</h3>
+  <p>Credentials are entered on the server so they are never typed into a browser,
+     and are encrypted before they are stored:</p>
+  <p style="margin-top:8px"><code>c2w-admin connection add --brand &lt;org&gt; --tenant &lt;tenant&gt; --name "…" --bucket &lt;uuid&gt;</code></p>
+  <p style="margin-top:8px">CommPeak also requires this server's public address on the
+     account's access list &mdash; that is the most common reason a new account fails.</p>
+</div>
+
+<div class="tw stack">
+  <table>
+    <thead>
+      <tr>
+        <th>Account</th><th>Bucket</th><th>State</th><th>Last scan</th>
+        <th class="right">Recordings</th><th class="right">Archived</th><th>Archive target</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for c in connections %}
+      <tr>
+        <td data-label="Account">{{ c.name }}</td>
+        <td class="mono" data-label="Bucket">{{ c.s3_bucket }}</td>
+        <td class="statuscell" data-label="State">
+          <div class="pills"><span class="pill {{ c.status | conn_class }}">{{ c.status | lower }}</span></div>
+          {% if c.status_detail %}<div class="det wrap">{{ c.status_detail }}</div>{% endif %}
+        </td>
+        <td class="mono" data-label="Last scan">{{ c.last_inventory_at | dt }}</td>
+        <td class="right" data-label="Recordings">{{ "{:,}".format(counts.get(c.id, {}).get('total', 0)) }}</td>
+        <td class="right" data-label="Archived">{{ "{:,}".format(counts.get(c.id, {}).get('archived', 0)) }}</td>
+        <td data-label="Archive target">
+          {{ destinations.get(c.destination_id).name if c.destination_id and destinations.get(c.destination_id) else '—' }}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="empty">No CommPeak accounts configured yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

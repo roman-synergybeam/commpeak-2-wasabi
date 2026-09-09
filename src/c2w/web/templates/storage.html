@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Archive storage — c2w{% endblock %}
+{% block body %}
+
+<h1>Archive storage</h1>
+<p class="sub">Where verified copies are kept. Any S3-compatible service; Wasabi is the first.</p>
+
+{% if not destinations %}
+  <div class="note">
+    <h3>No archive storage yet</h3>
+    <p>Recordings are being discovered and matched to calls, but nothing is copied
+       until a destination exists. Add one on the server:</p>
+    <p style="margin-top:8px"><code>c2w-admin destination add --brand &lt;org&gt; --provider wasabi --region eu-central-1 --bucket &lt;name&gt;</code></p>
+  </div>
+{% endif %}
+
+<div class="tw stack">
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th><th>Service</th><th>Region</th><th>Bucket</th><th>Prefix</th>
+        <th>State</th><th class="right">Objects</th><th class="right">Stored</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for d in destinations %}
+      <tr>
+        <td data-label="Name">{{ d.name }}</td>
+        <td data-label="Service">{{ d.provider }}</td>
+        <td class="mono" data-label="Region">{{ d.region }}</td>
+        <td class="mono" data-label="Bucket">{{ d.bucket }}</td>
+        <td class="mono" data-label="Prefix">{{ d.path_prefix or '—' }}</td>
+        <td data-label="State"><span class="pill {{ d.status | conn_class }}">{{ d.status | lower }}</span></td>
+        <td class="right" data-label="Objects">{{ "{:,}".format(d.objects_stored) }}</td>
+        <td class="right" data-label="Stored">{{ d.bytes_stored | filesize }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8" class="empty">No archive storage configured.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

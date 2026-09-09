@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Settings — c2w{% endblock %}
+{% block body %}
+
+<h1>Settings</h1>
+<p class="sub">Stored in the database. There are no configuration files to edit.</p>
+
+{# The result of what you just did: a flash, gone on the next navigation. #}
+{% if saved %}<div class="flash ok">Saved <strong>{{ saved }}</strong>.</div>{% endif %}
+{% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+
+<div class="note">
+  <h3>CommPeak is only ever read</h3>
+  <p>Nothing here can enable deleting or changing anything on the CommPeak side.
+     The capability is not present in the software.</p>
+</div>
+
+{% for category, specs in categories.items() %}
+  <h2>{{ category }}</h2>
+  <div class="tw">
+    {% for spec in specs %}
+      <form class="setrow" method="post" action="/admin/settings">
+        <input type="hidden" name="key" value="{{ spec.key }}">
+        <div>
+          <div class="setname">
+            {{ spec.label }}
+            {% if spec.restart_required %}
+              <span class="pill idle" title="Takes effect when services restart">restart</span>
+            {% endif %}
+            {% if spec.brand_overridable %}
+              <span class="pill idle" title="Can differ per organisation">per-org</span>
+            {% endif %}
+          </div>
+          <p class="hint">{{ spec.description }}</p>
+          <div class="setkey">{{ spec.key }}</div>
+        </div>
+        <div class="setcontrol">
+          {% if spec.type == 'bool' %}
+            <select name="value" aria-label="{{ spec.label }}">
+              <option value="true" {{ 'selected' if values[spec.key] }}>On</option>
+              <option value="false" {{ '' if values[spec.key] else 'selected' }}>Off</option>
+            </select>
+          {% elif spec.type == 'secret' %}
+            {# Monospace, so a transposed character in a key is visible. #}
+            <input name="value" type="password" class="mono" autocomplete="new-password"
+                   aria-label="{{ spec.label }}"
+                   placeholder="{{ 'Saved — type to replace' if values[spec.key] else 'Not set' }}">
+          {% elif spec.type == 'json' %}
+            <input name="value" class="mono" value="{{ values[spec.key] | tojson }}"
+                   aria-label="{{ spec.label }}">
+          {% else %}
+            <input name="value" value="{{ values[spec.key] }}" aria-label="{{ spec.label }}"
+                   {% if spec.type in ('int', 'float') %}type="number" step="any"{% endif %}>
+          {% endif %}
+          {% if spec.unit %}<span class="unit">{{ spec.unit }}</span>{% endif %}
+          {% if 'settings.manage' in permissions %}
+            <button type="submit" class="ghost small">Save</button>
+          {% endif %}
+        </div>
+      </form>
+    {% endfor %}
+  </div>
+{% endfor %}
+{% endblock %}

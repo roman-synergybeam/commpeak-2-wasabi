@@ -1,5 +1,5 @@
 # Never commit credentials. The CommPeak/Wasabi keys belong in
-# /etc/cprec/secrets.env on the host, sealed in the database, and nowhere else.
+# /etc/c2w/secrets.env on the host, sealed in the database, and nowhere else.
 .env
 *.env
 !deploy/**/*.env.example

@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from cprec.auth.local import (
+from c2w.auth.local import (
     MAX_FAILED_LOGINS,
     AuthError,
     authenticate,
@@ -26,13 +26,13 @@ from cprec.auth.local import (
     revoke_session,
     verify_password,
 )
-from cprec.db.models.auth import AuthSource, Role, User
-from cprec.settings import SettingsError, SettingsService
-from cprec.settings_spec import SETTINGS
+from c2w.db.models.auth import AuthSource, Role, User
+from c2w.settings import SettingsError, SettingsService
+from c2w.settings_spec import SETTINGS
 
-TEST_DB = os.environ.get("CPREC_TEST_DATABASE_URL")
+TEST_DB = os.environ.get("C2W_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
-    not TEST_DB, reason="set CPREC_TEST_DATABASE_URL to a migrated scratch database"
+    not TEST_DB, reason="set C2W_TEST_DATABASE_URL to a migrated scratch database"
 )
 
 

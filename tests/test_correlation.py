@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from cprec.commpeak.correlate import (
+from c2w.commpeak.correlate import (
     CdrCandidate,
     MatchMethod,
     correlate,
@@ -20,7 +20,7 @@ from cprec.commpeak.correlate import (
     normalise_msisdn,
     numbers_agree,
 )
-from cprec.commpeak.keyparse import parse_key
+from c2w.commpeak.keyparse import parse_key
 
 # The documented example key; its channel id decodes to the same instant as its
 # wall-clock field, which is what makes epoch matching viable.
