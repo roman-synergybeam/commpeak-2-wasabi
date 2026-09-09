@@ -119,3 +119,68 @@ def _reply(payload: dict):
         return httpx.Response(200, json=payload)
 
     return post
+
+
+class TestSectionTestRegistry:
+    """One button per thing a card can reach.
+
+    The Cloudflare card configures two unrelated things, and a single button
+    labelled "Check the Turnstile keys" that quietly also tested the tunnel
+    meant nobody knew the tunnel had been tested. These pin the split so it
+    cannot silently collapse back.
+    """
+
+    def test_cloudflare_offers_both_checks(self):
+        from c2w.web.settings_tests import tests_for
+
+        keys = [t["key"] for t in tests_for("Cloudflare")]
+        assert keys == ["turnstile", "tunnel"]
+        labels = [t["label"] for t in tests_for("Cloudflare")]
+        assert any("Turnstile" in label for label in labels)
+        assert any("tunnel" in label for label in labels)
+
+    def test_every_label_says_what_it_tests(self):
+        """A label that under-describes its button is how this went wrong."""
+        from c2w.web.settings_tests import TESTABLE_SECTIONS
+
+        for category, checks in TESTABLE_SECTIONS.items():
+            keys = [k for k, _ in checks]
+            assert len(keys) == len(set(keys)), f"{category} has a duplicate check key"
+            for key, label in checks:
+                assert label.strip(), f"{category}/{key} has no label"
+
+    def test_a_card_with_nothing_to_reach_offers_no_button(self):
+        from c2w.web.settings_tests import tests_for
+
+        assert tests_for("Retention") == []
+        assert tests_for("Your company") == []
+
+    async def test_every_registered_check_has_a_runner(self):
+        """A button that dispatches to nothing would report "nothing to test"."""
+        from c2w.web.settings_tests import TESTABLE_SECTIONS, run_section_test
+
+        class _NoSettings:
+            async def execute(self, *a, **kw):  # pragma: no cover - not reached
+                raise AssertionError("should not query")
+
+        for category, checks in TESTABLE_SECTIONS.items():
+            for key, _ in checks:
+                out = await run_section_test(
+                    _NoSettings(), category, brand_id=None, actor="t", check=key
+                )
+                # Each runner is reached and fails on the stub session rather
+                # than returning the "nothing to test" sentinel.
+                assert "nothing to test" not in out.summary.lower(), f"{category}/{key}"
+
+    async def test_an_unknown_check_falls_back_to_the_first(self):
+        """An older link, or a form without the field, must still do something."""
+        from c2w.web.settings_tests import run_section_test
+
+        class _NoSettings:
+            async def execute(self, *a, **kw):  # pragma: no cover
+                raise AssertionError("should not query")
+
+        out = await run_section_test(
+            _NoSettings(), "Cloudflare", brand_id=None, actor="t", check="nonsense"
+        )
+        assert "nothing to test" not in out.summary.lower()

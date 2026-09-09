@@ -120,15 +120,14 @@
   {% if 'settings.manage' in permissions %}
     <div class="actions">
       <button type="submit">Save {{ category | lower }}</button>
-      {% if test_label %}
-        {# Its own form, and formaction is not used: the test must run against
-           what is *stored*, not against what happens to be typed into this
-           form, or a passing test proves nothing about what the workers will
-           read. Save first, then test. #}
-        <button type="submit" class="btn ghost" form="test-{{ active_slug }}">
-          {{ test_label }}
-        </button>
-      {% endif %}
+      {# One button per thing this card can actually reach. Their own forms,
+         and formaction is not used: a test must run against what is *stored*,
+         not against what happens to be typed here, or passing proves nothing
+         about what the workers will read. Save first, then test. #}
+      {% for t in section_tests | default([]) %}
+        <button type="submit" class="btn ghost"
+                form="test-{{ active_slug }}-{{ t.key }}">{{ t.label }}</button>
+      {% endfor %}
       {% if category in manage_links %}
         <a class="btn ghost" href="{{ manage_links[category] }}">{{ manage_link_labels[category] }}</a>
       {% endif %}
@@ -136,8 +135,12 @@
   {% endif %}
 </form>
 
-{% if test_label and 'settings.manage' in permissions %}
-  <form id="test-{{ active_slug }}" method="post" action="/admin/settings/test" hidden>
-    <input type="hidden" name="category" value="{{ category }}">
-  </form>
+{% if 'settings.manage' in permissions %}
+  {% for t in section_tests | default([]) %}
+    <form id="test-{{ active_slug }}-{{ t.key }}" method="post"
+          action="/admin/settings/test" hidden>
+      <input type="hidden" name="category" value="{{ category }}">
+      <input type="hidden" name="check" value="{{ t.key }}">
+    </form>
+  {% endfor %}
 {% endif %}

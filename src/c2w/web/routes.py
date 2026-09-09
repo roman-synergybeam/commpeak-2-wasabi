@@ -98,7 +98,7 @@ from c2w.web.accounts import (
     wasabi_region_choices,
 )
 from c2w.web.filters import register as register_filters
-from c2w.web.settings_tests import TESTABLE_SECTIONS, run_section_test
+from c2w.web.settings_tests import run_section_test, tests_for
 
 log = get_logger(__name__)
 
@@ -1638,7 +1638,7 @@ async def admin_settings(
                 if active_section == "Wasabi storage"
                 else {}
             ),
-            test_label=TESTABLE_SECTIONS.get(active_section),
+            section_tests=tests_for(active_section),
             test_result=_SECTION_TESTS.pop(f"{user.id}:{tested}", None) if tested else None,
             saved=saved,
             error=error,
@@ -1825,12 +1825,17 @@ async def test_settings_section(
 
     form = await request.form()
     category = str(form.get("category") or "")
+    check = str(form.get("check") or "")
     outcome = await run_section_test(
-        session, category, brand_id=brand_id, actor=user.email
+        session, category, brand_id=brand_id, actor=user.email, check=check
     )
     _SECTION_TESTS[f"{user.id}:{category}"] = outcome
     log.info(
-        "settings.tested", category=category, ok=outcome.ok, actor=user.email
+        "settings.tested",
+        category=category,
+        check=check or "(default)",
+        ok=outcome.ok,
+        actor=user.email,
     )
     return RedirectResponse(
         f"/admin/settings?section={_section_slug(category)}&tested={quote_plus(category)}",

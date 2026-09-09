@@ -33,20 +33,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from c2w.logging import get_logger
 from c2w.settings import settings_service
 
-__all__ = ["TESTABLE_SECTIONS", "SectionTest", "run_section_test"]
+__all__ = ["TESTABLE_SECTIONS", "SectionTest", "run_section_test", "tests_for"]
 
 log = get_logger(__name__)
 
-#: Which cards get a button, and what the button should say. A section absent
-#: from here has nothing outside this box to talk to, so a test would only be
-#: able to tell you what the form already shows.
-TESTABLE_SECTIONS: dict[str, str] = {
-    "CommPeak calls": "Test the call records connection",
-    "CommPeak messages": "Test the messages connection",
-    "Alerts": "Send a test alert",
-    "Active Directory": "Test the directory connection",
-    "Cloudflare": "Check the Turnstile keys",
+#: Which cards get buttons, and what each button says and does.
+#:
+#: A list per card rather than one test each, because a card can configure two
+#: unrelated things. Cloudflare is the case in point: the Turnstile keys and
+#: the tunnel are set up separately, fail separately, and are fixed in
+#: different places -- and a single button labelled "Check the Turnstile keys"
+#: that quietly also tested the tunnel meant nobody knew the tunnel had been
+#: tested at all.
+#:
+#: A section absent from here has nothing outside this box to talk to, so a
+#: test could only tell you what the form already shows.
+TESTABLE_SECTIONS: dict[str, list[tuple[str, str]]] = {
+    "CommPeak calls": [("cdr", "Test the call records connection")],
+    "CommPeak messages": [("sms", "Test the messages connection")],
+    "Alerts": [("alerts", "Send a test alert")],
+    "Active Directory": [("directory", "Test the directory connection")],
+    "Cloudflare": [
+        ("turnstile", "Test the Turnstile keys"),
+        ("tunnel", "Test the tunnel"),
+    ],
 }
+
+
+def tests_for(category: str) -> list[dict[str, str]]:
+    """The buttons a settings card should show."""
+    return [
+        {"key": key, "label": label}
+        for key, label in TESTABLE_SECTIONS.get(category, [])
+    ]
 
 
 @dataclass
@@ -62,22 +81,37 @@ class SectionTest:
 
 
 async def run_section_test(
-    session: AsyncSession, category: str, *, brand_id: int | None, actor: str
+    session: AsyncSession,
+    category: str,
+    *,
+    brand_id: int | None,
+    actor: str,
+    check: str = "",
 ) -> SectionTest:
-    """Dispatch to the check for one settings card."""
-    runner = {
-        "CommPeak calls": _test_cdr_api,
-        "CommPeak messages": _test_textpeak,
-        "Alerts": _test_alerts,
-        "Active Directory": _test_directory,
-        "Cloudflare": _test_turnstile,
-    }.get(category)
-    if runner is None:
+    """Run one named check. ``check`` picks which, when a card has several."""
+    runners = {
+        "cdr": _test_cdr_api,
+        "sms": _test_textpeak,
+        "alerts": _test_alerts,
+        "directory": _test_directory,
+        "turnstile": _test_turnstile,
+        "tunnel": _test_tunnel,
+    }
+    available = [key for key, _ in TESTABLE_SECTIONS.get(category, [])]
+    if not available:
+        return SectionTest(False, "There is nothing to test on this page.")
+    # An unnamed check runs the card's first, so an older link or a form
+    # without the field still does something sensible.
+    wanted = check if check in available else available[0]
+    runner = runners.get(wanted)
+    if runner is None:  # pragma: no cover - registry and runners are in step
         return SectionTest(False, "There is nothing to test on this page.")
     try:
         return await runner(session, brand_id, actor)
     except Exception as exc:  # every failure is a message, not a 500
-        log.warning("settings.test_failed", category=category, error=str(exc)[:200])
+        log.warning(
+            "settings.test_failed", category=category, check=wanted, error=str(exc)[:200]
+        )
         return SectionTest(False, f"The test could not run: {exc}")
 
 
@@ -295,16 +329,14 @@ async def _test_directory(
 async def _test_turnstile(
     session: AsyncSession, brand_id: int | None, actor: str
 ) -> SectionTest:
-    """Check the Turnstile keys and the state of the tunnel.
+    """The "are you human" check at sign-in: are the keys real, and is it on?
 
-    Both halves of the Cloudflare card, because both are things somebody
-    configures here and then wants to know whether they work. The tunnel half
-    used to say "nothing runs a tunnel yet", which stopped being true the day
-    the tunnel was built -- a stale reassurance is worse than no message,
-    because it stops you looking.
+    Its own button, separate from the tunnel. They are configured on the same
+    card because both are Cloudflare, but they fail separately and are fixed in
+    different places -- and one button that did both meant nobody knew the
+    tunnel had been tested.
     """
     out = SectionTest(True, "")
-    notes: list[str] = []
 
     secret = await settings_service.get_secret(
         session, "turnstile.secret_key", brand_id=brand_id
@@ -340,11 +372,38 @@ async def _test_turnstile(
                 "" if enforced else "The keys work; switch it on above to use them",
             )
 
+    if not out.summary:
+        if not secret:
+            out.summary = (
+                "No Turnstile secret key is set, so the sign-in challenge is off."
+            )
+        else:
+            out.summary = (
+                "Cloudflare accepted the secret key. It rejected the dummy challenge "
+                "response, which is exactly what should happen."
+                if out.ok
+                else "Turnstile is not usable as configured; see below."
+            )
+    return out
+
+
+async def _test_tunnel(
+    session: AsyncSession, brand_id: int | None, actor: str
+) -> SectionTest:
+    """Is the tunnel configured, connected, routed, and reachable?
+
+    Four separate answers because they fail separately, and the commonest
+    outcome by far is "connected but nothing routed to it": a connector token
+    authorises the daemon to join the tunnel and cannot create the DNS record,
+    so the hostname keeps pointing wherever it did before.
+    """
+    out = SectionTest(True, "")
+    notes: list[str] = []
     await _check_tunnel(session, brand_id, out, notes)
     if not out.summary:
         out.summary = " ".join(notes) or (
-            "Cloudflare settings check complete." if out.ok
-            else "Something on this card is not working; see below."
+            "The tunnel is up." if out.ok
+            else "The tunnel is not carrying traffic yet; see below."
         )
     return out
 
