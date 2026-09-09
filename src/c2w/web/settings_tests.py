@@ -214,8 +214,11 @@ async def _test_alerts(
     from c2w.alerts.base import Alert, Severity
 
     out = SectionTest(True, "")
+    platform = await settings_service.get_str(
+        session, "core.platform_name", brand_id=brand_id
+    )
     alert = Alert(
-        title="Test alert from the recording archive",
+        title=f"Test alert from {platform}",
         body=(
             f"Sent by {actor} from the Alerts settings page to check this "
             "channel works. Nothing is wrong."

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Sign in — c2w</title>
+  <title>Sign in — {{ platform_name | default('CommPeak-2-Wasabi') }}</title>
   <script>
     try {
       var t = localStorage.getItem("c2w-theme");
@@ -20,7 +20,7 @@
 <body>
 <main class="narrow">
   <form class="login-card" method="post" action="/login">
-    <h1>CommPeak &rarr; Wasabi</h1>
+    <h1>{{ platform_name }}</h1>
     <p class="sub">Call recording archive</p>
 
     {# A failed sign-in is the result of what you just did, so it is a flash. #}

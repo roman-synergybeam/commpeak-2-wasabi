@@ -1212,9 +1212,19 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         help_label="How time-based codes work (RFC 6238)",
     ),
     SettingSpec(
+        key="core.platform_name",
+        type=SettingType.STRING,
+        default="CommPeak-2-Wasabi",
+        category="Web address and sessions",
+        label="What this system is called",
+        description="Shown in the header, on the sign-in page and at the top of "
+        "every alert, so a message arriving in a shared channel says which "
+        "system sent it. This is the platform's own name, not a customer's.",
+    ),
+    SettingSpec(
         key="mfa.issuer_name",
         type=SettingType.STRING,
-        default="c2w",
+        default="CommPeak-2-Wasabi",
         category="Two-factor and passwords",
         label="Name shown in the authenticator",
         description="What people see next to the code in their app.",

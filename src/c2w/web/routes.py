@@ -206,6 +206,12 @@ async def _shell(
         "nav": nav,
         "role_here": role_here,
         "org_timezone": timezone,
+        # The platform's own name, one setting rather than five hardcoded
+        # strings that drifted apart -- the authenticator said "c2w" while the
+        # header said something else.
+        "platform_name": await settings_service.get_str(
+            session, "core.platform_name", brand_id=active.id if active else None
+        ),
         # Resolved here rather than in the template: an unknown value must fall
         # back to a real stack, not to an empty `font-family:` declaration.
         "font_stack": FONT_STACKS.get(
@@ -237,7 +243,14 @@ async def login_form(
     no_users = (await session.execute(select(func.count()).select_from(User))).scalar_one() == 0
     sso = await settings_service.get_bool(session, "auth.oidc_entra_enabled")
     return templates.TemplateResponse(
-        request, "login.html", {"request": request, "no_users": no_users, "sso_enabled": sso}
+        request,
+        "login.html",
+        {
+            "request": request,
+            "no_users": no_users,
+            "sso_enabled": sso,
+            "platform_name": await settings_service.get_str(session, "core.platform_name"),
+        },
     )
 
 
@@ -348,7 +361,13 @@ async def login_code_form(
     if user is None:
         return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
     return templates.TemplateResponse(
-        request, "login_code.html", {"request": request, "email": user.email}
+        request,
+        "login_code.html",
+        {
+            "request": request,
+            "email": user.email,
+            "platform_name": await settings_service.get_str(session, "core.platform_name"),
+        },
     )
 
 
@@ -368,7 +387,14 @@ async def login_code_submit(
         return templates.TemplateResponse(
             request,
             "login_code.html",
-            {"request": request, "email": user.email, "error": str(exc)},
+            {
+                "request": request,
+                "email": user.email,
+                "error": str(exc),
+                "platform_name": await settings_service.get_str(
+                    session, "core.platform_name"
+                ),
+            },
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
     return await _sign_in(
@@ -401,7 +427,13 @@ async def login_enrol_form(
     return templates.TemplateResponse(
         request,
         "login_enrol.html",
-        {"request": request, "email": user.email, "enrolment": enrolment, "error": error},
+        {
+            "request": request,
+            "email": user.email,
+            "enrolment": enrolment,
+            "error": error,
+            "platform_name": await settings_service.get_str(session, "core.platform_name"),
+        },
     )
 
 
