@@ -81,6 +81,9 @@
       <label for="display_name">Full name</label>
       <input id="display_name" name="display_name" autocomplete="off"
              placeholder="optional">
+      {# Filled by the directory picker above. Storing the directory's own
+         identifier means matching survives somebody changing their name. #}
+      <input type="hidden" id="directory_dn" name="directory_dn" value="">
       <p class="hint">Shown in the console and against anything they do.</p>
     </div>
   </div>
@@ -90,6 +93,9 @@
       <label for="auth_source">Signs in with</label>
       <select id="auth_source" name="auth_source">
         <option value="LOCAL">An email address and password kept here</option>
+        <option value="LDAP" {{ '' if directory.ldap else 'disabled' }}>
+          Active Directory / LDAP{{ '' if directory.ldap else ' — not configured' }}
+        </option>
         <option value="ENTRA" {{ '' if directory.entra else 'disabled' }}>
           Microsoft Entra ID{{ '' if directory.entra else ' — not configured' }}
         </option>
@@ -117,14 +123,25 @@
         {% endif %}
       </p>
     </div>
-    <div>
-      <label for="brand_id">Organisation</label>
-      <select id="brand_id" name="brand_id">
+    <div id="org-field">
+      <label>Organisations</label>
+      {# Checkboxes rather than one menu: the same person routinely handles
+         calls for more than one of these companies, and the role chosen above
+         applies to each one ticked. The first ticked becomes where they land
+         after signing in. #}
+      <div class="checklist">
         {% for b in user_brands %}
-          <option value="{{ b.id }}">{{ b.name }}</option>
+          <label>
+            <input type="checkbox" name="brand_ids" value="{{ b.id }}"
+                   {{ 'checked' if loop.first and user_brands | length == 1 }}>
+            {{ b.name }}
+          </label>
         {% endfor %}
-      </select>
-      <p class="hint">Leave alone for a platform admin, who belongs to none.</p>
+      </div>
+      <p class="hint">
+        Tick every company they work for. A platform admin needs none &mdash;
+        they reach all of them by role.
+      </p>
     </div>
   </div>
 
@@ -134,7 +151,7 @@
      regardless. #}
   <div class="row" id="password-fields">
     <div>
-      <label for="password">First password</label>
+      <label for="password">Password</label>
       <input id="password" name="password" type="password" class="mono"
              autocomplete="new-password" minlength="{{ min_password_length }}">
       <p class="hint">
@@ -186,21 +203,11 @@
         </td>
         <td class="mono" data-label="Last sign-in">{{ u.last_login_at | dt }}</td>
         <td data-label="Actions" class="rowacts">
-          {% if u.id != user.id %}
-            <form method="post" action="/admin/users/{{ u.id }}/active">
-              <input type="hidden" name="active" value="{{ '0' if u.is_active else '1' }}">
-              <button type="submit" class="btn ghost small">
-                {{ 'Disable' if u.is_active else 'Enable' }}
-              </button>
-            </form>
-            {% if role_here.value == 'SUPER_ADMIN' and u.totp_active %}
-              <form method="post" action="/admin/users/{{ u.id }}/2fa/reset">
-                <button type="submit" class="btn ghost small">Clear two-factor</button>
-              </form>
-            {% endif %}
-          {% else %}
-            <span class="det">that's you</span>
-          {% endif %}
+          {# One link, not four buttons: role, organisations, disabling and
+             deletion all live on the person's own page, where there is room
+             to say what each does. #}
+          <a class="btn ghost small" href="/admin/users/{{ u.email | urlencode }}">Manage</a>
+          {% if u.id == user.id %}<span class="det">that's you</span>{% endif %}
         </td>
       </tr>
     {% endfor %}
@@ -215,7 +222,7 @@
     var src = document.getElementById("auth_source");
     var fields = document.getElementById("password-fields");
     var role = document.getElementById("role");
-    var brand = document.getElementById("brand_id");
+    var orgField = document.getElementById("org-field");
     if (!src || !fields) return;
     function sync() {
       var local = src.value === "LOCAL";
@@ -223,10 +230,11 @@
       var inputs = fields.querySelectorAll("input");
       for (var i = 0; i < inputs.length; i++) inputs[i].required = local;
       // A platform admin belongs to no organisation, so the choice is moot.
-      if (role && brand) {
+      if (role && orgField) {
         var superAdmin = role.value === "SUPER_ADMIN";
-        brand.disabled = superAdmin;
-        brand.closest("div").style.opacity = superAdmin ? ".45" : "";
+        var boxes = orgField.querySelectorAll('input[type="checkbox"]');
+        for (var j = 0; j < boxes.length; j++) boxes[j].disabled = superAdmin;
+        orgField.style.opacity = superAdmin ? ".45" : "";
       }
     }
     src.addEventListener("change", sync);
@@ -247,8 +255,13 @@
       if (name && nameField) nameField.value = name;
       // A directory account has no password here, so switch the source across
       // and let sync() hide the password pair.
-      var entra = src.querySelector('option[value="ENTRA"]:not([disabled])');
-      if (entra) { src.value = "ENTRA"; }
+      var dn = document.getElementById("directory_dn");
+      if (dn) dn.value = pick.getAttribute("data-pick-dn") || "";
+      // Prefer the directory that is actually configured.
+      var option = src.querySelector('option[value="LDAP"]:not([disabled])')
+        || src.querySelector('option[value="ENTRA"]:not([disabled])')
+        || src.querySelector('option[value="GOOGLE"]:not([disabled])');
+      if (option) src.value = option.value;
       sync();
       if (emailField) emailField.focus();
     });

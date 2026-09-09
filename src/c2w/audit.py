@@ -37,8 +37,17 @@ class AdminAction(enum.StrEnum):
     action filter stays readable. The specifics go in ``detail``.
     """
 
+    ORGANISATION_CREATED = "ORGANISATION_CREATED"
+    ORGANISATION_RENAMED = "ORGANISATION_RENAMED"
+    TENANT_CREATED = "TENANT_CREATED"
     USER_CREATED = "USER_CREATED"
     USER_ENABLED = "USER_ENABLED"
+    USER_DELETED = "USER_DELETED"
+    USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
+    USER_DETAILS_CHANGED = "USER_DETAILS_CHANGED"
+    PASSWORD_RESET_BY_ADMIN = "PASSWORD_RESET_BY_ADMIN"  # noqa: S105 - an action name
+    USER_BRAND_ADDED = "USER_BRAND_ADDED"
+    USER_BRAND_REMOVED = "USER_BRAND_REMOVED"
     USER_DISABLED = "USER_DISABLED"
     #: An administrator cleared somebody else's authenticator after a lost
     #: phone. The single most abusable action in the system, since it removes a

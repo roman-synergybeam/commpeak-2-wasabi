@@ -255,3 +255,65 @@ input[type="range"]:focus-visible{outline:2px solid var(--accent);outline-offset
   .railnav a{white-space:nowrap;border-left:0;border-bottom:2px solid transparent}
   .railnav a.on{border-left:0;border-bottom-color:var(--accent)}
 }
+
+/* A field with its own save button beside it. */
+.inline-save{display:flex;gap:8px;align-items:center;margin:0}
+.inline-save input{flex:1 1 auto;min-width:0}
+
+/* A short list of tick boxes standing in for a multi-select. Scrolls past a
+   handful, because an installation with twenty organisations should not push
+   the submit button off the screen. */
+.checklist{display:flex;flex-direction:column;gap:6px;max-height:190px;
+  overflow-y:auto;padding:8px 10px;border:1px solid var(--rule);border-radius:6px;
+  background:var(--surface-2)}
+.checklist label{display:flex;align-items:center;gap:8px;margin:0;font-weight:400;
+  font-size:13.5px}
+.checklist input{margin:0}
+
+/* The change log ----------------------------------------------------------
+   A list of lines, not a table: the entries are not the same shape as each
+   other, so columns are mostly empty and the kit's narrow-screen stacking
+   turns them into one cell per row. Each line wraps rather than scrolling
+   sideways. */
+.changelog{list-style:none;margin:0;padding:0;border:1px solid var(--rule);
+  border-radius:var(--radius);overflow:hidden}
+.changelog li{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;
+  padding:7px 12px;border-bottom:1px solid var(--rule);font-size:13.5px;
+  line-height:1.5}
+.changelog li:last-child{border-bottom:0}
+.changelog li:nth-child(even){background:var(--surface-2)}
+.changelog li.denied{background:var(--danger-wash)}
+.changelog time{color:var(--ink-3);font-size:12.5px;font-variant-numeric:tabular-nums;
+  flex:0 0 auto}
+.changelog .who{font-weight:600;flex:0 0 auto}
+.changelog .what{flex:1 1 22ch;min-width:0}
+.changelog .what code{font-size:12.5px;padding:1px 4px;border-radius:3px;
+  background:var(--surface);border:1px solid var(--rule)}
+.changelog .from{margin-left:auto;flex:0 0 auto;opacity:.65}
+.changelog li.empty{color:var(--ink-3);justify-content:center;padding:22px}
+@media (max-width:640px){
+  .changelog .from{margin-left:0}
+  .changelog .what{flex-basis:100%}
+}
+
+/* Toasts ------------------------------------------------------------------
+   Flash messages, lifted out of the page flow into the corner. They are
+   rendered inline by each page and moved here by script, so with JavaScript
+   off they still appear -- just in the old place. */
+.toasts{position:fixed;top:14px;right:14px;z-index:60;display:flex;
+  flex-direction:column;gap:8px;width:min(380px,calc(100vw - 28px));
+  pointer-events:none}
+.toasts .toast{pointer-events:auto;margin:0;padding-right:34px;position:relative;
+  box-shadow:var(--shadow);animation:toast-in .18s ease-out}
+.toasts .toast.going{opacity:0;transform:translateX(8px);
+  transition:opacity .2s ease,transform .2s ease}
+@keyframes toast-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+.toast-x{position:absolute;top:4px;right:4px;width:24px;height:24px;padding:0;
+  background:none;border:0;color:inherit;opacity:.55;font-size:17px;line-height:1;
+  cursor:pointer}
+.toast-x:hover{opacity:1}
+.toast-x:focus-visible{outline:2px solid currentColor;outline-offset:-2px;border-radius:4px}
+@media (prefers-reduced-motion:reduce){
+  .toasts .toast{animation:none}
+  .toasts .toast.going{transition:none}
+}

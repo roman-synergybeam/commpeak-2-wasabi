@@ -36,6 +36,10 @@
   <script src="/static/player.js" defer></script>
 </head>
 <body>
+{# Where flash messages end up. They are still rendered inline by each page,
+   and moved here by the script at the bottom -- so with JavaScript off they
+   appear in the page as before rather than vanishing. #}
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 
 <header class="top">
   <div class="brand">
@@ -55,6 +59,9 @@
     {% endif %}
     <a href="/sync" class="{{ 'on' if nav == 'sync' }}">Sync</a>
     {% if 'storage.view' in permissions %}
+      {% if 'brands.manage' in permissions %}
+        <a href="/admin/organisations" class="{{ 'on' if nav == 'organisations' }}">Organisations</a>
+      {% endif %}
       <a href="/admin/connections" class="{{ 'on' if nav == 'connections' }}">CommPeak</a>
       <a href="/admin/storage" class="{{ 'on' if nav == 'storage' }}">Archive</a>
     {% endif %}
@@ -171,6 +178,45 @@
     function tick() { el.textContent = fmt.format(new Date()); }
     tick();
     setInterval(tick, 1000);
+  })();
+
+  // Flash messages belong out of the way, not shoved into the top of the page
+  // pushing everything down. Each page still renders them inline; they are
+  // lifted into the corner here, which means no JavaScript still shows them.
+  (function () {
+    var tray = document.getElementById("toasts");
+    if (!tray) return;
+    var found = document.querySelectorAll("main .flash");
+    for (var i = 0; i < found.length; i++) {
+      var note = found[i];
+      note.classList.add("toast");
+
+      var close = document.createElement("button");
+      close.type = "button";
+      close.className = "toast-x";
+      close.setAttribute("aria-label", "Dismiss");
+      close.textContent = "\u00d7";
+      close.addEventListener("click", function (e) {
+        var box = e.target.parentNode;
+        box.classList.add("going");
+        setTimeout(function () { box.remove(); }, 200);
+      });
+      note.appendChild(close);
+      tray.appendChild(note);
+
+      // Successes announce themselves and go. Failures stay until dismissed:
+      // "already has an account" is something you have to read and act on,
+      // and a message that disappears while you are still looking at the form
+      // is worse than no message.
+      if (note.classList.contains("ok")) {
+        (function (box) {
+          setTimeout(function () {
+            box.classList.add("going");
+            setTimeout(function () { box.remove(); }, 200);
+          }, 6000);
+        })(note);
+      }
+    }
   })();
 
   // A menu that stays open once you have clicked past it is a menu in the way.

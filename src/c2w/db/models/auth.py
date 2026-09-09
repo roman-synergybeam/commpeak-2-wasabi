@@ -40,6 +40,10 @@ class AuthSource(enum.StrEnum):
     LOCAL = "LOCAL"
     ENTRA = "ENTRA"
     GOOGLE = "GOOGLE"
+    #: A domain controller. Named for the protocol, because the same path
+    #: serves any LDAP directory; the console says "Active Directory", which
+    #: is what customers call it.
+    LDAP = "LDAP"
 
 
 class Role(enum.StrEnum):
@@ -102,6 +106,12 @@ class User(Base, IdMixin, TimestampMixin):
 
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    #: Where to reach this person. Columns rather than preference keys: these
+    #: are addresses the platform sends to, not choices the person made, and
+    #: the alert senders will read them when routing becomes per-person.
+    telegram_chat_id: Mapped[str | None] = mapped_column(String(64))
+    slack_user_id: Mapped[str | None] = mapped_column(String(64))
 
     #: What this person chose for themselves -- theme, text size, playback
     #: volume. Kept on the account so it follows them to another machine.

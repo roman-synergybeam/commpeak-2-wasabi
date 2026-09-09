@@ -606,7 +606,7 @@ class TestAdministrationIsAudited:
             "/admin/users",
             data={
                 "email": email, "auth_source": "LOCAL", "role": "OPERATOR",
-                "brand_id": str(people["brand_id"]),
+                "brand_ids": str(people["brand_id"]),
                 "password": "a-long-enough-password",
                 "password_again": "a-long-enough-password",
             },
@@ -680,7 +680,7 @@ class TestAdministrationIsAudited:
             "/admin/users",
             data={
                 "email": email, "auth_source": "LOCAL", "role": "OPERATOR",
-                "brand_id": str(people["brand_id"]),
+                "brand_ids": str(people["brand_id"]),
                 "password": "a-long-enough-password",
                 "password_again": "a-long-enough-password",
             },

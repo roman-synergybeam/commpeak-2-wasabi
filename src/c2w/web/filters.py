@@ -284,8 +284,17 @@ def _audit_state(event: dict[str, Any]) -> str:
 _AUDIT_ACTION_LABEL = {
     "PLAY": "listened",
     "DOWNLOAD": "downloaded",
+    "ORGANISATION_CREATED": "organisation created",
+    "ORGANISATION_RENAMED": "organisation renamed",
+    "TENANT_CREATED": "PBX added",
     "USER_CREATED": "account created",
     "USER_ENABLED": "account enabled",
+    "USER_DELETED": "account deleted",
+    "USER_ROLE_CHANGED": "role changed",
+    "USER_DETAILS_CHANGED": "details changed",
+    "PASSWORD_RESET_BY_ADMIN": "password reset by an administrator",
+    "USER_BRAND_ADDED": "given access to an organisation",
+    "USER_BRAND_REMOVED": "access to an organisation removed",
     "USER_DISABLED": "account disabled",
     "MFA_RESET_BY_ADMIN": "two-factor cleared by an administrator",
     "MFA_ENABLED": "two-factor turned on",
@@ -300,17 +309,86 @@ def _audit_action(value: Any) -> str:
     return _AUDIT_ACTION_LABEL.get(raw, raw.replace("_", " ").lower())
 
 
+def _change_line(entry: dict[str, Any]) -> Markup:
+    """One log entry as a sentence.
+
+    Built here rather than in the template because the shape differs by kind --
+    a settings change has a before and an after, a media access has a
+    recording, an administrative action has a target -- and a template full of
+    branches for that is a template nobody can read.
+
+    Returns Markup, so it must escape everything it interpolates itself. A
+    filter that forgets is how a page ends up rendering somebody's email
+    address as markup.
+    """
+    action = str(entry.get("action") or "")
+    detail = entry.get("detail") or {}
+    if not isinstance(detail, dict):
+        detail = {}
+
+    if action == "SETTING_CHANGED":
+        old_value = entry.get("old_value")
+        new_value = entry.get("new_value")
+        body = Markup("changed <b>{}</b>").format(str(entry.get("key") or "a setting"))
+        if old_value is None and new_value is not None:
+            return body + Markup(" to <code>{}</code>").format(new_value)
+        if old_value is not None and new_value is None:
+            return body + Markup(" back to its default (was <code>{}</code>)").format(old_value)
+        return body + Markup(" from <code>{}</code> to <code>{}</code>").format(
+            "not set" if old_value is None else old_value,
+            "not set" if new_value is None else new_value,
+        )
+
+    label = _audit_action(action)
+    # A refused entry read "account created ... denied", which says the
+    # opposite of what happened until you reach the end of the line.
+    if str(entry.get("result") or "SUCCESS") != "SUCCESS":
+        label = f"attempted: {label}"
+    target = detail.get("target_email")
+    if target:
+        line = Markup("{} &mdash; <b>{}</b>").format(label, str(target))
+    elif entry.get("recording_id"):
+        line = Markup("{} recording <b>{}</b>").format(label, str(entry["recording_id"]))
+    else:
+        line = Markup("{}").format(label)
+
+    # The one or two extras that answer the obvious follow-up question.
+    extras: list[str] = []
+    changed = detail.get("changed")
+    if isinstance(changed, dict):
+        extras.extend(
+            f"{field}: {values.get('from') or 'not set'} \u2192 {values.get('to') or 'not set'}"
+            for field, values in changed.items()
+            if isinstance(values, dict)
+        )
+    if detail.get("from") and detail.get("to"):
+        extras.append(f"{detail['from']} \u2192 {detail['to']}")
+    if detail.get("role") and not changed:
+        extras.append(str(detail["role"]).replace("_", " ").lower())
+    if detail.get("reason"):
+        extras.append(str(detail["reason"]))
+    if extras:
+        line += Markup(" <span class=\"det\">({})</span>").format(", ".join(extras))
+    return line
+
+
 def _audit_search(event: dict[str, Any]) -> str:
     """Everything an operator might type when looking for an entry.
 
     Built on the server, which already has the row -- the client only ever does
     a substring test against it.
     """
+    detail = event.get("detail") if isinstance(event.get("detail"), dict) else {}
     parts = [
         event.get("actor_label"),
+        _audit_action(event.get("action")),
         event.get("action"),
         event.get("result"),
         event.get("call_uuid"),
+        event.get("key"),                    # a settings change
+        event.get("old_value"),
+        event.get("new_value"),
+        detail.get("target_email"),
         str(event.get("recording_id") or ""),
         str(event.get("ip") or ""),
     ]
@@ -375,6 +453,7 @@ _AUTH_LABEL = {
     "LOCAL": "password kept here",
     "ENTRA": "Microsoft Entra ID",
     "GOOGLE": "Google Workspace",
+    "LDAP": "Active Directory / LDAP",
 }
 
 
@@ -487,6 +566,7 @@ def register(env: Any) -> None:
             "auth_label": _auth_label,
             "audit_state": _audit_state,
             "audit_action": _audit_action,
+            "change_line": _change_line,
             "audit_search": _audit_search,
         }
     )

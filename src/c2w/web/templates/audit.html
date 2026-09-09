@@ -1,81 +1,83 @@
 {% extends "base.html" %}
-{% block title %}Audit log — c2w{% endblock %}
+{% block frame %}measured{% endblock %}
+{% block title %}Change log — c2w{% endblock %}
 {% block body %}
 
-<h1>Audit log</h1>
-<p class="sub">Who listened to what, and when. Append-only &mdash; entries cannot be edited or removed.</p>
+<h1>Change log</h1>
+<p class="sub">
+  Everything that happened, newest first: who listened to what, who changed a
+  setting and from what to what, and every change to an account. Append-only
+  &mdash; entries cannot be edited or removed.
+</p>
 
-{# The server sends the whole page of entries, so searching and paging happen
-   in the page: with a few hundred rows already rendered, a round trip per
-   keystroke is the thing worth removing (UX-NOTES §8). #}
-<div class="filters" style="margin-bottom:14px">
-  <button class="chip on" type="button" data-f="all">All <span class="n" data-count="all">0</span></button>
-  <button class="chip" type="button" data-f="play">Listened <span class="n" data-count="play">0</span></button>
-  <button class="chip" type="button" data-f="download">Downloaded <span class="n" data-count="download">0</span></button>
-  <button class="chip" type="button" data-f="denied">Refused <span class="n" data-count="denied">0</span></button>
-  <div class="chip-search">
-    <input id="audit-q" placeholder="Search people, actions, calls…" aria-label="Search the audit log">
-    <button class="chip" id="audit-qclear" type="button" hidden>Clear</button>
+<div class="filters" style="margin-bottom:12px">
+  <a class="chip {{ 'on' if not selected_action }}" href="/audit">Everything</a>
+  {% for a in actions %}
+    <a class="chip {{ 'on' if selected_action == a }}"
+       href="/audit?action={{ a | urlencode }}">{{ a | audit_action }}</a>
+  {% endfor %}
+</div>
+
+<form class="card" method="get" action="/audit" style="padding:12px 14px">
+  <div class="row">
+    <div>
+      <label for="who">Person</label>
+      <input id="who" name="actor" type="search" value="{{ selected_actor or '' }}"
+             placeholder="email address">
+    </div>
+    <div>
+      <label for="lines">Lines</label>
+      <select id="lines" name="limit">
+        {% for n in [50, 100, 200, 500] %}
+          <option value="{{ n }}" {{ 'selected' if page_limit == n }}>{{ n }}</option>
+        {% endfor %}
+      </select>
+    </div>
   </div>
+  {% if selected_action %}
+    <input type="hidden" name="action" value="{{ selected_action }}">
+  {% endif %}
+  <div class="actions">
+    <button type="submit">Search</button>
+    <a class="btn ghost" href="/audit">Clear</a>
+  </div>
+</form>
+
+{# A log is a list of lines. This was a nine-column table, which on a narrow
+   screen collapsed into one cell per row and became unreadable -- the columns
+   were mostly empty because the entries are not all the same shape. #}
+<ol class="changelog">
+  {% for e in entries %}
+    <li class="{{ 'denied' if e.result != 'SUCCESS' }}"
+        data-s="{{ e | audit_search }}">
+      <time class="mono" datetime="{{ e.at }}">{{ e.at | dt }}</time>
+      <span class="who">{{ e.actor_label or 'the system' }}</span>
+      <span class="what">{{ e | change_line }}</span>
+      {% if e.result != 'SUCCESS' %}
+        <span class="pill err">{{ e.result | lower }}</span>
+      {% endif %}
+      {% if e.ip %}<span class="det mono from">{{ e.ip }}</span>{% endif %}
+    </li>
+  {% else %}
+    <li class="empty">Nothing has been recorded yet.</li>
+  {% endfor %}
+</ol>
+
+<div class="pager">
+  <div class="pagebtns">
+    {% if page_offset %}
+      <a class="btn" href="/audit?{{ query_string }}&offset={{ [page_offset - page_limit, 0] | max }}">&lsaquo; Newer</a>
+    {% endif %}
+    {% if has_more %}
+      <a class="btn" href="/audit?{{ query_string }}&offset={{ page_offset + page_limit }}">Older &rsaquo;</a>
+    {% endif %}
+  </div>
+  <span class="range">
+    {% if entries %}
+      Lines {{ "{:,}".format(page_offset + 1) }}&ndash;{{ "{:,}".format(page_offset + entries | length) }}
+    {% else %}
+      Nothing to show
+    {% endif %}
+  </span>
 </div>
-
-<div class="tw stack logwrap">
-  <table class="log" id="audit-table">
-    <thead>
-      <tr><th>When</th><th>Person</th><th>Address</th><th>Action</th><th>Result</th>
-          <th>Recording</th><th>Call</th></tr>
-    </thead>
-    <tbody>
-    {% for e in events %}
-      {# Rows describe themselves; nothing in the kit knows what an audit
-         entry is, it just reads these attributes. #}
-      <tr class="row {{ 'lvl-warn' if e.result != 'SUCCESS' }}"
-          data-state="{{ e | audit_state }}"
-          data-search="{{ e | audit_search }}">
-        <td class="nowrap mono" data-label="When">{{ e.at | dt }}</td>
-        <td data-label="Person">{{ e.actor_label or '—' }}</td>
-        <td class="mono" data-label="Address">{{ e.ip or '—' }}</td>
-        <td data-label="Action">{{ e.action | audit_action }}</td>
-        <td data-label="Result">
-          <span class="pill {{ 'ok' if e.result == 'SUCCESS' else 'err' }}">{{ e.result | lower }}</span>
-        </td>
-        <td class="mono" data-label="Recording">{{ e.recording_id or '—' }}</td>
-        <td class="mono" data-label="Call">{{ (e.call_uuid or '')[:8] or '—' }}</td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</div>
-
-<div class="pager" id="audit-pager" hidden>
-  <label for="audit-per">Rows</label>
-  <select id="audit-per"><option>25</option><option>50</option><option>100</option></select>
-  <div class="pagebtns"></div>
-  <span class="range"></span>
-</div>
-
-<script type="module">
-  import { createDataTable } from '/static/ui-kit/js/data-table.js';
-
-  createDataTable({
-    table: '#audit-table',
-    rows: 'tr.row',
-    allowEmpty: true,
-    search: {el: '#audit-q', key: 'search'},
-    searchClear: '#audit-qclear',
-    chips: [{
-      selector: '.chip[data-f]',
-      match: (row, v) => v === 'all' || row.dataset.state === v,
-      counts: {all: '[data-count="all"]', play: '[data-count="play"]',
-               download: '[data-count="download"]', denied: '[data-count="denied"]'},
-    }],
-    page: {el: '#audit-pager', per: '#audit-per', defaultSize: 25,
-           storageKey: 'c2w.audit.per'},
-    labels: {
-      noneYet: 'No recording has been accessed yet.',
-      noneMatch: 'No entry matches these filters.',
-      showing: (a, b, n) => `Showing ${a}–${b} of ${n} entr${n === 1 ? 'y' : 'ies'}`,
-    },
-  });
-</script>
 {% endblock %}

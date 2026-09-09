@@ -15,7 +15,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Final
-from urllib.parse import quote_plus, urlencode
+from urllib.parse import quote, quote_plus, urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import (
@@ -26,7 +26,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from c2w.api.deps import (
@@ -72,12 +72,12 @@ from c2w.auth.local import (
     revoke_session,
 )
 from c2w.auth.rbac import Permission, permissions_for
-from c2w.crypto import CryptoError
+from c2w.crypto import CryptoError, generate_data_key
 from c2w.db.models.auth import AuthSource, Role, User, UserBrand
 from c2w.db.models.core import Brand, CommPeakConnection, StorageDestination, Tenant
 from c2w.logging import get_logger
 from c2w.settings import SettingsError, settings_service
-from c2w.settings_spec import SettingType, specs_by_category
+from c2w.settings_spec import SETTINGS, SettingType, specs_by_category
 from c2w.storage.commpeak import COMMPEAK_ENDPOINT
 from c2w.storage.errors import ErrorClass, TransferError
 from c2w.sync import queue
@@ -1033,21 +1033,21 @@ async def admin_storage_save(
 
 #: A one-line orientation for each card, above its fields.
 _CATEGORY_NOTES = {
-    "Organisation": "Who this organisation is, and where its recordings may live.",
-    "CommPeak (source)": "An organisation can have as many CommPeak accounts as "
+    "Your company": "Who this organisation is, and where its recordings may live.",
+    "CommPeak calls": "An organisation can have as many CommPeak accounts as "
     "it has PBXes and dialers -- each with its own bucket and its own "
     "credentials, added on the CommPeak page. What follows is shared by all of "
     "them.",
-    "CommPeak SMS": "Text messages sent and received through CommPeak TextPeak, "
+    "CommPeak messages": "Text messages sent and received through CommPeak TextPeak, "
     "listed beside the calls. This is a separate API and a separate key from "
     "call records -- one does not imply the other.",
-    "Wasabi (archive)": "An organisation can have as many Wasabi accounts and "
+    "Wasabi storage": "An organisation can have as many Wasabi accounts and "
     "buckets as it needs; they are added on the Archive page, each with its own "
     "keys. What follows applies to all of them.",
-    "Archiving": "How hard to work while copying, and what to do when a copy fails.",
+    "Copying to the archive": "How hard to work while copying, and what to do when a copy fails.",
     "Retention": "How long recordings stay where.",
     "Playback and downloads": "How a recording reaches a browser.",
-    "Notifications": "Where alerts go. Leave the tokens blank to send none.",
+    "Alerts": "Where alerts go. Leave the tokens blank to send none.",
     "Scheduling": "When unattended work happens.",
     "Microsoft 365": "Let staff sign in with their Microsoft work account "
     "instead of a password kept here.",
@@ -1056,10 +1056,13 @@ _CATEGORY_NOTES = {
     "from a domain controller you run.",
     "Two-factor and passwords": "Applies to accounts kept here. Accounts from "
     "Microsoft, Google or your directory follow that system's rules.",
+    "Transcription and voice analysis": "Turning recorded speech into searchable "
+    "text. Nothing here runs yet -- the settings and the storage are in place, "
+    "the recogniser is not.",
     "Cloudflare": "Reaching this console from outside, and keeping robots off "
     "the sign-in page.",
-    "General": "This installation itself.",
-    "Logging and metrics": "What the services write down.",
+    "Web address and sessions": "How people reach this console, and how long a sign-in lasts.",
+    "Logs and monitoring": "What the services write down.",
 }
 
 #: Fields whose value is long enough to want two columns.
@@ -1090,8 +1093,8 @@ _LOCKED_SETTINGS = frozenset({"source.read_only", "retention.allow_source_deleti
 
 #: Where a card's real work is done, when it is not on this page.
 _MANAGE_LINKS = {
-    "CommPeak (source)": ("/admin/connections", "Manage CommPeak accounts"),
-    "Wasabi (archive)": ("/admin/storage", "Manage archive storage"),
+    "CommPeak calls": ("/admin/connections", "Manage CommPeak accounts"),
+    "Wasabi storage": ("/admin/storage", "Manage archive storage"),
     "Two-factor and passwords": ("/admin/users", "Manage people"),
 }
 
@@ -1216,31 +1219,32 @@ async def _setup_steps(session: AsyncSession, brand: Brand | None) -> list[dict[
 SETUP_SECTION = "Setup"
 
 _SETTING_GROUPS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
-    ("Getting started", (SETUP_SECTION,)),
+    # "Your company" belongs here rather than off in a technical group: the
+    # name, the time zone and where recordings may live are the first things
+    # anyone sets, and the checklist points at them.
+    ("Getting started", (SETUP_SECTION, "Your company")),
     (
         "Calls and messages",
         (
-            "CommPeak (source)",
-            "CommPeak SMS",
+            "CommPeak calls",
+            "CommPeak messages",
             "Playback and downloads",
             "Transcription and voice analysis",
         ),
     ),
-    ("Archive", ("Wasabi (archive)", "Archiving", "Retention")),
+    ("Archive", ("Wasabi storage", "Copying to the archive", "Retention")),
     (
         "People and sign-in",
         (
             "Two-factor and passwords",
+            "Web address and sessions",
             "Active Directory",
             "Microsoft 365",
             "Google Workspace",
         ),
     ),
-    (
-        "This installation",
-        ("Organisation", "Notifications", "Scheduling", "Cloudflare",
-         "Logging and metrics", "General"),
-    ),
+    ("Alerts and schedules", ("Alerts", "Scheduling")),
+    ("Server and access", ("Cloudflare", "Logs and monitoring")),
 )
 
 
@@ -1445,35 +1449,92 @@ async def audit_page(
     session: ScopedSession,
     action: str | None = None,
     actor: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
 ) -> Response:
+    """The change log: one line per thing that happened, newest first.
+
+    Two sources, one timeline. `audit_events` says who did something --
+    listened to a call, created an account, cleared a second factor.
+    `setting_history` says what a setting was changed *from* and *to*, which
+    until now was recorded faithfully and shown nowhere at all.
+
+    A UNION rather than two tables on one page, because "what changed here
+    last week" does not care which of our tables the answer is in.
+
+    It was a nine-column table before. Nine columns of mostly-empty cells
+    collapse, on the kit's own narrow rules, into a stack of one-cell rows --
+    which is what made the page unreadable. A log is a list of lines, so this
+    renders lines.
+    """
     if Permission.AUDIT_VIEW not in permissions_for(user.role):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not view the audit log")
-    clauses, params = ["1=1"], {}
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not view the change log")
+
+    limit = max(20, min(limit, 500))
+    offset = max(0, offset)
+
+    where_events = ["1=1"]
+    where_settings = ["1=1"]
+    params: dict[str, Any] = {"limit": limit + 1, "offset": offset}
     if action:
-        clauses.append("action = :action")
+        where_events.append("action = :action")
+        # A settings change has one action name of its own, so filtering by
+        # any other action must exclude the settings side entirely rather
+        # than silently ignoring the filter.
+        where_settings.append(":action = 'SETTING_CHANGED'")
         params["action"] = action
     if actor:
-        clauses.append("actor_label ILIKE :actor")
+        where_events.append("actor_label ILIKE :actor")
+        where_settings.append("changed_by ILIKE :actor")
         params["actor"] = f"%{actor}%"
-    events = (
+
+    sql = f"""
+        SELECT at, actor_label, action, result, ip, detail,
+               recording_id, call_uuid, NULL::text AS key,
+               NULL::text AS old_value, NULL::text AS new_value, NULL::text AS note
+        FROM audit_events
+        WHERE {" AND ".join(where_events)}
+        UNION ALL
+        SELECT at, changed_by AS actor_label, 'SETTING_CHANGED' AS action,
+               'SUCCESS' AS result, NULL AS ip, '{{}}'::jsonb AS detail,
+               NULL::bigint AS recording_id, NULL::text AS call_uuid,
+               key, old_value #>> '{{}}' AS old_value, new_value #>> '{{}}' AS new_value, note
+        FROM setting_history
+        WHERE {" AND ".join(where_settings)}
+        ORDER BY at DESC
+        LIMIT :limit OFFSET :offset
+    """  # noqa: S608 - clauses are fixed literals; every value is bound
+    rows = (await session.execute(text(sql), params)).mappings().all()
+    has_more = len(rows) > limit
+
+    actions = (
         await session.execute(
             text(
-                f"SELECT * FROM audit_events WHERE {' AND '.join(clauses)} "  # noqa: S608
-                "ORDER BY at DESC LIMIT 300"
-            ),
-            params,
+                "SELECT DISTINCT action FROM audit_events "
+                "UNION SELECT 'SETTING_CHANGED' ORDER BY 1"
+            )
         )
-    ).mappings().all()
-    actions = (
-        await session.execute(text("SELECT DISTINCT action FROM audit_events ORDER BY action"))
     ).scalars().all()
+
     return templates.TemplateResponse(
         request,
         "audit.html",
         await _shell(
-            request, session, user, "audit",
-            events=[dict(e) for e in events], actions=list(actions),
-            selected_action=action, selected_actor=actor,
+            request,
+            session,
+            user,
+            "audit",
+            entries=[dict(r) for r in rows[:limit]],
+            actions=list(actions),
+            selected_action=action,
+            selected_actor=actor,
+            page_limit=limit,
+            page_offset=offset,
+            has_more=has_more,
+            query_string=urlencode(
+                {k: v for k, v in request.query_params.items() if v and k != "offset"},
+                doseq=True,
+            ),
         ),
     )
 
@@ -1606,6 +1667,66 @@ def _assert_may_assign(actor: User, role: Role, brand_id: int | None) -> None:
         )
 
 
+async def _refuse(
+    request: Request,
+    session: AsyncSession,
+    actor: User,
+    action: AdminAction,
+    reason: str,
+    *,
+    where: str,
+    target: User | None = None,
+    detail: dict[str, Any] | None = None,
+) -> Response:
+    """Record a refused administrative action, then redirect with the message.
+
+    An attempt that was blocked is exactly what an audit trail is for: "who
+    tried to create an account for this address" is a question the successes
+    alone cannot answer. Recorded with ``result='DENIED'``, which is the
+    vocabulary media refusals already use, so the change log's own filter
+    treats them the same way.
+    """
+    body = dict(detail or {})
+    body["reason"] = reason
+    await record_admin_event(
+        session,
+        actor=actor,
+        action=action,
+        brand_id=await _audit_scope(request, session, actor),
+        target=target,
+        result="DENIED",
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail=body,
+    )
+    joiner = "&" if "?" in where else "?"
+    return RedirectResponse(
+        f"{where}{joiner}error={quote_plus(reason)}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+async def _directory_source_enabled(
+    session: AsyncSession, source: AuthSource, actor: User, request: Request
+) -> bool:
+    """Whether the directory an account is being created against is configured.
+
+    Checked server-side as well as in the form: the menu disables the options
+    that are not set up, but a disabled option is a suggestion, not a control,
+    and an account nobody can ever sign in to is a support call.
+    """
+    _, active = await _brand_scope(request, session, actor)
+    brand_id = active.id if active else None
+    key = {
+        AuthSource.LDAP: "ldap.enabled",
+        AuthSource.ENTRA: "auth.oidc_entra_enabled",
+        AuthSource.GOOGLE: "auth.oidc_google_enabled",
+    }.get(source)
+    if key is None:
+        return False
+    return await settings_service.get_bool(session, key, brand_id=brand_id)
+
+
 @router.post("/admin/users")
 async def add_user(
     request: Request,
@@ -1624,36 +1745,47 @@ async def add_user(
     display_name = str(form.get("display_name") or "").strip() or None
     role_raw = str(form.get("role") or "")
     source_raw = str(form.get("auth_source") or "LOCAL")
-    brand_raw = str(form.get("brand_id") or "")
+    # Several, not one: the same person routinely handles calls for more than
+    # one of these companies.
+    brand_raws = [str(v) for v in form.getlist("brand_ids") if str(v).strip()]
     password = str(form.get("password") or "")
     again = str(form.get("password_again") or "")
+    directory_dn = str(form.get("directory_dn") or "").strip()
 
-    def back(message: str) -> Response:
-        return RedirectResponse(
-            f"/admin/users?error={quote_plus(message)}", status_code=status.HTTP_303_SEE_OTHER
+    async def back(message: str) -> Response:
+        return await _refuse(
+            request, session, user, AdminAction.USER_CREATED, message,
+            where="/admin/users", detail={"attempted_email": email},
         )
 
     if "@" not in email or len(email) < 3:
-        return back("That does not look like an email address")
+        return await back("That does not look like an email address")
     try:
         role = Role(role_raw)
     except ValueError:
-        return back("Choose a role")
+        return await back("Choose a role")
     try:
         source = AuthSource(source_raw)
     except ValueError:
-        return back("Choose how this person signs in")
+        return await back("Choose how this person signs in")
 
     # A platform admin spans every organisation and so belongs to none; any
-    # other role must land somewhere.
+    # other role must land in at least one.
+    brand_ids: list[int] = []
     brand_id: int | None = None
     if role != Role.SUPER_ADMIN:
-        if not brand_raw:
-            return back("Choose an organisation")
-        brand_id = int(brand_raw)
+        if not brand_raws:
+            return await back("Tick at least one organisation")
         allowed = {b.id for b in await selectable_brands(session, user)}
-        if brand_id not in allowed:
-            return back("That is not an organisation you can add people to")
+        try:
+            brand_ids = [int(v) for v in brand_raws]
+        except ValueError:
+            return await back("That is not an organisation you can add people to")
+        if not set(brand_ids) <= allowed:
+            return await back("That is not an organisation you can add people to")
+        # The first ticked is where they land after signing in; the rest are
+        # theirs to switch to.
+        brand_id = brand_ids[0]
 
     _assert_may_assign(user, role, brand_id)
 
@@ -1661,16 +1793,26 @@ async def add_user(
         await session.execute(select(User).where(User.email == email))
     ).scalar_one_or_none()
     if existing is not None:
-        return back(f"{email} already has an account")
+        return await back(f"{email} already has an account")
 
     password_hash = None
     if source == AuthSource.LOCAL:
         if password != again:
-            return back("The two passwords do not match")
+            return await back("The two passwords do not match")
         try:
             password_hash = hash_password(password)
         except AuthError as exc:
-            return back(str(exc))
+            return await back(str(exc))
+    elif not await _directory_source_enabled(session, source, user, request):
+        names = {
+            AuthSource.LDAP: "Active Directory / LDAP",
+            AuthSource.ENTRA: "Microsoft Entra ID",
+            AuthSource.GOOGLE: "Google Workspace",
+        }
+        return await back(
+            f"{names.get(source, str(source))} sign-in is not configured, so an "
+            "account cannot be created against it yet"
+        )
 
     row = User(
         brand_id=brand_id,
@@ -1682,12 +1824,20 @@ async def add_user(
         # A password an administrator typed is a password an administrator
         # knows, so it is a one-time value and must be replaced on first use.
         must_change_password=source == AuthSource.LOCAL,
+        # The directory's own identifier, when the account was picked from it.
+        # Matching on that rather than on an email address survives somebody
+        # changing their name. Empty until their first sign-in otherwise.
+        oidc_subject=directory_dn or None,
         is_active=True,
     )
     session.add(row)
     await session.flush()
-    if brand_id is not None:
-        session.add(UserBrand(user_id=row.id, brand_id=brand_id, role=role))
+    # One membership per organisation ticked, all with the role chosen above.
+    # The role lives on the pairing, so it can be changed per organisation
+    # afterwards on the person's own page.
+    for member_brand in brand_ids:
+        session.add(UserBrand(user_id=row.id, brand_id=member_brand, role=role))
+    if brand_ids:
         await session.flush()
 
     log.info(
@@ -1701,7 +1851,11 @@ async def add_user(
         target=row,
         ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
-        detail={"organisation_id": brand_id, "signs_in_with": str(source)},
+        detail={
+            "organisation_ids": brand_ids,
+            "home_organisation_id": brand_id,
+            "signs_in_with": str(source),
+        },
     )
     return RedirectResponse(
         f"/admin/users?saved={quote_plus(email)}", status_code=status.HTTP_303_SEE_OTHER
@@ -1751,12 +1905,12 @@ async def browse_directory(
     )
 
 
-@router.post("/admin/users/{user_id}/active")
+@router.post("/admin/users/{ident}/active")
 async def set_user_active(
     request: Request,
     user: CurrentUser,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user_id: int,
+    ident: str,
 ) -> Response:
     """Enable or disable an account.
 
@@ -1768,19 +1922,12 @@ async def set_user_active(
     form = await request.form()
     active = str(form.get("active") or "") == "1"
 
-    row = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such person")
-    if not user.is_super_admin and row.brand_id != user.brand_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "not someone in your organisation")
+    row = await _managed_target(session, user, ident)
     if row.id == user.id:
         return RedirectResponse(
             "/admin/users?error=You+cannot+disable+your+own+account",
             status_code=status.HTTP_303_SEE_OTHER,
         )
-    if row.is_super_admin and not user.is_super_admin:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "only a platform administrator can")
-
     # The last platform admin standing must not be switched off: there would be
     # nobody left who can switch anyone back on.
     if row.is_super_admin and not active:
@@ -1821,12 +1968,490 @@ async def set_user_active(
     return RedirectResponse("/admin/users", status_code=status.HTTP_303_SEE_OTHER)
 
 
-@router.post("/admin/users/{user_id}/2fa/reset")
+async def _managed_target(
+    session: AsyncSession, actor: User, ident: str
+) -> User:
+    """The account being administered, or a refusal.
+
+    ``ident`` is an email address -- ``/admin/users/someone@example.com`` --
+    because a URL that says who it is about is one you can read, paste into a
+    ticket and recognise later; ``/admin/users/3`` is only meaningful to the
+    database. A numeric segment is still accepted so older links keep working.
+
+    One place, because every one of the routes below has to make the same two
+    checks and getting either wrong is a privilege escalation: an organisation
+    admin may only touch people in their own organisation, and only a platform
+    admin may touch another platform admin.
+    """
+    ident = str(ident or "").strip()
+    if ident.isdigit():
+        clause = User.id == int(ident)
+    else:
+        clause = User.email == ident.lower()
+    row = (await session.execute(select(User).where(clause))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such person")
+    if not actor.is_super_admin and row.brand_id != actor.brand_id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "not someone in your organisation"
+        )
+    if row.is_super_admin and not actor.is_super_admin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "only a platform administrator can administer another one",
+        )
+    return row
+
+
+async def _last_active_platform_admin(session: AsyncSession, excluding: int) -> bool:
+    """Whether removing this account would leave nobody able to administer.
+
+    Checked before demoting, disabling or deleting a platform admin: there
+    would be no one left who could put it back.
+    """
+    remaining = (
+        await session.execute(
+            select(func.count())
+            .select_from(User)
+            .where(
+                User.role == Role.SUPER_ADMIN,
+                User.is_active.is_(True),
+                User.id != excluding,
+            )
+        )
+    ).scalar_one()
+    return remaining == 0
+
+
+@router.get("/admin/users/{ident}", response_class=HTMLResponse)
+async def admin_user_detail(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    ident: str,
+    error: str | None = None,
+    saved: str | None = None,
+) -> Response:
+    """One person: their role, and which organisations they work in.
+
+    The list page could create an account and nothing else, so somebody who
+    needed access to a second organisation, or the wrong role fixing, could
+    only be edited in the database.
+    """
+    _assert_may_manage(user)
+    target = await _managed_target(session, user, ident)
+
+    memberships = (
+        await session.execute(
+            select(UserBrand.brand_id, UserBrand.role, Brand.name)
+            .join(Brand, Brand.id == UserBrand.brand_id)
+            .where(UserBrand.user_id == target.id)
+            .order_by(Brand.name)
+        )
+    ).all()
+    held = {row[0] for row in memberships}
+
+    reachable = await selectable_brands(session, user)
+    assignable = [Role.ADMIN, Role.OPERATOR]
+    if user.is_super_admin:
+        assignable = [Role.SUPER_ADMIN, *assignable]
+
+    return templates.TemplateResponse(
+        request,
+        "user_detail.html",
+        await _shell(
+            request,
+            session,
+            user,
+            "users",
+            target=target,
+            memberships=[
+                {"brand_id": b, "role": Role(r), "brand": n} for b, r, n in memberships
+            ],
+            addable=[b for b in reachable if b.id not in held],
+            assignable_roles=assignable,
+            membership_roles=[Role.ADMIN, Role.OPERATOR],
+            is_self=target.id == user.id,
+            min_password_length=await settings_service.get_int(
+                session, "auth.password_min_length"
+            ),
+            user_error=error,
+            user_saved=saved,
+        ),
+    )
+
+
+@router.post("/admin/users/{ident}/details")
+async def change_user_details(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    ident: str,
+) -> Response:
+    """Correct a name, an address, or where to message somebody.
+
+    The email address is the account's identity: it is what a directory match
+    is made on and what appears against everything the person did. Changing it
+    is legitimate -- people mistype them, and people get married -- but it is
+    checked for collisions and recorded, and the audit trail keeps the old one
+    because entries written under it are still theirs.
+    """
+    _assert_may_manage(user)
+    target = await _managed_target(session, user, ident)
+    form = await request.form()
+
+    def back(message: str) -> Response:
+        return RedirectResponse(
+            f"/admin/users/{quote(ident)}?error={quote_plus(message)}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    email = str(form.get("email") or "").strip().lower()
+    display_name = str(form.get("display_name") or "").strip() or None
+    telegram = str(form.get("telegram_chat_id") or "").strip() or None
+    slack = str(form.get("slack_user_id") or "").strip() or None
+
+    if "@" not in email or len(email) < 3:
+        return back("That does not look like an email address")
+    if email != target.email:
+        clash = (
+            await session.execute(select(User).where(User.email == email))
+        ).scalar_one_or_none()
+        if clash is not None:
+            return back(f"{email} already belongs to another account")
+
+    changes: dict[str, Any] = {}
+    for field, value in (
+        ("email", email),
+        ("display_name", display_name),
+        ("telegram_chat_id", telegram),
+        ("slack_user_id", slack),
+    ):
+        if getattr(target, field) != value:
+            changes[field] = {"from": getattr(target, field), "to": value}
+            setattr(target, field, value)
+    if not changes:
+        return RedirectResponse(
+            f"/admin/users/{quote(ident)}", status_code=status.HTTP_303_SEE_OTHER
+        )
+    await session.flush()
+
+    await record_admin_event(
+        session,
+        actor=user,
+        action=AdminAction.USER_DETAILS_CHANGED,
+        brand_id=await _audit_scope(request, session, user),
+        target=target,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"changed": changes},
+    )
+    # Redirected to the address it is now, not the one it was, or the next page
+    # load would 404 on an account that was just renamed.
+    return RedirectResponse(
+        f"/admin/users/{quote(target.email)}?saved=details",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post("/admin/users/{ident}/password")
+async def reset_user_password(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    ident: str,
+) -> Response:
+    """Set a new password for somebody who has lost theirs.
+
+    The current one is not asked for -- the point is that nobody has it. What
+    that costs is that an administrator now knows the password, so it is a
+    one-time value: ``must_change_password`` is set and every session ends, so
+    the person has to replace it before they can do anything.
+    """
+    _assert_may_manage(user)
+    target = await _managed_target(session, user, ident)
+    form = await request.form()
+
+    def back(message: str) -> Response:
+        return RedirectResponse(
+            f"/admin/users/{quote(ident)}?error={quote_plus(message)}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    if target.auth_source != AuthSource.LOCAL:
+        return back(
+            "This account signs in through a directory, so its password is not kept here"
+        )
+    new = str(form.get("password") or "")
+    again = str(form.get("password_again") or "")
+    if new != again:
+        return back("The two passwords do not match")
+    try:
+        target.password_hash = hash_password(new)
+    except AuthError as exc:
+        return back(str(exc))
+
+    target.must_change_password = True
+    target.failed_logins = 0
+    target.locked_until = None
+    await revoke_all_sessions(session, target.id)
+    await session.flush()
+
+    await record_admin_event(
+        session,
+        actor=user,
+        action=AdminAction.PASSWORD_RESET_BY_ADMIN,
+        brand_id=await _audit_scope(request, session, user),
+        target=target,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"must_change_at_next_sign_in": True, "sessions_revoked": True},
+    )
+    log.info("users.password_reset", actor_id=user.id, user_id=target.id)
+    return RedirectResponse(
+        f"/admin/users/{quote(ident)}?saved=password",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post("/admin/users/{ident}/role")
+async def change_user_role(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    ident: str,
+) -> Response:
+    """Change what someone is, platform-wide."""
+    _assert_may_manage(user)
+    target = await _managed_target(session, user, ident)
+    form = await request.form()
+
+    def back(message: str) -> Response:
+        return RedirectResponse(
+            f"/admin/users/{quote(ident)}?error={quote_plus(message)}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    try:
+        role = Role(str(form.get("role") or ""))
+    except ValueError:
+        return back("Choose a role")
+    if role == target.role:
+        return RedirectResponse(
+            f"/admin/users/{quote(ident)}", status_code=status.HTTP_303_SEE_OTHER
+        )
+
+    _assert_may_assign(user, role, target.brand_id)
+    if target.id == user.id:
+        return back("You cannot change your own role")
+    if (
+        target.is_super_admin
+        and role != Role.SUPER_ADMIN
+        and await _last_active_platform_admin(session, target.id)
+    ):
+        return back(
+            "That is the only active platform administrator -- promote somebody else first"
+        )
+
+    was, target.role = target.role, role
+    # A platform admin spans every organisation and belongs to none; anyone
+    # else has to land somewhere, so keep the home organisation consistent
+    # with the role rather than leaving a contradiction.
+    if role == Role.SUPER_ADMIN:
+        target.brand_id = None
+    elif target.brand_id is None:
+        brands = await selectable_brands(session, user)
+        if not brands:
+            return back("There is no organisation to put them in")
+        target.brand_id = brands[0].id
+    await session.flush()
+
+    await record_admin_event(
+        session,
+        actor=user,
+        action=AdminAction.USER_ROLE_CHANGED,
+        brand_id=await _audit_scope(request, session, user),
+        target=target,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"from": str(was), "to": str(role)},
+    )
+    return RedirectResponse(
+        f"/admin/users/{quote(ident)}?saved=role", status_code=status.HTTP_303_SEE_OTHER
+    )
+
+
+@router.post("/admin/users/{ident}/brands")
+async def add_user_brand(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    ident: str,
+) -> Response:
+    """Give someone access to another organisation, with its own role.
+
+    The role sits on the pairing, not the person: the same operator can be an
+    admin for one of these companies and an operator for the other, and a
+    single `users.role` cannot say that.
+    """
+    _assert_may_manage(user)
+    target = await _managed_target(session, user, ident)
+    form = await request.form()
+
+    def back(message: str) -> Response:
+        return RedirectResponse(
+            f"/admin/users/{quote(ident)}?error={quote_plus(message)}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    try:
+        brand_id = int(str(form.get("brand_id") or ""))
+        role = Role(str(form.get("role") or ""))
+    except ValueError:
+        return back("Choose an organisation and a role")
+    if role == Role.SUPER_ADMIN:
+        return back("A platform administrator already reaches every organisation")
+
+    allowed = {b.id for b in await selectable_brands(session, user)}
+    if brand_id not in allowed:
+        return back("That is not an organisation you can grant access to")
+
+    already = (
+        await session.execute(
+            select(UserBrand).where(
+                UserBrand.user_id == target.id, UserBrand.brand_id == brand_id
+            )
+        )
+    ).scalar_one_or_none()
+    if already is not None:
+        already.role = role
+    else:
+        session.add(UserBrand(user_id=target.id, brand_id=brand_id, role=role))
+    await session.flush()
+
+    await record_admin_event(
+        session,
+        actor=user,
+        action=AdminAction.USER_BRAND_ADDED,
+        brand_id=await _audit_scope(request, session, user),
+        target=target,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"organisation_id": brand_id, "role": str(role)},
+    )
+    return RedirectResponse(
+        f"/admin/users/{quote(ident)}?saved=access", status_code=status.HTTP_303_SEE_OTHER
+    )
+
+
+@router.post("/admin/users/{ident}/brands/{brand_id}/remove")
+async def remove_user_brand(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    ident: str,
+    brand_id: int,
+) -> Response:
+    _assert_may_manage(user)
+    target = await _managed_target(session, user, ident)
+
+    allowed = {b.id for b in await selectable_brands(session, user)}
+    if brand_id not in allowed:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not your organisation to revoke")
+
+    await session.execute(
+        delete(UserBrand).where(
+            UserBrand.user_id == target.id, UserBrand.brand_id == brand_id
+        )
+    )
+    # Losing access has to take effect now, not when a cookie expires.
+    await revoke_all_sessions(session, target.id)
+    await session.flush()
+
+    await record_admin_event(
+        session,
+        actor=user,
+        action=AdminAction.USER_BRAND_REMOVED,
+        brand_id=await _audit_scope(request, session, user),
+        target=target,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"organisation_id": brand_id, "sessions_revoked": True},
+    )
+    return RedirectResponse(
+        f"/admin/users/{quote(ident)}?saved=access", status_code=status.HTTP_303_SEE_OTHER
+    )
+
+
+@router.post("/admin/users/{ident}/delete")
+async def delete_user(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    ident: str,
+) -> Response:
+    """Remove an account for good.
+
+    Their sessions and organisation access go with them, by cascade. Their
+    audit trail does not: `audit_events` holds no foreign key to `users` and
+    keeps the email as text, so what somebody did survives their account being
+    deleted. That is the point of an audit trail.
+
+    Disabling is almost always the better answer, and the page says so -- which
+    is why this asks for the address to be typed rather than offering a button
+    next to "Disable".
+    """
+    _assert_may_manage(user)
+    target = await _managed_target(session, user, ident)
+    form = await request.form()
+    typed = str(form.get("confirm_email") or "").strip().lower()
+
+    def back(message: str) -> Response:
+        return RedirectResponse(
+            f"/admin/users/{quote(ident)}?error={quote_plus(message)}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    if target.id == user.id:
+        return back("You cannot delete your own account")
+    if typed != target.email.lower():
+        return back("Type the address exactly to confirm the deletion")
+    if target.is_super_admin and await _last_active_platform_admin(session, target.id):
+        return back(
+            "That is the only active platform administrator -- there would be nobody "
+            "left who could undo this"
+        )
+
+    email, role = target.email, str(target.role)
+    # Recorded before the row goes, so the trail is written whatever happens
+    # next; the actor is what matters here and the actor is not being deleted.
+    await record_admin_event(
+        session,
+        actor=user,
+        action=AdminAction.USER_DELETED,
+        brand_id=await _audit_scope(request, session, user),
+        target=target,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"role": role},
+    )
+    await revoke_all_sessions(session, target.id)
+    await session.execute(delete(User).where(User.id == target.id))
+    await session.flush()
+
+    log.info("users.deleted", actor_id=user.id, deleted_email=email, role=role)
+    return RedirectResponse(
+        f"/admin/users?saved={quote_plus(email + ' deleted')}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post("/admin/users/{ident}/2fa/reset")
 async def reset_user_2fa(
     request: Request,
     user: CurrentUser,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user_id: int,
+    ident: str,
 ) -> Response:
     """Clear someone's second factor after a lost phone.
 
@@ -1835,9 +2460,7 @@ async def reset_user_2fa(
     most needs it.
     """
     _assert_may_manage(user)
-    row = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such person")
+    row = await _managed_target(session, user, ident)
     if not mfa.can_reset_for(user, row):
         return RedirectResponse(
             "/admin/users?error=" + quote_plus(
@@ -1867,6 +2490,283 @@ async def reset_user_2fa(
     )
     return RedirectResponse(
         "/admin/users?saved=" + quote_plus(f"second factor cleared for {row.email}"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+# --------------------------------------------------------------- organisations
+
+
+def _slugify(value: str) -> str:
+    """A short, URL-safe handle derived from the name.
+
+    Derived rather than typed: the slug is only ever used in URLs and CLI
+    arguments, and asking somebody to invent one is asking them to get it
+    wrong. It stays editable for the case where two companies would collide.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
+    return slug[:60] or "org"
+
+
+@router.get("/admin/organisations", response_class=HTMLResponse)
+async def admin_organisations(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    error: str | None = None,
+    saved: str | None = None,
+) -> Response:
+    """The companies this platform holds recordings for, and their PBX domains.
+
+    Creating one used to be `c2w-admin brand add` and nothing else, so the one
+    thing you cannot do without -- an organisation to put anything in -- was
+    the one thing the console could not do.
+    """
+    if Permission.BRANDS_MANAGE not in permissions_for(user.role):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "only a platform administrator can manage organisations",
+        )
+
+    brands = (await session.execute(select(Brand).order_by(Brand.name))).scalars().all()
+    counts = (
+        await session.execute(
+            text(
+                """
+                SELECT b.id,
+                       (SELECT count(*) FROM tenants t WHERE t.brand_id = b.id) AS tenants,
+                       (SELECT count(*) FROM commpeak_connections c
+                         WHERE c.brand_id = b.id)                               AS accounts,
+                       (SELECT count(*) FROM storage_destinations d
+                         WHERE d.brand_id = b.id)                               AS archives,
+                       (SELECT count(*) FROM users u WHERE u.brand_id = b.id)    AS people
+                FROM brands b
+                """
+            )
+        )
+    ).mappings().all()
+
+    tenants = (
+        await session.execute(
+            text(
+                "SELECT id, brand_id, name, slug, commpeak_domain FROM tenants "
+                "ORDER BY brand_id, name"
+            )
+        )
+    ).mappings().all()
+    by_brand: dict[int, list[Any]] = {}
+    for row in tenants:
+        by_brand.setdefault(row["brand_id"], []).append(dict(row))
+
+    return templates.TemplateResponse(
+        request,
+        "organisations.html",
+        await _shell(
+            request,
+            session,
+            user,
+            "organisations",
+            organisations=brands,
+            counts={row["id"]: dict(row) for row in counts},
+            tenants=by_brand,
+            timezone_choices=SETTINGS["org.timezone"].choices,
+            org_error=error,
+            org_saved=saved,
+        ),
+    )
+
+
+@router.post("/admin/organisations")
+async def add_organisation(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    """Create an organisation, its encryption key and its table partitions.
+
+    All in one transaction: an organisation without partitions has nowhere to
+    put a call, and finding that out later means a failed insert inside a
+    worker rather than a clear message here.
+    """
+    if Permission.BRANDS_MANAGE not in permissions_for(user.role):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "only a platform administrator can create an organisation",
+        )
+
+    form = await request.form()
+    name = str(form.get("name") or "").strip()
+    slug = _slugify(str(form.get("slug") or "") or name)
+    timezone = str(form.get("timezone") or "").strip()
+
+    def back(message: str) -> Response:
+        return RedirectResponse(
+            f"/admin/organisations?error={quote_plus(message)}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    if len(name) < 2:
+        return back("Give the company a name")
+    existing = (
+        await session.execute(select(Brand).where(Brand.slug == slug))
+    ).scalar_one_or_none()
+    if existing is not None:
+        return back(f"The handle {slug!r} is already used by {existing.name}")
+
+    key_id, wrapped = generate_data_key()
+    brand = Brand(
+        name=name, slug=slug, encryption_key_id=key_id, encryption_key_wrapped=wrapped
+    )
+    session.add(brand)
+    await session.flush()
+
+    # Everything below inserts brand-scoped rows -- the retention policy, the
+    # settings, the audit entry -- and this session is unscoped because the
+    # page works across organisations. Without the scope, RLS rejects each one
+    # in turn.
+    await session.execute(
+        text("SELECT set_config('c2w.brand_id', :b, true)"), {"b": str(brand.id)}
+    )
+
+    # Every brand-partitioned table. Miss one and the first insert into it
+    # fails with "no partition of relation found" -- in a worker, at 3am.
+    for table in ("cdrs", "recordings", "sms_messages"):
+        await session.execute(
+            text(
+                f"CREATE TABLE IF NOT EXISTS {table}_brand_{brand.id} "
+                f"PARTITION OF {table} FOR VALUES IN ({brand.id})"
+            )
+        )
+    await session.execute(
+        text(
+            "INSERT INTO retention_policies (brand_id) VALUES (:b) "
+            "ON CONFLICT (brand_id) DO NOTHING"
+        ),
+        {"b": brand.id},
+    )
+    if timezone:
+        await settings_service.set(
+            session, "org.timezone", timezone, brand_id=brand.id, changed_by=user.email
+        )
+    await settings_service.set(
+        session, "org.display_name", name, brand_id=brand.id, changed_by=user.email
+    )
+    await session.flush()
+
+    log.info("brands.created", actor_id=user.id, brand_id=brand.id, slug=slug)
+    await record_admin_event(
+        session,
+        actor=user,
+        action=AdminAction.ORGANISATION_CREATED,
+        brand_id=brand.id,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"name": name, "handle": slug},
+    )
+    return RedirectResponse(
+        f"/admin/organisations?saved={quote_plus(name)}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post("/admin/organisations/{brand_id}/rename")
+async def rename_organisation(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    brand_id: int,
+) -> Response:
+    """Change the display name.
+
+    The handle is left alone deliberately: it is in URLs, in systemd
+    invocations and in the archive's object keys, so renaming it would orphan
+    things that already point at it.
+    """
+    if Permission.BRANDS_MANAGE not in permissions_for(user.role):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not your call to make")
+
+    form = await request.form()
+    name = str(form.get("name") or "").strip()
+    brand = (
+        await session.execute(select(Brand).where(Brand.id == brand_id))
+    ).scalar_one_or_none()
+    if brand is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such organisation")
+    if len(name) < 2:
+        return RedirectResponse(
+            "/admin/organisations?error=Give+the+company+a+name",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    was, brand.name = brand.name, name
+    await settings_service.set(
+        session, "org.display_name", name, brand_id=brand.id, changed_by=user.email
+    )
+    await session.flush()
+    await record_admin_event(
+        session,
+        actor=user,
+        action=AdminAction.ORGANISATION_RENAMED,
+        brand_id=brand.id,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"from": was, "to": name},
+    )
+    return RedirectResponse(
+        f"/admin/organisations?saved={quote_plus(name)}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post("/admin/organisations/{brand_id}/tenants")
+async def add_tenant(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    brand_id: int,
+) -> Response:
+    """Add a PBX or dialer domain under an organisation.
+
+    A tenant is one CommPeak domain. An organisation has as many as it has
+    PBXes, and a CommPeak account is registered against one of them.
+    """
+    if Permission.BRANDS_MANAGE not in permissions_for(user.role):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not your call to make")
+
+    form = await request.form()
+    name = str(form.get("name") or "").strip()
+    domain = str(form.get("commpeak_domain") or "").strip() or None
+    slug = _slugify(str(form.get("slug") or "") or name)
+
+    brand = (
+        await session.execute(select(Brand).where(Brand.id == brand_id))
+    ).scalar_one_or_none()
+    if brand is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such organisation")
+    if len(name) < 2:
+        return RedirectResponse(
+            "/admin/organisations?error=Give+the+PBX+a+name",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    # tenants is brand-scoped, so the insert needs the scope set or RLS
+    # rejects it.
+    await session.execute(
+        text("SELECT set_config('c2w.brand_id', :b, true)"), {"b": str(brand_id)}
+    )
+    session.add(Tenant(brand_id=brand_id, name=name, slug=slug, commpeak_domain=domain))
+    await session.flush()
+    await record_admin_event(
+        session,
+        actor=user,
+        action=AdminAction.TENANT_CREATED,
+        brand_id=brand_id,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"name": name, "handle": slug, "commpeak_domain": domain},
+    )
+    return RedirectResponse(
+        f"/admin/organisations?saved={quote_plus(name)}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 

@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% block frame %}measured{% endblock %}
+{% block title %}Organisations — c2w{% endblock %}
+{% block body %}
+
+<h1>Organisations</h1>
+<p class="sub">
+  The companies this platform holds recordings for. Their data never mixes:
+  each has its own encryption key, its own storage and its own people.
+</p>
+
+{% if org_error %}<div class="flash err">{{ org_error }}</div>{% endif %}
+{% if org_saved %}<div class="flash ok">Saved {{ org_saved }}.</div>{% endif %}
+
+{% for org in organisations %}
+  <h2>{{ org.name }}</h2>
+  <div class="card">
+    <div class="stats">
+      <div>
+        <p class="hint">PBXes and dialers</p>
+        <strong>{{ counts[org.id].tenants }}</strong>
+      </div>
+      <div>
+        <p class="hint">CommPeak accounts</p>
+        <strong>{{ counts[org.id].accounts }}</strong>
+      </div>
+      <div>
+        <p class="hint">Archive buckets</p>
+        <strong>{{ counts[org.id].archives }}</strong>
+      </div>
+      <div>
+        <p class="hint">People</p>
+        <strong>{{ counts[org.id].people }}</strong>
+      </div>
+      <div>
+        <p class="hint">Encryption key</p>
+        <strong>
+          {% if org.encryption_key_id %}<span class="pill ok">present</span>
+          {% else %}<span class="pill err">missing</span>{% endif %}
+        </strong>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:16px">
+      <div>
+        <label for="name-{{ org.id }}">Company name</label>
+        <form method="post" action="/admin/organisations/{{ org.id }}/rename"
+              class="inline-save">
+          <input id="name-{{ org.id }}" name="name" value="{{ org.name }}" required>
+          <button type="submit" class="btn ghost small">Rename</button>
+        </form>
+        <p class="hint">
+          Shown throughout the console. The handle
+          <code>{{ org.slug }}</code> is fixed &mdash; it is in URLs, in
+          service commands and in the archive's object keys, so changing it
+          would orphan things that already point at it.
+        </p>
+      </div>
+      <div>
+        <label>Settings for this organisation</label>
+        <p style="margin:0">
+          <a class="btn ghost small" href="/admin/settings?section=your-company">Open its settings</a>
+        </p>
+        <p class="hint">
+          Time zone, contact and where recordings may be stored. Switch to this
+          organisation from the menu at the top right first &mdash; settings
+          apply to whichever one you are looking at.
+        </p>
+      </div>
+    </div>
+
+    <h3>PBXes and dialers</h3>
+    {% if tenants.get(org.id) %}
+      <div class="tw stack">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Handle</th><th>CommPeak domain</th></tr>
+          </thead>
+          <tbody>
+          {% for t in tenants[org.id] %}
+            <tr>
+              <td data-label="Name">{{ t.name }}</td>
+              <td class="mono" data-label="Handle">{{ t.slug }}</td>
+              <td class="mono" data-label="CommPeak domain">{{ t.commpeak_domain or '—' }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="hint">
+        None yet. A CommPeak account is registered against one of these, so add
+        the PBX first.
+      </p>
+    {% endif %}
+
+    <form method="post" action="/admin/organisations/{{ org.id }}/tenants"
+          style="margin-top:14px">
+      <div class="row">
+        <div>
+          <label for="t-name-{{ org.id }}">Add a PBX or dialer</label>
+          <input id="t-name-{{ org.id }}" name="name" required
+                 placeholder="Go4Rex PBX">
+        </div>
+        <div>
+          <label for="t-domain-{{ org.id }}">Its CommPeak domain</label>
+          <input id="t-domain-{{ org.id }}" name="commpeak_domain" class="mono"
+                 placeholder="go4rex.pbx.commpeak.com">
+          <p class="hint">Optional, but it is what call records are matched on.</p>
+        </div>
+      </div>
+      <div class="actions"><button type="submit" class="btn ghost">Add PBX</button></div>
+    </form>
+  </div>
+{% else %}
+  <div class="note">
+    <h3>No organisations yet</h3>
+    <p>Nothing can be archived until there is one to archive for. Add the first
+       company below.</p>
+  </div>
+{% endfor %}
+
+<h2>Add an organisation</h2>
+<form class="card" method="post" action="/admin/organisations">
+  <div class="row">
+    <div>
+      <label for="new-name">Company name</label>
+      <input id="new-name" name="name" required placeholder="FX Capital Ltd">
+      <p class="hint">As you would write it on an invoice.</p>
+    </div>
+    <div>
+      <label for="new-slug">Short handle</label>
+      <input id="new-slug" name="slug" class="mono" placeholder="derived from the name">
+      <p class="hint">
+        Used in URLs and in the archive's object keys. Left empty it is worked
+        out from the name, which is usually right.
+      </p>
+    </div>
+    <div>
+      <label for="new-tz">Time zone</label>
+      <select id="new-tz" name="timezone">
+        {% for tz in timezone_choices %}
+          <option value="{{ tz }}">{{ tz }}</option>
+        {% endfor %}
+      </select>
+      <p class="hint">What times are shown in for this company's staff.</p>
+    </div>
+  </div>
+
+  <div class="note caution">
+    <h3>This creates an encryption key</h3>
+    <p>Each organisation's credentials are sealed under a key of its own, so one
+       company's stored tokens cannot be read with another's. The key is wrapped
+       by the platform master key &mdash; if that is ever lost, so is every
+       credential for every organisation.</p>
+  </div>
+
+  <div class="actions"><button type="submit">Add organisation</button></div>
+</form>
+
+<div class="note">
+  <h3>Removing one is not offered here</h3>
+  <p>Deleting an organisation would take its calls, recordings and audit trail
+     with it, and those are the records this platform exists to keep. If a
+     company really has to go, that is a deliberate job for the command line
+     with a backup taken first.</p>
+</div>
+{% endblock %}

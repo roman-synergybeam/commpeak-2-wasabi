@@ -219,7 +219,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="core.base_url",
         type=SettingType.STRING,
         default="http://localhost:8000",
-        category="General",
+        category="Web address and sessions",
         label="Public web address",
         description="Where this system is reachable, for example "
         "https://recordings.example.com. Alerts link to it, and single sign-on "
@@ -231,7 +231,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('production', 'staging', 'dev'),
         type=SettingType.STRING,
         default="production",
-        category="General",
+        category="Web address and sessions",
         label="Environment",
         description="Label for this installation: production, staging or dev.",
         restart_required=True,
@@ -241,18 +241,18 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('3600', '14400', '28800', '43200', '86400'),
         type=SettingType.INT,
         default=8 * 3600,
-        category="General",
+        category="Web address and sessions",
         label="Stay signed in for",
         description="How long a sign-in lasts before it has to be repeated.",
         unit="seconds",
         validator=_positive,
     ),
-    # -- CommPeak (source) -------------------------------------------------
+    # -- CommPeak calls ---------------------------------------------------
     SettingSpec(
         key="transfer.enabled",
         type=SettingType.BOOL,
         default=False,
-        category="Archiving",
+        category="Copying to the archive",
         label="Copy recordings to the archive",
         description="Turn on once archive storage is configured and tested. "
         "Recordings are still discovered and matched to calls while this is "
@@ -263,7 +263,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('5', '10', '20', '30', '50', '100'),
         type=SettingType.INT,
         default=20,
-        category="Archiving",
+        category="Copying to the archive",
         label="Total simultaneous transfers",
         description="The ceiling across every account and every organisation. "
         "The per-account and per-organisation limits sit under this one, so "
@@ -276,7 +276,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('2', '5', '10', '20', '30'),
         type=SettingType.INT,
         default=10,
-        category="Archiving",
+        category="Copying to the archive",
         label="Simultaneous uploads per archive",
         description="Upload limit for a single archive destination.",
         unit="at a time",
@@ -287,7 +287,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('1', '2', '5', '10', '20'),
         type=SettingType.INT,
         default=5,
-        category="Archiving",
+        category="Copying to the archive",
         label="Simultaneous transfers per organisation",
         description="Stops one company's backfill consuming the whole server.",
         unit="at a time",
@@ -298,7 +298,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('0', '50', '100', '200', '500', '1000'),
         type=SettingType.FLOAT,
         default=0.0,
-        category="Archiving",
+        category="Copying to the archive",
         label="Bandwidth limit",
         description="Set this when recordings are pulled over the same "
         "connection that carries live calls. Zero means take everything "
@@ -311,7 +311,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('8388608', '16777216', '33554432', '67108864'),
         type=SettingType.INT,
         default=16 * 1024 * 1024,
-        category="Archiving",
+        category="Copying to the archive",
         label="Use multi-part upload for files above",
         description="Larger recordings are uploaded in pieces so an "
         "interrupted transfer can resume instead of starting again.",
@@ -323,7 +323,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('5242880', '8388608', '16777216', '33554432'),
         type=SettingType.INT,
         default=16 * 1024 * 1024,
-        category="Archiving",
+        category="Copying to the archive",
         label="Size of each upload piece",
         description="Increased automatically for very large recordings to stay "
         "within the 10,000-piece limit.",
@@ -335,7 +335,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('3', '5', '8', '10'),
         type=SettingType.INT,
         default=5,
-        category="Archiving",
+        category="Copying to the archive",
         label="Give up on a recording after",
         description="Problems that a retry cannot fix -- a wrong password, a "
         "missing address-list entry -- stop immediately regardless of this, and "
@@ -347,7 +347,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="transfer.retry_backoff_seconds",
         type=SettingType.JSON,
         default=[30, 120, 600, 1800],
-        category="Archiving",
+        category="Copying to the archive",
         label="Wait between retries",
         description="Waiting periods before each new attempt, applied with a "
         "little randomness so a shared outage does not make every recording "
@@ -359,7 +359,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('1', '4', '8', '16', '32'),
         type=SettingType.INT,
         default=8,
-        category="Archiving",
+        category="Copying to the archive",
         label="Recordings a worker takes at once",
         description="How much work each worker picks up per round.",
         unit="at a time",
@@ -370,7 +370,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('300', '600', '900', '1800', '3600'),
         type=SettingType.INT,
         default=900,
-        category="Archiving",
+        category="Copying to the archive",
         label="Assume a worker has stopped after",
         description="Its recordings are then handed to another worker. Must be "
         "longer than the slowest single recording takes to copy.",
@@ -381,7 +381,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="transfer.write_sidecar_metadata",
         type=SettingType.BOOL,
         default=True,
-        category="Archiving",
+        category="Copying to the archive",
         label="Save call details beside each recording",
         description="Writes a small file next to every archived recording "
         "describing the call it belongs to. If this database were ever lost, "
@@ -468,7 +468,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="alerts.enabled",
         type=SettingType.BOOL,
         default=True,
-        category="Notifications",
+        category="Alerts",
         label="Send alerts",
         description="Master switch for Telegram and Slack notifications.",
     ),
@@ -477,7 +477,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('300', '900', '1800', '3600', '21600'),
         type=SettingType.INT,
         default=1800,
-        category="Notifications",
+        category="Alerts",
         label="Suppress repeated alerts for",
         description="One problem can affect thousands of recordings at once. "
         "Without this, that becomes thousands of identical messages and people "
@@ -489,7 +489,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="alerts.telegram_bot_token",
         type=SettingType.SECRET,
         default="",
-        category="Notifications",
+        category="Alerts",
         label="Telegram bot token",
         description="From @BotFather. Stored encrypted and never shown again.",
         sensitive=True,
@@ -499,7 +499,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="alerts.telegram_chat_id",
         type=SettingType.STRING,
         default="",
-        category="Notifications",
+        category="Alerts",
         label="Telegram chat",
         description="The group or channel that alerts are posted to.",
         brand_overridable=True,
@@ -508,7 +508,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="alerts.slack_webhook_url",
         type=SettingType.SECRET,
         default="",
-        category="Notifications",
+        category="Alerts",
         label="Slack webhook address",
         description="An incoming-webhook address from your Slack workspace. "
         "Stored encrypted and never shown again.",
@@ -520,7 +520,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=_HOURS,
         type=SettingType.INT,
         default=8,
-        category="Notifications",
+        category="Alerts",
         label="Send the daily summary at",
         description="A once-a-day digest of what was archived and what failed.",
         unit=":00 UTC",
@@ -550,13 +550,13 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         unit="seconds",
         validator=_positive,
     ),
-    # -- Logging and metrics -----------------------------------------------
+    # -- Logs and monitoring -----------------------------------------------
     SettingSpec(
         key="observability.log_level",
         choices=('DEBUG', 'INFO', 'WARNING', 'ERROR'),
         type=SettingType.STRING,
         default="INFO",
-        category="Logging and metrics",
+        category="Logs and monitoring",
         label="Log detail",
         description="INFO is right for normal running. DEBUG is very noisy and "
         "will include every S3 request; use it while diagnosing something and "
@@ -568,7 +568,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="observability.log_json",
         type=SettingType.BOOL,
         default=True,
-        category="Logging and metrics",
+        category="Logs and monitoring",
         label="Write logs as JSON",
         description="Easier for log collectors to read; harder for a person. "
         "Turn off when reading the log by eye.",
@@ -578,7 +578,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="observability.metrics_enabled",
         type=SettingType.BOOL,
         default=True,
-        category="Logging and metrics",
+        category="Logs and monitoring",
         label="Publish Prometheus metrics",
         description="Exposes transfer counts and timings for monitoring.",
         restart_required=True,
@@ -588,7 +588,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="org.display_name",
         type=SettingType.STRING,
         default="",
-        category="Organisation",
+        category="Your company",
         label="Company name",
         description="How this organisation is named in alerts, exports and the "
         "daily summary. Leave blank to use the name it was created with.",
@@ -598,7 +598,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="org.contact_email",
         type=SettingType.STRING,
         default="",
-        category="Organisation",
+        category="Your company",
         label="Where to reach someone here",
         description="Included in alerts so whoever receives one knows who to "
         "contact. Not used to send mail.",
@@ -609,7 +609,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=TIMEZONE_CHOICES,
         type=SettingType.STRING,
         default="America/Puerto_Rico",
-        category="Organisation",
+        category="Your company",
         label="Time zone",
         description="Schedules for this organisation run in this zone, and the "
         "clock in the corner shows it. The server's own clock is not used. The "
@@ -624,20 +624,20 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('', 'No restriction', 'EU only', 'UK only', 'US only', 'Customer country only'),
         type=SettingType.STRING,
         default="",
-        category="Organisation",
+        category="Your company",
         label="Where recordings may be stored",
         description="A note for whoever configures storage next -- for example "
         "\"EU only\". Recorded here so the requirement is not carried in "
         "somebody's memory. It is not enforced.",
         brand_overridable=True,
     ),
-    # -- CommPeak (source) -------------------------------------------------
+    # -- CommPeak calls ---------------------------------------------------
     SettingSpec(
         key="commpeak.s3_endpoint",
         choices=('https://recordings.commpeak.com',),
         type=SettingType.STRING,
         default="https://recordings.commpeak.com",
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="Recordings address",
         validator=_http_url,
         description="Where recordings are read from, for every CommPeak account "
@@ -651,7 +651,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="commpeak.cdr_api_base",
         type=SettingType.STRING,
         default="",
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="Call records address",
         validator=_http_url,
         description="Your PBX Stats instance, which is where the list of calls "
@@ -668,7 +668,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('/api/cdrs',),
         type=SettingType.STRING,
         default="/api/cdrs",
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="Call records path",
         description="The part of the address that returns calls. There is only "
         "one, and it is filled in already; it is here so a change at CommPeak's "
@@ -679,7 +679,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="commpeak.cdr_auth_scheme",
         type=SettingType.STRING,
         default="header",
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="How to authenticate",
         description="PBX Stats wants the key on its own in an Authorization "
         "header, which is the first option and the right one. The others exist "
@@ -691,7 +691,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="commpeak.cdr_api_user",
         type=SettingType.STRING,
         default="",
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="Call records user name",
         description="Only needed when authentication is set to Basic. Leave "
         "empty otherwise.",
@@ -701,7 +701,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="commpeak.cdr_api_token",
         type=SettingType.SECRET,
         default="",
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="Call records API key",
         description="The API key from your CommPeak console. Encrypted before "
         "it is stored and never shown again.",
@@ -715,7 +715,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('100', '250', '500', '1000'),
         type=SettingType.INT,
         default=500,
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="Calls fetched per request",
         description="How many calls to ask for at a time. Larger is fewer "
         "requests but a longer wait for each one.",
@@ -728,7 +728,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('1', '5', '10', '15', '30', '60'),
         type=SettingType.INT,
         default=15,
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="Check for new calls every",
         description="How often to ask for calls that have finished since the "
         "last check.",
@@ -741,7 +741,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('0', '5', '15', '30', '60', '180'),
         type=SettingType.INT,
         default=30,
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="Re-check the last",
         description="Each check goes back this far beyond where the last one "
         "ended. A call is written to CommPeak's records when it finishes, not "
@@ -756,7 +756,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="sms.enabled",
         type=SettingType.BOOL,
         default=False,
-        category="CommPeak SMS",
+        category="CommPeak messages",
         label="Collect text messages",
         description="Fetch sent and received messages from CommPeak TextPeak "
         "and list them alongside calls. Off until an API key is set below.",
@@ -769,7 +769,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('https://gw.commpeak.com',),
         type=SettingType.STRING,
         default="https://gw.commpeak.com",
-        category="CommPeak SMS",
+        category="CommPeak messages",
         label="Messages address",
         validator=_http_url,
         description="Where messages are read from. Unlike call records this is "
@@ -781,7 +781,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('/textpeak/streams/messages',),
         type=SettingType.STRING,
         default="/textpeak/streams/messages",
-        category="CommPeak SMS",
+        category="CommPeak messages",
         label="Sent messages path",
         description="The part of the address that returns messages you sent, "
         "with their delivery status. Filled in already.",
@@ -792,7 +792,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('/textpeak/streams/incoming_messages',),
         type=SettingType.STRING,
         default="/textpeak/streams/incoming_messages",
-        category="CommPeak SMS",
+        category="CommPeak messages",
         label="Received messages path",
         description="Replies and inbound messages come from a different address "
         "than sent ones, and carry different fields \u2014 there is no delivery "
@@ -803,7 +803,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="sms.api_token",
         type=SettingType.SECRET,
         default="",
-        category="CommPeak SMS",
+        category="CommPeak messages",
         label="Messages API key",
         description="Your TextPeak API key, sent in an Authorization header. "
         "Encrypted before it is stored and never shown again. This is a "
@@ -815,7 +815,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="sms.stream_id",
         type=SettingType.STRING,
         default="",
-        category="CommPeak SMS",
+        category="CommPeak messages",
         label="Only this stream",
         description="A TextPeak stream id, if this organisation should see one "
         "stream rather than every message on the account. Leave empty for all "
@@ -827,7 +827,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('50', '100', '250', '500'),
         type=SettingType.INT,
         default=100,
-        category="CommPeak SMS",
+        category="CommPeak messages",
         label="Messages fetched per request",
         description="How many messages to ask for at a time. Larger is fewer "
         "requests; TextPeak refuses very large pages, so 100 is a safe middle.",
@@ -840,7 +840,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('5', '10', '15', '30', '60'),
         type=SettingType.INT,
         default=15,
-        category="CommPeak SMS",
+        category="CommPeak messages",
         label="Check for new messages every",
         description="How often to ask for messages that have arrived or changed "
         "since the last check.",
@@ -853,7 +853,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('1', '6', '12', '24', '72'),
         type=SettingType.INT,
         default=24,
-        category="CommPeak SMS",
+        category="CommPeak messages",
         label="Re-check the last",
         description="Each check re-reads this far back, because delivery "
         "receipts arrive long after the message was sent \u2014 a message seen as "
@@ -867,7 +867,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="source.read_only",
         type=SettingType.BOOL,
         default=True,
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="Never write to CommPeak",
         description="This system only ever reads from CommPeak. The ability to "
         "write or delete there is not in the software at all, so this cannot be "
@@ -880,7 +880,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('1', '2', '3', '4', '5', '6', '8', '10'),
         type=SettingType.INT,
         default=5,
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="Simultaneous downloads per account",
         description="CommPeak recommends five and slows you down above it, so a "
         "higher number makes a migration take longer, not less.",
@@ -892,7 +892,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('100', '250', '500', '1000'),
         type=SettingType.INT,
         default=1000,
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="Recordings listed per request",
         description="How many recordings to ask CommPeak about at once while "
         "looking for new ones.",
@@ -904,7 +904,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('60', '300', '600', '900', '1800', '3600'),
         type=SettingType.INT,
         default=300,
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="Look for new recordings every",
         description="How often to check CommPeak for recordings that have "
         "appeared since the last look.",
@@ -917,7 +917,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('0', '1', '2', '3', '6', '12', '24'),
         type=SettingType.INT,
         default=3,
-        category="CommPeak (source)",
+        category="CommPeak calls",
         label="Re-check the most recent",
         description="A call that starts at 10:59 and runs ten minutes is filed "
         "under 10:00 well after that hour has passed. Looking again at a few "
@@ -925,13 +925,13 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         unit="hours",
         validator=_non_negative,
     ),
-    # -- Wasabi (archive) --------------------------------------------------
+    # -- Wasabi storage ----------------------------------------------------
     SettingSpec(
         key="wasabi.region",
         choices=WASABI_REGION_CHOICES,
         type=SettingType.STRING,
         default="eu-central-1",
-        category="Wasabi (archive)",
+        category="Wasabi storage",
         label="Region suggested for new storage",
         description="An organisation can have as many Wasabi accounts and "
         "buckets as it needs; this is only the region offered first when adding "
@@ -946,7 +946,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('archive', 'recordings', 'c2w'),
         type=SettingType.STRING,
         default="archive",
-        category="Wasabi (archive)",
+        category="Wasabi storage",
         label="Folder inside each bucket",
         description="In every one of this organisation's buckets, recordings go "
         "under this folder, then by tenant and date. Keeping an organisation to "
@@ -958,7 +958,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="wasabi.verify_after_upload",
         type=SettingType.BOOL,
         default=True,
-        category="Wasabi (archive)",
+        category="Wasabi storage",
         label="Read the copy back and check it",
         description="A successful upload is not proof that what arrived matches "
         "what was sent. Leave this on: the archive is eventually the only copy.",
@@ -968,7 +968,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         choices=('1', '2', '5', '10', '20', '50'),
         type=SettingType.INT,
         default=5,
-        category="Wasabi (archive)",
+        category="Wasabi storage",
         label="Refuse to run below",
         description="Stops a copy starting when the server itself is nearly out "
         "of disk, since a part-written file has to go somewhere.",
@@ -1494,25 +1494,27 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
 
 SETTINGS: Final[dict[str, SettingSpec]] = {s.key: s for s in _SPECS}
 
-#: Order the settings page presents categories in: the things an operator
-#: touches while getting started first, machinery afterwards.
+#: Every category, in a stable order. The settings page groups these into a
+#: left-hand rail (see `_SETTING_GROUPS` in `web/routes.py`); this tuple is the
+#: registry's own list, and `specs_by_category` follows it.
 CATEGORY_ORDER: Final[tuple[str, ...]] = (
-    "Organisation",
-    "CommPeak (source)",
-    "Wasabi (archive)",
-    "Archiving",
+    "Your company",
+    "CommPeak calls",
+    "CommPeak messages",
+    "Wasabi storage",
+    "Copying to the archive",
     "Retention",
     "Playback and downloads",
-    "Notifications",
+    "Transcription and voice analysis",
+    "Alerts",
     "Scheduling",
+    "Two-factor and passwords",
+    "Web address and sessions",
+    "Active Directory",
     "Microsoft 365",
     "Google Workspace",
-    "Active Directory",
-    "Two-factor and passwords",
-    "Transcription and voice analysis",
     "Cloudflare",
-    "General",
-    "Logging and metrics",
+    "Logs and monitoring",
 )
 
 

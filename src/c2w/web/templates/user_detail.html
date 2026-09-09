@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+{% block frame %}measured{% endblock %}
+{% block title %}{{ target.email }} — c2w{% endblock %}
+{% block body %}
+
+<p class="sub" style="margin-bottom:6px"><a href="/admin/users">&lsaquo; People</a></p>
+<h1>{{ target.display_name or target.email }}</h1>
+<p class="sub">
+  {{ target.email }} &mdash; signs in with {{ target.auth_source | auth_label }},
+  {% if target.is_active %}account is active{% else %}account is disabled{% endif %}.
+  {% if target.last_login_at %}Last signed in {{ target.last_login_at | dt }}.
+  {% else %}Has never signed in.{% endif %}
+</p>
+
+{% if user_error %}<div class="flash err">{{ user_error }}</div>{% endif %}
+{% if user_saved %}<div class="flash ok">Saved.</div>{% endif %}
+
+{% if is_self %}
+  <div class="note">
+    <h3>This is you</h3>
+    <p>Your own role and account cannot be changed from here &mdash; there would
+       be nothing to stop you locking yourself out, or quietly promoting
+       yourself. Another platform administrator can do it.</p>
+  </div>
+{% endif %}
+
+<h2>Details</h2>
+<form class="card" method="post" action="/admin/users/{{ target.email | urlencode }}/details">
+  <div class="row">
+    <div>
+      <label for="d-email">Email address</label>
+      <input id="d-email" name="email" type="email" value="{{ target.email }}" required>
+      <p class="hint">
+        The account's identity: what a directory match is made on, and what
+        appears against everything they do. Changing it keeps their history
+        &mdash; the log holds the address as it was at the time.
+      </p>
+    </div>
+    <div>
+      <label for="d-name">Full name</label>
+      <input id="d-name" name="display_name" value="{{ target.display_name or '' }}">
+    </div>
+  </div>
+  <div class="row">
+    <div>
+      <label for="d-telegram">Telegram chat</label>
+      <input id="d-telegram" name="telegram_chat_id" class="mono"
+             value="{{ target.telegram_chat_id or '' }}" placeholder="optional">
+      <p class="hint">
+        Their own chat id, for alerts addressed to them rather than to the
+        organisation's channel.
+      </p>
+    </div>
+    <div>
+      <label for="d-slack">Slack member id</label>
+      <input id="d-slack" name="slack_user_id" class="mono"
+             value="{{ target.slack_user_id or '' }}" placeholder="optional">
+      <p class="hint">Found under their Slack profile, as <code>U…</code>.</p>
+    </div>
+  </div>
+  <div class="actions"><button type="submit">Save details</button></div>
+</form>
+
+{% if target.auth_source == 'LOCAL' %}
+  <h2>Password</h2>
+  <form class="card" method="post" action="/admin/users/{{ target.email | urlencode }}/password">
+    <p class="hint" style="margin-top:0">
+      For somebody who has lost theirs. Their current one is not needed &mdash;
+      the point is that nobody has it. Because you will know the new one, they
+      must replace it at their next sign-in, and every session of theirs ends
+      now.
+    </p>
+    <div class="row">
+      <div>
+        <label for="p-new">New password</label>
+        <input id="p-new" name="password" type="password" class="mono" required
+               autocomplete="new-password" minlength="{{ min_password_length | default(12) }}">
+      </div>
+      <div>
+        <label for="p-again">Again</label>
+        <input id="p-again" name="password_again" type="password" class="mono" required
+               autocomplete="new-password" minlength="{{ min_password_length | default(12) }}">
+      </div>
+    </div>
+    <div class="actions"><button type="submit">Set a new password</button></div>
+  </form>
+{% endif %}
+
+<h2>Role</h2>
+<form class="card" method="post" action="/admin/users/{{ target.email | urlencode }}/role">
+  <div class="row">
+    <div>
+      <label for="role">What they are</label>
+      <select id="role" name="role" {{ 'disabled' if is_self }}>
+        {% for r in assignable_roles %}
+          <option value="{{ r.value }}" {{ 'selected' if r == target.role }}>{{ r.label }}</option>
+        {% endfor %}
+      </select>
+      <p class="hint">
+        An operator searches calls, listens and exports. An admin also deletes
+        recordings and manages their organisation. A platform admin spans every
+        organisation and belongs to none.
+      </p>
+    </div>
+  </div>
+  {% if not is_self %}
+    <div class="actions"><button type="submit">Change role</button></div>
+  {% endif %}
+</form>
+
+<h2>Organisations they work in</h2>
+<div class="card">
+  {% if target.is_super_admin %}
+    <p><span class="pill ok">every organisation</span>
+       A platform administrator reaches all of them by role, so there is
+       nothing to list or grant here.</p>
+  {% else %}
+    <p class="hint" style="margin-top:0">
+      The role is on each entry, not on the person: the same operator can be an
+      admin for one of these companies and an operator for another.
+      {% if target.brand_id %}
+        Their home organisation is where they land after signing in.
+      {% endif %}
+    </p>
+
+    {% if memberships %}
+      <div class="tw stack">
+        <table>
+          <thead><tr><th>Organisation</th><th>Role there</th><th>Home</th><th></th></tr></thead>
+          <tbody>
+          {% for m in memberships %}
+            <tr>
+              <td data-label="Organisation">{{ m.brand }}</td>
+              <td data-label="Role there"><span class="pill idle">{{ m.role | role_label }}</span></td>
+              <td data-label="Home">
+                {% if m.brand_id == target.brand_id %}<span class="pill ok">yes</span>
+                {% else %}&mdash;{% endif %}
+              </td>
+              <td data-label="" class="rowacts">
+                <form method="post"
+                      action="/admin/users/{{ target.email | urlencode }}/brands/{{ m.brand_id }}/remove">
+                  <button type="submit" class="btn ghost small">Remove access</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="hint">Removing access signs them out everywhere immediately.</p>
+    {% else %}
+      <p class="hint">
+        No organisations yet, so they can sign in but will see nothing.
+      </p>
+    {% endif %}
+
+    {% if addable %}
+      <form method="post" action="/admin/users/{{ target.email | urlencode }}/brands"
+            style="margin-top:16px">
+        <div class="row">
+          <div>
+            <label for="brand_id">Give access to</label>
+            <select id="brand_id" name="brand_id" required>
+              {% for b in addable %}
+                <option value="{{ b.id }}">{{ b.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div>
+            <label for="m-role">As a</label>
+            <select id="m-role" name="role" required>
+              {% for r in membership_roles %}
+                <option value="{{ r.value }}" {{ 'selected' if r.value == 'OPERATOR' }}>
+                  {{ r.label }}
+                </option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+        <div class="actions"><button type="submit" class="btn ghost">Add organisation</button></div>
+      </form>
+    {% elif memberships %}
+      <p class="hint" style="margin-bottom:0">
+        They already have access to every organisation you can grant.
+      </p>
+    {% endif %}
+  {% endif %}
+</div>
+
+<h2>Account</h2>
+<div class="card">
+  <div class="rowacts" style="gap:10px 18px">
+    {% if not is_self %}
+      <form method="post" action="/admin/users/{{ target.email | urlencode }}/active">
+        <input type="hidden" name="active" value="{{ '0' if target.is_active else '1' }}">
+        <button type="submit" class="btn ghost">
+          {{ 'Disable this account' if target.is_active else 'Enable this account' }}
+        </button>
+      </form>
+    {% endif %}
+    {% if role_here.value == 'SUPER_ADMIN' and target.totp_active and not is_self %}
+      <form method="post" action="/admin/users/{{ target.email | urlencode }}/2fa/reset">
+        <button type="submit" class="btn ghost">Clear their two-factor</button>
+      </form>
+    {% endif %}
+  </div>
+  <p class="hint">
+    Disabling keeps the account and ends every session at once. It is the
+    reversible option, and almost always the right one &mdash; a name attached
+    to past calls stays meaningful.
+  </p>
+</div>
+
+{% if not is_self %}
+  <h2>Delete</h2>
+  <form class="card" method="post" action="/admin/users/{{ target.email | urlencode }}/delete">
+    <div class="note caution">
+      <h3>This cannot be undone</h3>
+      <p>The account, its sessions and its organisation access go. What they
+         did does not: the audit trail keeps their address as text, so their
+         history survives the account being deleted.</p>
+      <p>Prefer <em>disable</em> unless the account was created by mistake.</p>
+    </div>
+    <div class="row">
+      <div>
+        <label for="confirm_email">Type <code>{{ target.email }}</code> to confirm</label>
+        <input id="confirm_email" name="confirm_email" class="mono" required
+               autocomplete="off" placeholder="{{ target.email }}">
+      </div>
+    </div>
+    <div class="actions">
+      <button type="submit" class="btn danger">Delete this account for good</button>
+    </div>
+  </form>
+{% endif %}
+{% endblock %}

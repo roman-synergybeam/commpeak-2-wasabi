@@ -558,9 +558,9 @@ class TestSpecQuality:
 
         categories = set(specs_by_category())
         for wanted in (
-            "Organisation",
-            "CommPeak (source)",
-            "Wasabi (archive)",
+            "Your company",
+            "CommPeak calls",
+            "Wasabi storage",
             "Microsoft 365",
             "Google Workspace",
             "Active Directory",
