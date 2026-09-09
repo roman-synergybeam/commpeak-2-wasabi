@@ -90,6 +90,7 @@ from c2w.web.accounts import (
     delete_destination,
     purge_connection,
     purge_destination,
+    reveal_credentials,
     test_connection,
     test_destination,
     update_connection,
@@ -109,6 +110,16 @@ log = get_logger(__name__)
 #: later; putting it in the session cookie would mean sending a report of
 #: someone's credentials back through a browser.
 _PROBE_RESULTS: dict[tuple[str, int | None], Any] = {}
+
+#: Stored credentials waiting to be shown once, keyed by (user id, account id).
+#:
+#: In memory and popped by the render that displays them, never carried in the
+#: query string: the redirect after the POST becomes browser history, the
+#: referrer of the next request, and a line in anything that logs URLs, and an
+#: S3 secret belongs in none of those. Keyed by user as well as account so one
+#: administrator's page cannot collect a reveal another one asked for. Not
+#: persisted, deliberately -- losing these on restart is the correct behaviour.
+_REVEALED: dict[tuple[int, int], tuple[str, str]] = {}
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 def _asset_version() -> str:
@@ -1138,6 +1149,8 @@ async def admin_connections(
             auth_schemes=("bearer", "header", "basic", "query", "none"),
             probe=probe,
             probe_for=tested,
+            revealed=_REVEALED.pop((user.id, tested), None) if tested else None,
+            revealed_for=tested,
             saved=saved,
             error=error,
         ),
@@ -1172,6 +1185,27 @@ async def admin_connections_save(
             connection_id = int(form["connection_id"])
             outcome = await test_connection(session, brand_id, connection_id)
             _PROBE_RESULTS[("connection", connection_id)] = outcome
+            target = _account_target(
+                form, "/admin/connections", tested=connection_id
+            )
+        elif action == "reveal":
+            connection_id = int(form["connection_id"])
+            name, token, secret = await reveal_credentials(
+                session, brand_id, connection_id
+            )
+            _REVEALED[(user.id, connection_id)] = (token, secret)
+            await record_admin_event(
+                session,
+                actor=user,
+                action=AdminAction.CREDENTIALS_REVEALED,
+                brand_id=brand_id,
+                ip=client_ip(request),
+                user_agent=request.headers.get("user-agent"),
+                # The account, never the values. An audit row that copied the
+                # secret in would have defeated the sealed column it came out
+                # of; what matters is that somebody looked, and at which one.
+                detail={"account": name, "connection_id": connection_id},
+            )
             target = _account_target(
                 form, "/admin/connections", tested=connection_id
             )
@@ -1663,7 +1697,9 @@ async def admin_settings(
             # so the page needs everything their own pages needed. Loaded only
             # for the section on screen.
             **(
-                await _commpeak_section_context(session, tested_id=probe_id)
+                await _commpeak_section_context(
+                    session, tested_id=probe_id, user_id=user.id
+                )
                 if active_section == "CommPeak calls"
                 else await _archive_section_context(session, tested_id=probe_id)
                 if active_section == "Wasabi storage"
@@ -1794,9 +1830,14 @@ def _account_target(
 
 
 async def _commpeak_section_context(
-    session: AsyncSession, *, tested_id: int | None
+    session: AsyncSession, *, tested_id: int | None, user_id: int
 ) -> dict[str, Any]:
-    """What `_commpeak_accounts.html` needs, wherever it is rendered."""
+    """What `_commpeak_accounts.html` needs, wherever it is rendered.
+
+    ``user_id`` only to collect a reveal this person asked for: keying it by
+    account alone would let one administrator's page display the credentials
+    another one had just looked up.
+    """
     connections = (
         (await session.execute(select(CommPeakConnection).order_by(CommPeakConnection.name)))
         .scalars()
@@ -1811,21 +1852,39 @@ async def _commpeak_section_context(
         t.id: t
         for t in (await session.execute(select(Tenant))).scalars().all()
     }
+    # Both columns, and the same shape the standalone page uses. This used to
+    # be `{id: <int>}` while the shared template reads
+    # `counts.get(c.id, {}).get('total')`, which raises on an int -- and it
+    # raised nowhere, because `recordings` was empty for every organisation, so
+    # the `{}` default answered every lookup. The moment one account had a
+    # single recording this section would have failed to render, which is to
+    # say the day the system started working.
     counts = (
         await session.execute(
             text(
-                "SELECT connection_id, count(*) AS recordings "
+                "SELECT connection_id, count(*) AS total, "
+                "count(*) FILTER (WHERE state IN ('AVAILABLE','SOURCE_DELETED')) AS archived "
                 "FROM recordings GROUP BY connection_id"
             )
         )
     ).mappings().all()
     return {
         "connections": connections,
-        "destinations": destinations,
+        # A dict keyed by id, because the shared template calls
+        # `destinations.get(c.destination_id)`. A list survived here only
+        # because that call sits behind `c.destination_id and ...` and no
+        # account has a destination yet -- the same latent shape mismatch as
+        # `counts` below, waiting for the first account to be pointed at a
+        # bucket. `destination_list` is what the picker iterates.
+        "destinations": {d.id: d for d in destinations},
+        "destination_list": destinations,
         "tenants": tenants,
-        "counts": {row["connection_id"]: row["recordings"] for row in counts},
+        "counts": {row["connection_id"]: dict(row) for row in counts},
         "probe": _PROBE_RESULTS.pop(("connection", tested_id), None) if tested_id else None,
         "probe_for": tested_id,
+        # Popped, so a refresh does not show it again.
+        "revealed": _REVEALED.pop((user_id, tested_id), None) if tested_id else None,
+        "revealed_for": tested_id,
     }
 
 

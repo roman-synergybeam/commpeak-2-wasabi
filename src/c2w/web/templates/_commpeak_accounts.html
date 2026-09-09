@@ -99,15 +99,33 @@
                       <label>Call records address</label>
                       <input name="cdr_api_base" class="mono" value="{{ c.cdr_api_base or '' }}">
                     </div>
-                    <div>
-                      <label>Call records user</label>
-                      <input name="cdr_api_user" value="{{ c.cdr_api_user or '' }}">
-                    </div>
-                    <div>
-                      <label>Call records token</label>
-                      <input name="cdr_api_token" type="password" class="mono"
-                             placeholder="{{ 'stored — type to replace' if c.cdr_api_key_sealed else 'not set' }}">
-                    </div>
+                    {# "Call records user" and "Call records token" were here
+                       per account and are not, because the key is the same for
+                       every account in an organisation: it is set once under
+                       Settings -> CommPeak calls. The user name only ever
+                       applied to Basic authentication, which PBX Stats does
+                       not use. The columns stay, and a value already stored in
+                       them is still used, so nothing an operator entered has
+                       been dropped -- there is just no longer a second place
+                       to enter it and get it wrong. #}
+                    {# What is stored, when it has just been asked for. "stored"
+                       on its own is not something anyone can check against the
+                       CommPeak console the value came from, so a token typed
+                       into the wrong account stayed invisible. Shown once: the
+                       route pops it, so a refresh does not repeat it. #}
+                    {% if revealed and revealed_for == c.id %}
+                      <div style="grid-column:1/-1">
+                        <div class="note caution">
+                          <h3>Stored credentials, shown once</h3>
+                          <p>Refreshing this page will not show them again, and
+                             the fact that they were shown is in the change log.</p>
+                          <p><strong>S3 token</strong><br>
+                             <code class="mono">{{ revealed[0] }}</code></p>
+                          <p><strong>S3 secret</strong><br>
+                             <code class="mono">{{ revealed[1] }}</code></p>
+                        </div>
+                      </div>
+                    {% endif %}
                     <div>
                       <label>S3 token</label>
                       <input name="s3_access_key" type="password" class="mono"
@@ -130,6 +148,16 @@
                   <div class="actions">
                     <button type="submit">Save changes</button>
                   </div>
+                </form>
+                {# Its own form, so asking what is stored cannot also submit
+                   the edits above it. Same permission as saving, because
+                   whoever can overwrite these values loses nothing by seeing
+                   them -- but it is logged, which saving a credential is not. #}
+                <form method="post" action="/admin/connections">
+                  {% if return_to %}<input type="hidden" name="return_to" value="{{ return_to }}">{% endif %}
+                  <input type="hidden" name="action" value="reveal">
+                  <input type="hidden" name="connection_id" value="{{ c.id }}">
+                  <button type="submit" class="btn ghost small">Show stored credentials</button>
                 </form>
                 <form method="post" action="/admin/connections"
                       onsubmit="return confirm('Stop using {{ c.name }}? Its recordings and their archive copies are kept.')">
@@ -217,17 +245,9 @@
       <label for="n-cdr">Call records address</label>
       <input id="n-cdr" name="cdr_api_base" class="mono"
              placeholder="https://something.td.commpeak.com">
-      <p class="hint">Without it, recordings are archived with no call details attached.</p>
-    </div>
-    <div>
-      <label for="n-cdruser">Call records user</label>
-      <input id="n-cdruser" name="cdr_api_user">
-      <p class="hint">Only needed if the call records API uses a user name.</p>
-    </div>
-    <div>
-      <label for="n-cdrtoken">Call records token</label>
-      <input id="n-cdrtoken" name="cdr_api_token" type="password" class="mono" autocomplete="off">
-      <p class="hint">Encrypted before it is stored.</p>
+      <p class="hint">Without it, recordings are archived with no call details
+         attached. The API key for it is set once for the whole organisation,
+         under Settings &rarr; CommPeak calls.</p>
     </div>
   </div>
 

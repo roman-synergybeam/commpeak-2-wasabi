@@ -26,7 +26,11 @@ from c2w.db.models.core import Brand, CommPeakConnection, StorageDestination, Te
 from c2w.logging import get_logger
 from c2w.storage.commpeak import COMMPEAK_ENDPOINT, run_source_probes
 from c2w.storage.errors import TransferError
-from c2w.storage.factory import open_destination, open_source
+from c2w.storage.factory import (
+    open_destination,
+    open_source,
+    reveal_connection_credentials,
+)
 from c2w.storage.wasabi import WASABI_REGIONS
 
 log = get_logger(__name__)
@@ -37,6 +41,7 @@ __all__ = [
     "add_destination",
     "delete_connection",
     "delete_destination",
+    "reveal_credentials",
     "test_connection",
     "test_destination",
     "update_connection",
@@ -265,6 +270,35 @@ async def delete_connection(
     await session.flush()
     log.info("accounts.connection_disabled", connection_id=connection_id, actor=actor)
     return name
+
+
+async def reveal_credentials(
+    session: AsyncSession, brand_id: int, connection_id: int
+) -> tuple[str, str, str]:
+    """The stored S3 token and secret for one account, in clear.
+
+    Returns ``(name, token, secret)``. The caller checks the permission,
+    records the audit row and shows the values once; nothing here logs them.
+
+    Why this exists, when the rest of this module is careful never to hand a
+    credential back: with eight accounts and a refusal that names none of
+    them, "stored" is not something an operator can check against the console
+    the value was copied from, so a token typed into the wrong account stays
+    invisible. And the permission that reaches it can already *replace* both
+    values -- withholding them from that same person protects nothing.
+    """
+    conn = (
+        await session.execute(
+            select(CommPeakConnection).where(
+                CommPeakConnection.id == connection_id,
+                CommPeakConnection.brand_id == brand_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if conn is None:
+        raise AccountError("that CommPeak account no longer exists")
+    token, secret = await reveal_connection_credentials(session, conn)
+    return conn.name, token, secret
 
 
 #: How long a probe waits before it will talk to CommPeak about the same

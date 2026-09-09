@@ -11,6 +11,8 @@ are never logged, cached, or attached to a model.
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -119,3 +121,39 @@ async def open_destination(
     )
     client = WasabiDestination(creds, limiter=limiter)
     return client
+
+async def reveal_connection_credentials(
+    session: AsyncSession, connection: Any
+) -> tuple[str, str]:
+    """The stored S3 token and secret in clear, for an operator to compare.
+
+    Kept in this module because this is the only place credentials are
+    unsealed, and that property is worth more than the convenience of putting
+    it next to the page that uses it.
+
+    Why it exists at all, given that nothing else here ever hands a credential
+    back: with eight accounts and a refusal that names no account, "stored"
+    tells an operator nothing they can check against the console the value was
+    copied from. And the permission that reaches this can already *overwrite*
+    both values, so withholding them from that same person protects nothing --
+    it only makes a wrong entry impossible to find. The caller is responsible
+    for the permission check, for auditing the reveal, and for not logging what
+    comes back.
+    """
+    key_id, wrapped = await _brand_keys(session, connection.brand_id)
+    return (
+        _unseal(
+            connection.s3_access_key_sealed,
+            key_id=key_id,
+            wrapped=wrapped,
+            aad=f"connection:{connection.id}:access_key",
+            label="the S3 token",
+        ),
+        _unseal(
+            connection.s3_secret_sealed,
+            key_id=key_id,
+            wrapped=wrapped,
+            aad=f"connection:{connection.id}:secret_key",
+            label="the S3 secret",
+        ),
+    )

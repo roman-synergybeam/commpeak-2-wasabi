@@ -636,3 +636,165 @@ class TestTheProbeCooldown:
         from c2w.web.accounts import PROBE_COOLDOWN_SECONDS
 
         assert 5 <= PROBE_COOLDOWN_SECONDS <= 60
+
+
+class TestShowingStoredCredentials:
+    """"stored" is not something an operator can check.
+
+    With eight accounts and a refusal that names none of them, a token typed
+    into the wrong account is invisible: every field just says "stored". So
+    there is a button that shows what is actually held. It is gated by the same
+    permission as saving, on the reasoning that whoever can *overwrite* both
+    values loses nothing by seeing them -- but unlike saving it is written to
+    the change log, because it is the one action that takes a credential out of
+    a sealed column and puts it on a screen.
+    """
+
+    TOKEN = "PROBEONLYTOKEN123456"
+    SECRET = "probe-only-secret-value-not-real-0000000"
+
+    async def _make(self, db, brand_id):
+        from c2w.web.accounts import add_connection
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(brand_id)},
+            )
+            conn = await add_connection(
+                s,
+                brand_id,
+                {
+                    "name": f"reveal-{uuid.uuid4().hex[:8]}",
+                    "commpeak_domain": "reveal.test.commpeak.com",
+                    "s3_bucket": str(uuid.uuid4()),
+                    "s3_access_key": self.TOKEN,
+                    "s3_secret": self.SECRET,
+                },
+                actor="test@example.com",
+            )
+            await s.commit()
+            return conn.id
+
+    async def test_it_returns_exactly_what_was_stored(self, db, scenario):
+        """A round trip through the sealed columns, not a mock."""
+        from c2w.web.accounts import reveal_credentials
+
+        conn_id = await self._make(db, scenario["brand_id"])
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            _name, token, secret = await reveal_credentials(
+                s, scenario["brand_id"], conn_id
+            )
+        assert token == self.TOKEN
+        assert secret == self.SECRET
+
+    async def test_another_organisation_cannot_reveal_it(self, db, scenario):
+        """The brand is part of the lookup, not just of the RLS scope."""
+        from c2w.web.accounts import AccountError, reveal_credentials
+
+        conn_id = await self._make(db, scenario["brand_id"])
+        other = scenario["brand_id"] + 1000
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(other)},
+            )
+            with pytest.raises(AccountError):
+                await reveal_credentials(s, other, conn_id)
+
+    async def test_an_operator_is_refused(self, app_client, scenario, db):
+        conn_id = await self._make(db, scenario["brand_id"])
+        await _login(
+            app_client,
+            scenario["agent_email"],
+            scenario["password"],
+            brand_id=scenario["brand_id"],
+        )
+        refused = await app_client.post(
+            "/admin/connections",
+            data={"action": "reveal", "connection_id": str(conn_id)},
+            follow_redirects=False,
+        )
+        assert refused.status_code == 403
+
+    async def test_it_is_logged_without_the_values(self, app_client, scenario, db):
+        """The row says somebody looked. It must not say what they saw."""
+        conn_id = await self._make(db, scenario["brand_id"])
+        await _login(
+            app_client,
+            scenario["admin_email"],
+            scenario["password"],
+            brand_id=scenario["brand_id"],
+        )
+        done = await app_client.post(
+            "/admin/connections",
+            data={"action": "reveal", "connection_id": str(conn_id)},
+            follow_redirects=False,
+        )
+        assert done.status_code == 303
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            rows = (
+                await s.execute(
+                    text(
+                        "SELECT action, result, detail::text FROM audit_events "
+                        "WHERE action = 'CREDENTIALS_REVEALED' ORDER BY id DESC LIMIT 1"
+                    )
+                )
+            ).all()
+        assert rows, "the reveal was not written to the change log"
+        _action, result, detail = rows[0]
+        assert result == "SUCCESS"
+        assert self.TOKEN not in detail
+        assert self.SECRET not in detail
+
+    async def test_it_is_shown_once_and_not_on_a_refresh(
+        self, app_client, scenario, db
+    ):
+        """Popped by the render, so reloading does not repeat it."""
+        conn_id = await self._make(db, scenario["brand_id"])
+        await _login(
+            app_client,
+            scenario["admin_email"],
+            scenario["password"],
+            brand_id=scenario["brand_id"],
+        )
+        await app_client.post(
+            "/admin/connections",
+            data={"action": "reveal", "connection_id": str(conn_id)},
+            follow_redirects=False,
+        )
+        first = await app_client.get(f"/admin/connections?tested={conn_id}")
+        assert self.TOKEN in first.text
+        assert self.SECRET in first.text
+
+        again = await app_client.get(f"/admin/connections?tested={conn_id}")
+        assert self.TOKEN not in again.text
+        assert self.SECRET not in again.text
+
+    async def test_the_page_never_shows_a_credential_unasked(
+        self, app_client, scenario, db
+    ):
+        """Without pressing the button, nothing is on the page."""
+        conn_id = await self._make(db, scenario["brand_id"])
+        await _login(
+            app_client,
+            scenario["admin_email"],
+            scenario["password"],
+            brand_id=scenario["brand_id"],
+        )
+        page = await app_client.get("/admin/connections")
+        assert self.TOKEN not in page.text
+        assert self.SECRET not in page.text
+        section = await app_client.get("/admin/settings?section=commpeak-calls")
+        assert self.TOKEN not in section.text
+        assert self.SECRET not in section.text
+        assert str(conn_id) in page.text          # the account itself is listed

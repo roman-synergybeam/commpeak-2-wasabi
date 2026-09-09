@@ -301,6 +301,7 @@ _AUDIT_ACTION_LABEL = {
     "MFA_DISABLED": "two-factor turned off",
     "RECOVERY_CODES_REISSUED": "recovery codes reissued",
     "PASSWORD_CHANGED": "password changed",
+    "CREDENTIALS_REVEALED": "S3 credentials shown in clear",
 }
 
 

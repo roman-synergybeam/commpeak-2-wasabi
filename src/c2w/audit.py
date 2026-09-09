@@ -57,6 +57,11 @@ class AdminAction(enum.StrEnum):
     MFA_DISABLED = "MFA_DISABLED"
     RECOVERY_CODES_REISSUED = "RECOVERY_CODES_REISSUED"
     PASSWORD_CHANGED = "PASSWORD_CHANGED"  # noqa: S105 - an action name, not a credential
+    #: An administrator displayed a stored S3 token and secret in clear. The
+    #: value itself is never written here -- only that somebody looked, and at
+    #: which account. Worth keeping precisely because it is the one action that
+    #: takes a credential out of the sealed column and puts it on a screen.
+    CREDENTIALS_REVEALED = "CREDENTIALS_REVEALED"
 
 
 async def record_admin_event(
