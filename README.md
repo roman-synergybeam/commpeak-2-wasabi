@@ -166,3 +166,5 @@ it, every stored credential is unrecoverable.
   allowed or refused — is audited.
 - `recordings.play` and `recordings.download` are separate permissions, because
   some organisations allow listening but forbid taking copies away.
+
+<!-- hook probe: stale db url path -->
