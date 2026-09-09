@@ -317,3 +317,20 @@ input[type="range"]:focus-visible{outline:2px solid var(--accent);outline-offset
   .toasts .toast{animation:none}
   .toasts .toast.going{transition:none}
 }
+
+/* One geometry for every page -------------------------------------------
+   Pages used to pick their own width -- some on the kit's 1680px frame,
+   others overriding to 1100px -- so moving between them shifted the whole
+   layout sideways. They all sit on the same frame now.
+
+   The cost of a wide frame is the text measure: a paragraph 1600px across is
+   unreadable however correct the layout is. So the *page* stays wide and the
+   prose is capped instead, which is the part that actually needs limiting.
+   Tables, grids and the rail are untouched. */
+main > .sub,
+main > .note p,
+.card > .hint,
+.card > p:not([class]),
+.note > p,
+.steps .det{max-width:88ch}
+.changelog .what{max-width:110ch}
