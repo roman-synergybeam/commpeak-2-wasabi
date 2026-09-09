@@ -14,46 +14,16 @@
   {# How many of these this organisation already has, so the page states the
      model rather than implying one of each. #}
   {% if category == 'CommPeak calls' %}
-    {# The question people arrive with: "where are the S3 settings?" They are
-       not on this page and cannot be -- there is one bucket, token and secret
-       per CommPeak account, and an organisation has several. This page holds
-       only what they share. #}
-    <div class="note">
-      <h3>The S3 bucket, token and secret are not here</h3>
-      <p>They belong to each CommPeak account rather than to the organisation:
-         one bucket, one token and one secret per PBX or dialer, and
-         <strong>{{ active_brand.name if active_brand else 'this organisation' }}</strong>
-         has {{ account_counts.commpeak }} of them. Add and test those on the
-         <a href="/admin/connections"><strong>CommPeak</strong></a> page.</p>
-      <p>What follows applies to all of its accounts at once.</p>
-    </div>
-    <div class="summarygrid">
-      <div>
-        <span class="hint">CommPeak accounts here</span>
-        <strong>{{ account_counts.commpeak }}</strong>
-      </div>
-      <div>
-        <span class="hint">Each has its own</span>
-        <strong>bucket, token and secret</strong>
-      </div>
-    </div>
+    <p class="hint" style="margin:0 0 6px">
+      The bucket, token and secret belong to each account rather than to the
+      organisation &mdash; one set per PBX or dialer &mdash; so they are here,
+      per account. The settings after them apply to all of these at once.
+    </p>
   {% elif category == 'Wasabi storage' %}
-    <div class="note">
-      <h3>The bucket and keys are not here</h3>
-      <p>Each archive bucket has its own region, keys and path prefix, added and
-         tested on the <a href="/admin/storage"><strong>Archive</strong></a>
-         page. What follows applies to all of them.</p>
-    </div>
-    <div class="summarygrid">
-      <div>
-        <span class="hint">Archive buckets here</span>
-        <strong>{{ account_counts.wasabi }}</strong>
-      </div>
-      <div>
-        <span class="hint">Each has its own</span>
-        <strong>region, bucket and keys</strong>
-      </div>
-    </div>
+    <p class="hint" style="margin:0 0 6px">
+      Each bucket has its own region, keys and path prefix, so they are here,
+      per bucket. The settings after them apply to all of them at once.
+    </p>
   {% endif %}
 
   {# Values first, switches after: a switch reads as a statement about the

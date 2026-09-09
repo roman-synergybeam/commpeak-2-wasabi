@@ -108,6 +108,22 @@ log = get_logger(__name__)
 _PROBE_RESULTS: dict[tuple[str, int | None], Any] = {}
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+def _asset_version() -> str:
+    """A cache-busting stamp for the stylesheets and scripts.
+
+    Without one, a browser keeps serving the CSS it already has and a change
+    lands for nobody until they hard-refresh -- which looked like a styling bug
+    that could not be reproduced on the server. The newest mtime across the
+    static tree, so any edit moves it and an unchanged deploy does not.
+    """
+    root = Path(__file__).parent / "static"
+    newest = 0.0
+    for path in root.rglob("*"):
+        if path.suffix in {".css", ".js"}:
+            newest = max(newest, path.stat().st_mtime)
+    return str(int(newest))
+
+
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 register_filters(templates.env)
 
@@ -209,6 +225,7 @@ async def _shell(
         # The platform's own name, one setting rather than five hardcoded
         # strings that drifted apart -- the authenticator said "c2w" while the
         # header said something else.
+        "asset_v": _asset_version(),
         "platform_name": await settings_service.get_str(
             session, "core.platform_name", brand_id=active.id if active else None
         ),
@@ -250,6 +267,7 @@ async def login_form(
             "no_users": no_users,
             "sso_enabled": sso,
             "platform_name": await settings_service.get_str(session, "core.platform_name"),
+            "asset_v": _asset_version(),
         },
     )
 
@@ -367,6 +385,7 @@ async def login_code_form(
             "request": request,
             "email": user.email,
             "platform_name": await settings_service.get_str(session, "core.platform_name"),
+            "asset_v": _asset_version(),
         },
     )
 
@@ -433,6 +452,7 @@ async def login_enrol_form(
             "enrolment": enrolment,
             "error": error,
             "platform_name": await settings_service.get_str(session, "core.platform_name"),
+            "asset_v": _asset_version(),
         },
     )
 
@@ -1021,26 +1041,30 @@ async def admin_connections_save(
     try:
         if action == "add":
             conn = await add_connection(session, brand_id, form, actor=user.email)
-            target = f"/admin/connections?saved={quote_plus(conn.name)}"
+            target = _account_target(form, "/admin/connections", saved=conn.name)
         elif action == "update":
             conn = await update_connection(
                 session, brand_id, int(form["connection_id"]), form, actor=user.email
             )
-            target = f"/admin/connections?saved={quote_plus(conn.name)}"
+            target = _account_target(form, "/admin/connections", saved=conn.name)
         elif action == "test":
             connection_id = int(form["connection_id"])
             outcome = await test_connection(session, brand_id, connection_id)
             _PROBE_RESULTS[("connection", connection_id)] = outcome
-            target = f"/admin/connections?tested={connection_id}"
+            target = _account_target(
+                form, "/admin/connections", tested=connection_id
+            )
         elif action == "remove":
             name = await delete_connection(
                 session, brand_id, int(form["connection_id"]), actor=user.email
             )
-            target = f"/admin/connections?saved={quote_plus(name + ' removed')}"
+            target = _account_target(
+                form, "/admin/connections", saved=f"{name} removed"
+            )
         else:
             target = "/admin/connections"
     except (AccountError, TransferError, CryptoError) as exc:
-        target = f"/admin/connections?error={quote_plus(str(exc))}"
+        target = _account_target(form, "/admin/connections", error=str(exc))
     return RedirectResponse(target, status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -1093,26 +1117,28 @@ async def admin_storage_save(
     try:
         if action == "add":
             dest = await add_destination(session, brand_id, form, actor=user.email)
-            target = f"/admin/storage?saved={quote_plus(dest.name)}"
+            target = _account_target(form, "/admin/storage", saved=dest.name)
         elif action == "update":
             dest = await update_destination(
                 session, brand_id, int(form["destination_id"]), form, actor=user.email
             )
-            target = f"/admin/storage?saved={quote_plus(dest.name)}"
+            target = _account_target(form, "/admin/storage", saved=dest.name)
         elif action == "test":
             destination_id = int(form["destination_id"])
             outcome = await test_destination(session, brand_id, destination_id)
             _PROBE_RESULTS[("destination", destination_id)] = outcome
-            target = f"/admin/storage?tested={destination_id}"
+            target = _account_target(form, "/admin/storage", tested=destination_id)
         elif action == "remove":
             name = await delete_destination(
                 session, brand_id, int(form["destination_id"]), actor=user.email
             )
-            target = f"/admin/storage?saved={quote_plus(name + ' stopped')}"
+            target = _account_target(
+                form, "/admin/storage", saved=f"{name} stopped"
+            )
         else:
             target = "/admin/storage"
     except (AccountError, TransferError, CryptoError) as exc:
-        target = f"/admin/storage?error={quote_plus(str(exc))}"
+        target = _account_target(form, "/admin/storage", error=str(exc))
     return RedirectResponse(target, status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -1396,6 +1422,7 @@ async def admin_settings(
     saved: str | None = None,
     error: str | None = None,
     tested: str | None = None,
+    probe_id: int | None = None,
 ) -> Response:
     """One section at a time, chosen from the rail on the left.
 
@@ -1465,6 +1492,16 @@ async def admin_settings(
             manage_links={k: v[0] for k, v in _MANAGE_LINKS.items()},
             manage_link_labels={k: v[1] for k, v in _MANAGE_LINKS.items()},
             setup_steps=await _setup_steps(session, brand),
+            # The account managers are rendered inline for these two sections,
+            # so the page needs everything their own pages needed. Loaded only
+            # for the section on screen.
+            **(
+                await _commpeak_section_context(session, tested_id=probe_id)
+                if active_section == "CommPeak calls"
+                else await _archive_section_context(session, tested_id=probe_id)
+                if active_section == "Wasabi storage"
+                else {}
+            ),
             test_label=TESTABLE_SECTIONS.get(active_section),
             test_result=_SECTION_TESTS.pop(f"{user.id}:{tested}", None) if tested else None,
             saved=saved,
@@ -1534,6 +1571,104 @@ async def admin_settings_save(
 #: follows it. In memory and per process, like the connection probes: a test
 #: result is worth showing once and is not worth a table.
 _SECTION_TESTS: dict[str, Any] = {}
+
+
+#: The only places an account form is rendered, and therefore the only places
+#: it may send you back to. An allowlist rather than validation, because
+#: "does this look like one of our URLs" is how open redirects get written.
+_ACCOUNT_RETURNS: Final[frozenset[str]] = frozenset(
+    {
+        "/admin/connections",
+        "/admin/storage",
+        "/admin/settings?section=commpeak-calls",
+        "/admin/settings?section=wasabi-storage",
+    }
+)
+
+
+def _account_target(
+    form: dict[str, str],
+    default: str,
+    *,
+    saved: str | None = None,
+    error: str | None = None,
+    tested: int | None = None,
+) -> str:
+    """Where a saved account form should land, with its message attached.
+
+    Submitting from the settings page used to bounce you to the standalone
+    page, which loses your place for no reason. The requested page is checked
+    against an allowlist rather than validated by shape, because "does this
+    look like one of our URLs" is how open redirects get written.
+
+    The probe result is keyed `probe_id` on the settings page and `tested` on
+    the standalone ones, because `tested` already means something else there.
+    """
+    wanted = str(form.get("return_to") or "").strip()
+    base = wanted if wanted in _ACCOUNT_RETURNS else default
+    joiner = "&" if "?" in base else "?"
+    if saved is not None:
+        return f"{base}{joiner}saved={quote_plus(saved)}"
+    if error is not None:
+        return f"{base}{joiner}error={quote_plus(error)}"
+    if tested is not None:
+        key = "probe_id" if base.startswith("/admin/settings") else "tested"
+        return f"{base}{joiner}{key}={tested}"
+    return base
+
+
+async def _commpeak_section_context(
+    session: AsyncSession, *, tested_id: int | None
+) -> dict[str, Any]:
+    """What `_commpeak_accounts.html` needs, wherever it is rendered."""
+    connections = (
+        (await session.execute(select(CommPeakConnection).order_by(CommPeakConnection.name)))
+        .scalars()
+        .all()
+    )
+    destinations = (
+        (await session.execute(select(StorageDestination).order_by(StorageDestination.name)))
+        .scalars()
+        .all()
+    )
+    tenants = {
+        t.id: t
+        for t in (await session.execute(select(Tenant))).scalars().all()
+    }
+    counts = (
+        await session.execute(
+            text(
+                "SELECT connection_id, count(*) AS recordings "
+                "FROM recordings GROUP BY connection_id"
+            )
+        )
+    ).mappings().all()
+    return {
+        "connections": connections,
+        "destinations": destinations,
+        "tenants": tenants,
+        "counts": {row["connection_id"]: row["recordings"] for row in counts},
+        "probe": _PROBE_RESULTS.pop(("connection", tested_id), None) if tested_id else None,
+        "probe_for": tested_id,
+    }
+
+
+async def _archive_section_context(
+    session: AsyncSession, *, tested_id: int | None
+) -> dict[str, Any]:
+    """What `_archive_accounts.html` needs, wherever it is rendered."""
+    destinations = (
+        (await session.execute(select(StorageDestination).order_by(StorageDestination.name)))
+        .scalars()
+        .all()
+    )
+    return {
+        "destinations": destinations,
+        "providers": ("wasabi", "s3", "minio", "backblaze", "other"),
+        "regions": wasabi_region_choices(),
+        "probe": _PROBE_RESULTS.pop(("destination", tested_id), None) if tested_id else None,
+        "probe_for": tested_id,
+    }
 
 
 @router.post("/admin/settings/test")

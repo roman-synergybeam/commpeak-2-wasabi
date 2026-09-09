@@ -14,8 +14,8 @@
   {# The kit, then the handful of rules it leaves to the application. kit.css
      is @imports in dependency order: tokens define what everything else
      resolves to, and narrow.css is all overrides so it goes last. #}
-  <link rel="stylesheet" href="/static/ui-kit/kit.css">
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/ui-kit/kit.css?v={{ asset_v | default(0) }}">
+  <link rel="stylesheet" href="/static/app.css?v={{ asset_v | default(0) }}">
 </head>
 <body>
 <main class="narrow">

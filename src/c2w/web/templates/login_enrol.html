@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Set up two-factor — {{ platform_name | default('CommPeak-2-Wasabi') }}</title>
-  <link rel="stylesheet" href="/static/ui-kit/kit.css">
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/ui-kit/kit.css?v={{ asset_v | default(0) }}">
+  <link rel="stylesheet" href="/static/app.css?v={{ asset_v | default(0) }}">
 </head>
 <body>
 <main class="measured" style="padding-top:48px">

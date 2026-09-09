@@ -1,0 +1,200 @@
+{# The archive buckets: what is configured, and the form to add one.
+
+   Shared by the Archive page and by the Wasabi storage settings section, so
+   the keys are editable in the place people go looking for them rather than
+   being described in one place and configured in another. #}
+<p class="sub">
+  {{ active_brand.name if active_brand }} has {{ destinations | length }}.
+  Add as many buckets as you need &mdash; each has its own region and keys.
+</p>
+
+
+{% if probe %}
+  <div class="flash {{ 'ok' if probe.ok else 'err' }}">{{ probe.summary }}</div>
+{% endif %}
+{% if probe %}
+  <div class="tw" style="margin-bottom:18px">
+    <table>
+      <thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead>
+      <tbody>
+      {% for c in probe.checks %}
+        <tr>
+          <td data-label="Check">{{ c.name }}</td>
+          <td data-label="Result">
+            <span class="pill {{ 'ok' if c.ok else 'err' }}">{{ 'passed' if c.ok else 'failed' }}</span>
+          </td>
+          <td class="statuscell" data-label="Detail">
+            <div class="det wrap">{{ c.detail }}</div>
+            {% if c.hint %}<div class="det wrap"><strong>{{ c.hint }}</strong></div>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+
+<div class="tw stack">
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th><th>Service</th><th>Region</th><th>Bucket</th><th>Folder</th>
+        <th>State</th><th class="right">Objects</th><th class="right">Stored</th><th>Check</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for d in destinations %}
+      <tr>
+        <td data-label="Name">{{ d.name }}</td>
+        <td data-label="Service">{{ d.provider }}</td>
+        <td class="mono" data-label="Region">{{ d.region }}</td>
+        <td class="mono" data-label="Bucket">{{ d.bucket }}</td>
+        <td class="mono" data-label="Folder">{{ d.path_prefix or '—' }}</td>
+        <td class="statuscell" data-label="State">
+          <div class="pills">
+            <span class="pill {{ d.status | conn_class }}">{{ d.status | lower }}</span>
+            {% if not d.is_enabled %}<span class="pill idle">off</span>{% endif %}
+          </div>
+          {% if d.status_detail %}<div class="det wrap">{{ d.status_detail }}</div>{% endif %}
+        </td>
+        <td class="right" data-label="Objects">{{ "{:,}".format(d.objects_stored) }}</td>
+        <td class="right" data-label="Stored">{{ d.bytes_stored | filesize }}</td>
+        <td data-label="Check">
+          <div class="rowactions">
+            <form method="post" action="/admin/storage">
+    {% if return_to %}<input type="hidden" name="return_to" value="{{ return_to }}">{% endif %}
+              <input type="hidden" name="action" value="test">
+              <input type="hidden" name="destination_id" value="{{ d.id }}">
+              <button type="submit" class="btn small">Test</button>
+            </form>
+            <details class="more">
+              <summary>Edit</summary>
+              <div class="menu">
+                <form method="post" action="/admin/storage" style="display:block;width:100%">
+                  <input type="hidden" name="action" value="update">
+                  <input type="hidden" name="destination_id" value="{{ d.id }}">
+                  <div class="row" style="margin-top:10px">
+                    <div><label>Name</label><input name="name" value="{{ d.name }}"></div>
+                    <div>
+                      <label>Region</label>
+                      <select name="region">
+                        {% for r in regions %}
+                          <option value="{{ r }}" {{ 'selected' if d.region == r }}>{{ r }}</option>
+                        {% endfor %}
+                      </select>
+                    </div>
+                    <div><label>Bucket</label><input name="bucket" class="mono" value="{{ d.bucket }}"></div>
+                    <div><label>Folder</label><input name="path_prefix" class="mono" value="{{ d.path_prefix }}"></div>
+                    <div class="wide"><label>Address</label><input name="endpoint" class="mono" value="{{ d.endpoint }}"></div>
+                    <div>
+                      <label>Access key</label>
+                      <input name="access_key" type="password" class="mono"
+                             placeholder="stored — type to replace">
+                    </div>
+                    <div>
+                      <label>Secret key</label>
+                      <input name="secret_key" type="password" class="mono"
+                             placeholder="stored — type to replace">
+                    </div>
+                    <div>
+                      <label>In use</label>
+                      <select name="is_enabled">
+                        <option value="true" {{ 'selected' if d.is_enabled }}>Yes</option>
+                        <option value="false" {{ '' if d.is_enabled else 'selected' }}>No</option>
+                      </select>
+                    </div>
+                  </div>
+                  <p class="hint">Leave a key blank to keep the one stored.</p>
+                  <div class="actions"><button type="submit">Save changes</button></div>
+                </form>
+                <form method="post" action="/admin/storage"
+                      onsubmit="return confirm('Stop copying to {{ d.name }}? The bucket and everything in it are left untouched.')">
+                  <input type="hidden" name="action" value="remove">
+                  <input type="hidden" name="destination_id" value="{{ d.id }}">
+                  <button type="submit" class="danger small">Stop using</button>
+                </form>
+              </div>
+            </details>
+          </div>
+        </td>
+      </tr>
+    {% else %}
+      <tr>
+        <td colspan="9" class="empty">
+          No archive storage yet. Recordings are being found and matched to
+          calls, but nothing is copied until there is somewhere to put it.
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>Add archive storage</h2>
+<form class="card" method="post" action="/admin/storage">
+    {% if return_to %}<input type="hidden" name="return_to" value="{{ return_to }}">{% endif %}
+  <input type="hidden" name="action" value="add">
+  <div class="row">
+    <div>
+      <label for="s-name">Name</label>
+      <input id="s-name" name="name" required placeholder="Wasabi EU">
+      <p class="hint">How it is named on these pages.</p>
+    </div>
+    <div>
+      <label for="s-provider">Service</label>
+      <select id="s-provider" name="provider">
+        {% for p in providers %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+      </select>
+      <p class="hint">Anything S3-compatible works; Wasabi is the one in use.</p>
+    </div>
+    <div>
+      <label for="s-region">Region</label>
+      <select id="s-region" name="region">
+        {% for r in regions %}
+          <option value="{{ r }}" {{ 'selected' if r == 'eu-central-1' }}>{{ r }}</option>
+        {% endfor %}
+      </select>
+      <p class="hint">
+        Where the recordings will physically live. Moving terabytes later is
+        slow and charged for.
+        <a href="https://docs.wasabi.com/v1/docs/what-are-the-service-urls-for-wasabis-different-storage-regions"
+           target="_blank" rel="noopener">Wasabi's regions</a>.
+      </p>
+    </div>
+    <div>
+      <label for="s-bucket">Bucket</label>
+      <input id="s-bucket" name="bucket" class="mono" required placeholder="go4rex-recordings">
+      <p class="hint">Must already exist. This console does not create buckets.</p>
+    </div>
+    <div>
+      <label for="s-prefix">Folder inside it</label>
+      <input id="s-prefix" name="path_prefix" class="mono" value="archive">
+      <p class="hint">Recordings go under here, then by organisation, tenant and date.</p>
+    </div>
+    <div class="wide">
+      <label for="s-endpoint">Address</label>
+      <input id="s-endpoint" name="endpoint" class="mono"
+             placeholder="left blank, worked out from the region">
+      <p class="hint">Only needed for a service whose address is not known here.</p>
+    </div>
+    <div>
+      <label for="s-access">Access key</label>
+      <input id="s-access" name="access_key" type="password" class="mono" required autocomplete="off">
+      <p class="hint">Encrypted before it is stored and never shown again.</p>
+    </div>
+    <div>
+      <label for="s-secret">Secret key</label>
+      <input id="s-secret" name="secret_key" type="password" class="mono" required autocomplete="off">
+      <p class="hint">Needs permission to write, not just to read.</p>
+    </div>
+  </div>
+
+  <div class="note">
+    <h3>Test writes a file and reads it back</h3>
+    <p>Listing a bucket succeeds with read-only keys, which would then fail on
+       the first real copy. The test writes a small object, reads it back and
+       deletes it, so it proves the keys can actually archive.</p>
+  </div>
+
+  <div class="actions"><button type="submit">Add storage</button></div>
+</form>

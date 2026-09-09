@@ -102,6 +102,22 @@
         </div>
       {% endif %}
 
+      {# The accounts themselves, not a note about where to find them. Each
+         CommPeak account carries its own bucket, token and secret, and each
+         archive bucket its own region and keys, so they cannot live in a card
+         of shared values -- but they can live on the same page, above it. #}
+      {# `return_to` sends the form back to this section instead of to the
+         standalone page, so saving from here does not move you. #}
+      {% if active_section == 'CommPeak calls' %}
+        {% with return_to = '/admin/settings?section=commpeak-calls' %}
+          {% include "_commpeak_accounts.html" %}
+        {% endwith %}
+      {% elif active_section == 'Wasabi storage' %}
+        {% with return_to = '/admin/settings?section=wasabi-storage' %}
+          {% include "_archive_accounts.html" %}
+        {% endwith %}
+      {% endif %}
+
       {% set specs = categories[active_section] %}
       {% with category = active_section %}
         {% include "_settings_card.html" %}
