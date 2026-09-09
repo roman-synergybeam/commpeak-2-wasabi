@@ -1,0 +1,102 @@
+/* ============================================================================
+   Tokens — palette, type, elevation.
+   Every colour in the kit resolves to one of these. Nothing else declares a
+   literal colour, so retheming is this file and nothing else.
+
+   The palette is deliberately desaturated: a console is read for hours, and
+   saturated chrome competes with the data. Accent is a single teal, used for
+   one thing only — "this is the current/active/primary one". Status colours
+   (good/warn/danger) are reserved for state and never used decoratively, so
+   that amber on the page always means something.
+   ============================================================================ */
+:root{
+  /* Surfaces, back to front. */
+  --ground:#f2f4f5;        /* page behind everything */
+  --surface:#fff;          /* cards, inputs, header */
+  --surface-2:#e8ecee;     /* wells: stat tiles, code, inset panels */
+
+  /* Ink, strongest to faintest. --ink-3 is for anything the eye should skip
+     on the way to the data: labels, captions, units, counts. */
+  --ink:#131c24;
+  --ink-2:#3d4b56;
+  --ink-3:#6b7b87;
+
+  /* Rules. --rule separates rows; --rule-strong outlines a control, where it
+     has to hold its own against the surface it sits on. */
+  --rule:#d2d9dd;
+  --rule-strong:#aebac2;
+
+  /* Accent. --accent paints, --accent-ink writes (it is the contrast-safe one
+     for text on --ground/--surface), --accent-wash is the tint behind a note. */
+  --accent:#0b6b72;
+  --accent-ink:#08484d;
+  --accent-wash:#daecee;
+
+  /* State. Each has an ink and a wash; the wash is only ever a background and
+     the ink is only ever text or a border, which is what keeps contrast safe
+     in both themes without a second set of tokens. */
+  --danger:#a32316;  --danger-wash:#fae5e2;
+  --warn:#7d5406;    --warn-wash:#f9efd9;
+  --good:#1d6045;    --good-wash:#dcefe6;
+
+  /* Elevation. Used by the one element that floats over scrolling content —
+     the sticky bulk bar. Anything else that needs to float should reuse it
+     rather than inventing a shadow. */
+  --shadow:0 2px 10px rgba(19,28,36,.10);
+
+  /* Type. System stacks throughout: an internal tool has no guarantee of
+     reaching a font CDN, and a silent fallback is worse than plain. */
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+
+  /* Geometry. */
+  --radius:5px;
+  --radius-sm:4px;
+  --radius-pill:20px;
+}
+
+/* Dark is a re-tint, not a second stylesheet: only the tokens change.
+   Note the inversion in the accent pair — on a dark ground --accent-ink is
+   *lighter* than --accent, because it still has to be the readable one. */
+@media (prefers-color-scheme:dark){
+  :root{
+    --ground:#0f161b;
+    --surface:#161f26;
+    --surface-2:#1d2830;
+    --ink:#e7eef2;
+    --ink-2:#b2c1cb;
+    --ink-3:#7f909c;
+    --rule:#28353e;
+    --rule-strong:#3c4d58;
+    --accent:#54c5cb;
+    --accent-ink:#8ddade;
+    --accent-wash:#0f3237;
+    --danger:#ff8f7a;  --danger-wash:#341814;
+    --warn:#e3b163;    --warn-wash:#2e2413;
+    --good:#68cea0;    --good-wash:#112c22;
+    --shadow:0 2px 10px rgba(0,0,0,.45);
+  }
+}
+
+/* Opt-in override, for a host that offers an explicit light/dark switch rather
+   than following the OS. Add data-theme="dark" | "light" to <html>. */
+:root[data-theme="dark"]{
+  --ground:#0f161b; --surface:#161f26; --surface-2:#1d2830;
+  --ink:#e7eef2; --ink-2:#b2c1cb; --ink-3:#7f909c;
+  --rule:#28353e; --rule-strong:#3c4d58;
+  --accent:#54c5cb; --accent-ink:#8ddade; --accent-wash:#0f3237;
+  --danger:#ff8f7a; --danger-wash:#341814;
+  --warn:#e3b163;   --warn-wash:#2e2413;
+  --good:#68cea0;   --good-wash:#112c22;
+  --shadow:0 2px 10px rgba(0,0,0,.45);
+}
+:root[data-theme="light"]{
+  --ground:#f2f4f5; --surface:#fff; --surface-2:#e8ecee;
+  --ink:#131c24; --ink-2:#3d4b56; --ink-3:#6b7b87;
+  --rule:#d2d9dd; --rule-strong:#aebac2;
+  --accent:#0b6b72; --accent-ink:#08484d; --accent-wash:#daecee;
+  --danger:#a32316; --danger-wash:#fae5e2;
+  --warn:#7d5406;   --warn-wash:#f9efd9;
+  --good:#1d6045;   --good-wash:#dcefe6;
+  --shadow:0 2px 10px rgba(19,28,36,.10);
+}

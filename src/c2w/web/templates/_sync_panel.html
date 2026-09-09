@@ -1,10 +1,13 @@
+{# data-active is what poll.js reads to decide whether to poll at all. #}
+<div data-active="{{ 'yes' if (jobs.get('PENDING', 0) + jobs.get('RUNNING', 0)) else 'no' }}"
+     style="display:contents"></div>
 <div class="stats">
-  <div><p class="hint">Queued</p><strong>{{ "{:,}".format(jobs.get('PENDING', 0)) }}</strong></div>
-  <div><p class="hint">Running now</p><strong>{{ "{:,}".format(jobs.get('RUNNING', 0)) }}</strong></div>
-  <div><p class="hint">Completed</p><strong>{{ "{:,}".format(jobs.get('DONE', 0)) }}</strong></div>
+  <div><p class="hint">Queued</p><strong data-stat="pending">{{ "{:,}".format(jobs.get('PENDING', 0)) }}</strong></div>
+  <div><p class="hint">Running now</p><strong data-stat="running">{{ "{:,}".format(jobs.get('RUNNING', 0)) }}</strong></div>
+  <div><p class="hint">Completed</p><strong data-stat="done">{{ "{:,}".format(jobs.get('DONE', 0)) }}</strong></div>
   <div>
     <p class="hint">Failed</p>
-    <strong {% if jobs.get('FAILED', 0) %}class="bad"{% endif %}>
+    <strong data-stat="failed" {% if jobs.get('FAILED', 0) %}class="bad"{% endif %}>
       {{ "{:,}".format(jobs.get('FAILED', 0)) }}
     </strong>
   </div>
@@ -54,8 +57,8 @@
             <span class="pc {{ pct | meter_class }}">{{ pct }}%</span>
           </div>
         </td>
-        <td class="right" data-label="Found">{{ "{:,}".format(row.total) }}</td>
-        <td class="right" data-label="Waiting">{{ "{:,}".format(row.pending) }}</td>
+        <td class="right" data-label="Found"><span data-stat="total-{{ row.id }}">{{ "{:,}".format(row.total) }}</span></td>
+        <td class="right" data-label="Waiting"><span data-stat="pending-{{ row.id }}">{{ "{:,}".format(row.pending) }}</span></td>
         <td class="right" data-label="Failed">
           {% if row.failed %}<span class="pill err">{{ "{:,}".format(row.failed) }}</span>
           {% else %}0{% endif %}

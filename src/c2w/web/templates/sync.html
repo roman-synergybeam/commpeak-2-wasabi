@@ -3,11 +3,49 @@
 {% block body %}
 
 <h1>Sync status</h1>
-<p class="sub">What is queued, running and failing. <span class="spin">refreshing…</span></p>
+<p class="sub">What is queued, running and failing.</p>
 
-{# Polling rather than pushing: the figures move steadily during a backfill,
-   and a socket would add a moving part for no real gain. #}
-<div hx-get="/sync/panel" hx-trigger="load, every 10s" hx-indicator=".spin">
+<div id="sync-panel">
   {% include "_sync_panel.html" %}
 </div>
+
+{# The kit's poll.js rather than a fixed-interval refresh, for two reasons it
+   encodes (UX-NOTES §7): a failed request is a blip and must never be read as
+   "the job finished", and when the work genuinely completes the page reloads
+   rather than patching a dozen stale rows.
+
+   It also stops polling entirely when there is nothing in flight, so an idle
+   console is not making a request every ten seconds forever. #}
+<script type="module">
+  import { poll } from '/static/ui-kit/js/poll.js';
+  import { humanNumber } from '/static/ui-kit/js/humanize.js';
+
+  const panel = document.getElementById('sync-panel');
+
+  function setStat(key, value) {
+    const el = panel.querySelector(`[data-stat="${key}"]`);
+    if (el) el.textContent = humanNumber(value);
+  }
+
+  poll({
+    url: '/sync/status.json',
+    // Nothing queued and nothing running means nothing to watch.
+    active: () => panel.dataset.active === 'yes',
+    onTick: (d) => {
+      setStat('pending', d.jobs.PENDING || 0);
+      setStat('running', d.jobs.RUNNING || 0);
+      setStat('done', d.jobs.DONE || 0);
+      setStat('failed', d.jobs.FAILED || 0);
+      for (const c of d.connections) {
+        setStat(`total-${c.id}`, c.total);
+        setStat(`pending-${c.id}`, c.pending);
+        setStat(`failed-${c.id}`, c.failed);
+      }
+    },
+    // Finished when the queue has drained; poll.js then reloads once.
+    done: (d) => !d.active,
+    interval: 3000,
+    errorInterval: 5000,
+  });
+</script>
 {% endblock %}

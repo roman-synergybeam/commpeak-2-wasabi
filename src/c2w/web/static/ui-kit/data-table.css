@@ -1,0 +1,139 @@
+/* ============================================================================
+   Data tables — the table, its wrapper, cell idioms, and the pager.
+   ============================================================================ */
+
+/* ---- the table -----------------------------------------------------------
+   Column headings are small uppercase mono: they are field names, not prose,
+   and looking like machine labels keeps them from competing with the data. */
+table{width:100%;border-collapse:collapse;font-size:14px;table-layout:auto}
+th{text-align:left;font:700 10.5px var(--mono);letter-spacing:.11em;
+  text-transform:uppercase;color:var(--ink-3);padding:9px 12px;
+  border-bottom:1px solid var(--rule-strong)}
+td{padding:11px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
+tr:last-child td{border-bottom:0}
+/* Numeric columns take only the width they need, so they do not compete with
+   the name column. `width:1%` plus nowrap is the shrink-to-fit idiom. */
+td.right,th.right{text-align:right;white-space:nowrap;width:1%}
+/* A unit in a heading goes *under* the name, so the column does not grow to
+   fit the word. */
+th .unit{display:block;font-weight:500;text-transform:none;letter-spacing:0;
+  font-size:10px;color:var(--ink-3)}
+
+/* ---- the wrapper ---------------------------------------------------------
+   A table is always wrapped in .tw. The wrapper is what carries the card
+   border and, crucially, the horizontal scroll: `auto` shows a scrollbar only
+   when the columns really do not fit. Without it a wide table simply hangs
+   out of the right-hand side of its card. */
+.tw{overflow-x:auto;background:var(--surface);border:1px solid var(--rule);
+  border-radius:var(--radius);-webkit-overflow-scrolling:touch}
+
+/* ---- sortable headings --------------------------------------------------- */
+th.sortable{cursor:pointer;user-select:none;position:relative;padding-right:15px}
+th.sortable:hover{color:var(--ink)}
+th.sortable::after{content:"\2195";position:absolute;right:4px;opacity:.3;font-size:10px}
+th.sortable.sorted{color:var(--accent-ink)}
+th.sortable.sorted::after{opacity:1}
+th.sortable.sorted[data-dir="asc"]::after{content:"\2191"}
+th.sortable.sorted[data-dir="desc"]::after{content:"\2193"}
+
+/* ---- cell idioms ---------------------------------------------------------
+   `code` breaks anywhere, which is right in prose and wrong in a table: it
+   turns a 36-character GUID into five stacked characters per line. Inside a
+   cell an identifier stays on one line and the table scrolls instead. */
+td code,td .idline{word-break:normal;white-space:nowrap}
+.idline{font:12px var(--mono);color:var(--ink-3);margin-top:3px;
+  overflow:hidden;text-overflow:ellipsis;max-width:32ch}
+
+/* Detail text under the main value of a cell. */
+.det{font-size:13px;color:var(--ink-3)}
+.det.quiet{color:var(--ink-3)}
+td .det.quiet{font-size:12px}
+/* Cells are nowrap on narrow screens so the table scrolls as one piece; a
+   sentence must opt out of that or one cell drags the table hundreds of
+   pixels wide. Sized in characters, not pixels. */
+.det.wrap{margin-top:5px;white-space:normal;max-width:34ch}
+
+/* A status cell: pills on one line, then any explanation under them. */
+.statuscell{white-space:normal;min-width:250px;max-width:44ch}
+.statuscell .pills{display:flex;gap:6px;flex-wrap:wrap}
+.statuscell .det{margin-top:6px;white-space:normal}
+
+/* The cell that is the point of the row — a message, a subject, the thing
+   being searched for. Gets the room; everything else is subordinate. */
+.msgcell{white-space:normal;min-width:280px;max-width:70ch}
+.msgcell .subject{font-weight:600;line-height:1.35}
+.msgcell .det{margin-top:3px;white-space:normal;word-break:break-word}
+.msgcell .det.mono{font-size:11.5px;word-break:break-all}
+
+/* Text that should ellipsis rather than widen the table. */
+td.clip{max-width:210px;overflow:hidden;text-overflow:ellipsis}
+td.clip.wide-cell{max-width:260px}
+td.clip .hint,td.clip .mono{overflow:hidden;text-overflow:ellipsis;
+  max-width:100%;display:block;white-space:nowrap}
+
+/* A progress column, kept to a width that does not eat the name column. */
+.col-progress{width:230px}
+.col-progress .det{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  max-width:214px}
+
+/* ---- row actions ---------------------------------------------------------
+   Wrap onto a second line rather than widening the table, with the
+   destructive and rarely-used ones folded behind More. */
+.rowactions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;
+  align-items:flex-start;max-width:330px;margin-left:auto}
+/* `display:contents` so a wrapping <form> does not become a flex item and
+   break the button spacing. */
+.rowactions form{display:contents}
+.rowactions .more{flex:0 0 auto}
+.rowactions .more summary{list-style:none;cursor:pointer;
+  font:600 12.5px var(--sans);padding:5px 10px;
+  border:1px solid var(--rule-strong);border-radius:var(--radius-sm);
+  color:var(--ink-2);white-space:nowrap}
+.rowactions .more summary::-webkit-details-marker{display:none}
+.rowactions .more summary:hover{background:var(--surface-2);color:var(--ink)}
+.rowactions .more[open] summary{background:var(--surface-2);color:var(--ink)}
+/* Expands in place rather than floating: .tw scrolls, and a scrolling
+   ancestor clips an absolutely-positioned dropdown no matter what its
+   z-index says. */
+.rowactions .menu{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;
+  margin-top:6px;padding-top:6px;border-top:1px dashed var(--rule);width:100%}
+
+/* ---- log table -----------------------------------------------------------
+   Denser than a data table, and rows carry their own severity. */
+table.log td{font-size:13.5px;line-height:1.45;padding:7px 12px}
+table.log tr.lvl-warn td{background:var(--warn-wash)}
+table.log tr.lvl-error td{background:var(--danger-wash)}
+table.log .nowrap{white-space:nowrap;color:var(--ink-3)}
+table.log details summary{cursor:pointer;display:inline-block;margin-top:4px}
+/* A long log scrolls on its own instead of stretching the page, with the
+   heading pinned. .logwrap opts out of the horizontal scroll .tw provides. */
+.logwrap{max-height:70vh;overflow-y:auto}
+.logwrap table.log th{position:sticky;top:0;background:var(--surface-2);z-index:1}
+
+/* ---- pager ---------------------------------------------------------------
+   The list it pages is already whole in the page, so a page is a slice rather
+   than a link away: it sits under its own table and is styled to read as part
+   of it. Element defaults are fought here deliberately — `label` is a block
+   and `select` is full-width everywhere else, which is right in a form and
+   wrong in a row of controls. */
+.pager{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}
+.pager label{display:inline;margin:0;font-size:12.5px}
+.pager select{width:auto;padding:5px 8px;font-size:13px}
+.pager .pagebtns{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-left:6px}
+.pager .pagebtns button{padding:4px 10px;font:600 13px var(--sans);
+  background:var(--surface);border:1px solid var(--rule-strong);color:var(--ink-2)}
+.pager .pagebtns button:hover:not(:disabled){background:var(--surface-2);color:var(--ink)}
+.pager .pagebtns button.on,.pager .pagebtns button.on:hover{background:var(--accent);
+  border-color:var(--accent);color:#fff}
+.pager .pagebtns button:disabled{opacity:.45;cursor:default;filter:none}
+.pager .gap{color:var(--ink-3);padding:0 2px}
+/* The count belongs at the far end, where it reads as a caption on the table
+   rather than as another control. */
+.pager .range{margin:0 0 0 auto}
+
+/* `tr:last-child td` drops the rule under the final row — which, once a page
+   ends mid-table, is a *hidden* row, leaving the visible last row with a
+   stray border. The pager sets .lastrow on the last visible one. */
+table tr.lastrow td{border-bottom:0}
+/* Rows the pager or the filters hid stay hidden, whatever else applies. */
+tr[hidden]{display:none!important}

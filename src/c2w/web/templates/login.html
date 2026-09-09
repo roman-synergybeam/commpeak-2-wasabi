@@ -11,6 +11,10 @@
       if (t) document.documentElement.dataset.theme = t;
     } catch (e) {}
   </script>
+  {# The kit, then the handful of rules it leaves to the application. kit.css
+     is @imports in dependency order: tokens define what everything else
+     resolves to, and narrow.css is all overrides so it goes last. #}
+  <link rel="stylesheet" href="/static/ui-kit/kit.css">
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>

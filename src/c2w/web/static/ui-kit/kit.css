@@ -1,0 +1,15 @@
+/* ============================================================================
+   The whole kit, in dependency order. Import this one file.
+
+     <link rel="stylesheet" href="/ui-kit/kit.css">
+
+   Order matters: tokens define what everything else resolves to, and
+   narrow.css is all overrides so it goes last. If you concatenate these into
+   one file at build time, keep this order.
+   ============================================================================ */
+@import "tokens.css";
+@import "base.css";
+@import "forms.css";
+@import "components.css";
+@import "data-table.css";
+@import "narrow.css";

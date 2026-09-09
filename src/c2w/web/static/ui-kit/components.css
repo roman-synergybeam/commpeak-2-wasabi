@@ -1,0 +1,209 @@
+/* ============================================================================
+   Components.
+   ============================================================================ */
+
+/* ---- card ----------------------------------------------------------------
+   The default container. Everything on a page lives in one. */
+.card{background:var(--surface);border:1px solid var(--rule);
+  border-radius:var(--radius);padding:20px;margin-bottom:18px}
+.card h2{margin-top:0}
+.card>p:last-child{margin-bottom:0}
+
+/* ---- pill ----------------------------------------------------------------
+   A state, not a label. Uppercase mono so it reads as a machine value, and
+   four fixed meanings — ok / warn / err / idle. If a new state needs a fifth
+   colour, it probably needs to collapse into one of these instead. */
+.pill{display:inline-block;font:700 10px var(--mono);letter-spacing:.1em;
+  text-transform:uppercase;padding:3px 7px;border-radius:3px;white-space:nowrap}
+.pill.ok{background:var(--good-wash);color:var(--good)}
+.pill.err{background:var(--danger-wash);color:var(--danger)}
+.pill.warn{background:var(--warn-wash);color:var(--warn)}
+.pill.idle{background:var(--surface-2);color:var(--ink-3)}
+
+/* ---- flash ---------------------------------------------------------------
+   The result of what you just did. One line, at the top of the page, gone on
+   the next navigation. */
+.flash{padding:11px 15px;border-radius:var(--radius-sm);margin-bottom:12px;
+  font-size:14px;border-left:3px solid var(--accent);background:var(--accent-wash)}
+.flash.err{border-left-color:var(--danger);background:var(--danger-wash)}
+.flash.warn{border-left-color:var(--warn);background:var(--warn-wash)}
+.flash.ok{border-left-color:var(--good);background:var(--good-wash)}
+
+/* ---- note ----------------------------------------------------------------
+   An explainer, not an alarm. This used to be painted in the warning palette,
+   and since every note in a console is "here is how this works", a permanent
+   paragraph looked like something had gone wrong and got asked about. A box
+   that cries wolf on every page view teaches people to skip the one that
+   means it — so the default is the accent wash, and `.caution` (amber) is
+   reserved for the irreversible and the un-undoable. */
+.note{font-size:13.5px;color:var(--ink-2);background:var(--accent-wash);
+  border-left:3px solid var(--accent);padding:11px 15px;
+  border-radius:0 var(--radius-sm) var(--radius-sm) 0;margin:16px 0}
+.note.caution{background:var(--warn-wash);border-left-color:var(--warn)}
+
+/* ---- empty state --------------------------------------------------------- */
+.empty{color:var(--ink-3);font-size:14px;padding:20px;text-align:center}
+
+/* ---- stat tiles ----------------------------------------------------------
+   A row of numbers. The number leads and the caption explains it — but the
+   caption is not optional: "REMOVED 11,526" reads as a size as readily as a
+   count, and the two can differ by three orders of magnitude. */
+.stats{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
+/* min-width:0 is load-bearing: without it a track cannot shrink below an
+   unbreakable number, and the grid widens the page instead. */
+.stats>div{background:var(--surface-2);border:1px solid var(--rule);
+  border-radius:var(--radius);padding:12px 14px;min-width:0;overflow:hidden}
+/* Fixed min-height so a one-line and a two-line caption still align their
+   numbers across the row. */
+.stats .hint{font-size:11px;text-transform:uppercase;letter-spacing:.07em;
+  margin-bottom:6px;white-space:normal;line-height:1.25;min-height:2.5em;
+  display:flex;align-items:flex-start;word-break:normal;overflow-wrap:anywhere}
+.stats strong{font-size:26px;font-variant-numeric:tabular-nums;
+  letter-spacing:-.02em;line-height:1.1;display:block;min-width:0}
+.stats strong.bad{color:var(--danger)}
+/* The unit rides with the number, quiet enough that the number still leads. */
+.stats .unit{font-size:12px;color:var(--ink-3);font-weight:600;margin-left:3px}
+
+/* ---- summary grid --------------------------------------------------------
+   Like .stats but for short strings rather than numbers: what a thing is
+   currently wired to, rather than how much of it there is. */
+.summarygrid{display:grid;gap:12px;
+  grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+  background:var(--surface-2);border:1px solid var(--rule);
+  border-radius:var(--radius);padding:14px 16px;margin-bottom:16px}
+.summarygrid>div{min-width:0}
+.summarygrid .hint{display:block;font-size:11px;text-transform:uppercase;
+  letter-spacing:.07em;margin-bottom:4px}
+.summarygrid strong{font-size:15px;overflow-wrap:anywhere}
+
+/* ---- steps ---------------------------------------------------------------
+   An ordered setup checklist that remembers what is done. */
+.steps{list-style:none;padding:0;margin:0}
+.steps li{display:flex;gap:14px;align-items:flex-start;padding:14px 0;
+  border-bottom:1px solid var(--rule)}
+.steps li:last-child{border-bottom:0}
+.steps li>div{min-width:0}
+.steps .lbl{font-weight:600}
+.steps .det{font-size:13px;color:var(--ink-3);overflow-wrap:anywhere}
+.steps .go{margin-left:auto;flex:none}
+.mark{width:22px;height:22px;border-radius:50%;flex:none;display:flex;
+  align-items:center;justify-content:center;font:700 12px var(--mono);
+  border:1px solid var(--rule-strong);color:var(--ink-3);margin-top:1px}
+.mark.done{background:var(--good-wash);border-color:var(--good);color:var(--good)}
+/* An optional step that is not done: worth noticing, not worth alarming
+   about. A number would imply it blocks the steps after it. */
+.mark.opt{border-color:var(--warn);color:var(--warn);background:var(--warn-wash)}
+
+/* ---- progress bar -------------------------------------------------------- */
+.bar{height:9px;border-radius:5px;background:var(--surface-2);overflow:hidden;
+  border:1px solid var(--rule)}
+.bar>span{display:block;height:100%;background:var(--accent);
+  transition:width .4s ease}
+.bar.sm{height:6px}
+@media (prefers-reduced-motion:reduce){.bar>span{transition:none}}
+/* The figures under a bar. tabular-nums so a counter does not jitter as it
+   climbs. */
+.barline{display:flex;gap:20px;flex-wrap:wrap;margin-top:8px;font-size:13px;
+  color:var(--ink-3);font-variant-numeric:tabular-nums;min-width:0}
+.barline>span{min-width:0}
+.barline strong{color:var(--ink)}
+
+/* ---- meter ---------------------------------------------------------------
+   A bar whose colour means something. Reuses .bar, but at 97% full a thing is
+   in a different situation from one at 40%, and down a list of 131 rows the
+   colour is what gets noticed. Set .warn / .bad on both the fill and the
+   percentage — the number has to survive being read without the bar. */
+.meter{display:flex;align-items:center;gap:10px;margin-top:4px;
+  font-variant-numeric:tabular-nums}
+.meter .bar{flex:0 1 150px}
+.meter .bar>span.warn{background:var(--warn)}
+.meter .bar>span.bad{background:var(--danger)}
+.meter .pc{font:700 12.5px var(--mono);min-width:38px;text-align:right}
+.meter .pc.warn{color:var(--warn)}
+.meter .pc.bad{color:var(--danger)}
+.meter .abs{font-size:12.5px;color:var(--ink-3);white-space:nowrap}
+
+/* ---- filter chips --------------------------------------------------------
+   A chip is used as both <a> and <button>. The button rule in forms.css
+   paints a solid accent background, so every chip must state its own —
+   otherwise the whole filter row renders as if every option were selected. */
+.filters{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;
+  border-radius:var(--radius-pill);background:var(--surface);
+  border:1px solid var(--rule-strong);color:var(--ink-2);text-decoration:none;
+  font:600 13.5px var(--sans);white-space:nowrap;cursor:pointer}
+.chip:hover{background:var(--surface-2);border-color:var(--rule-strong);color:var(--ink)}
+.chip.on,.chip.on:hover{background:var(--accent);border-color:var(--accent);color:#fff}
+.chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* The count sits in its own well so it reads as data, not as part of the
+   label. A zero recedes rather than competing with the ones that matter. */
+.chip .n{font:700 10.5px var(--mono);font-variant-numeric:tabular-nums;
+  background:var(--surface-2);color:var(--ink-3);border-radius:9px;
+  padding:1px 6px;min-width:18px;text-align:center}
+.chip:hover .n{background:var(--rule)}
+.chip.on .n{background:rgba(255,255,255,.22);color:#fff}
+.chip .n.zero{opacity:.45}
+/* The search box in a filter row: pill-shaped and compact, not a form field. */
+.chip-search{display:flex;gap:8px;align-items:center;margin-left:auto;flex:0 1 280px}
+.chip-search input{padding:6px 12px;border-radius:var(--radius-pill);font-size:13.5px}
+
+/* ---- bulk action bar -----------------------------------------------------
+   Sticks to the top of the viewport while you scroll the list it acts on, so
+   the count and the action stay with the selection. Accent border and a
+   shadow because it floats over content. */
+.bulkbar{position:sticky;top:0;z-index:5;display:flex;gap:18px;
+  align-items:flex-end;flex-wrap:wrap;border-color:var(--accent);
+  box-shadow:var(--shadow)}
+.bulkbar .row{flex:1;min-width:320px}
+.bulkcount{font-size:14px;color:var(--ink-2);white-space:nowrap;padding-bottom:9px}
+.bulkcount strong{font-size:20px;color:var(--accent-ink)}
+
+/* ---- save-on-change marker -----------------------------------------------
+   The whole feedback surface for an autosaving card. Quiet on success,
+   because success is the normal case and a green flash on every keystroke is
+   noise; it is the failure that has to be readable and has to persist. */
+.savemark{font-size:12px;font-weight:600}
+.savemark.ok{color:var(--good)}
+.savemark.warn{color:var(--warn)}
+
+/* ---- item card -----------------------------------------------------------
+   One configurable thing in a list of them — the card equivalent of a table
+   row, for when a row has too many fields to be a row. */
+.item{transition:border-color .2s}
+@media (prefers-reduced-motion:reduce){.item{transition:none}}
+.item[hidden]{display:none!important}
+/* Actions get their own row under the card's fields. Inline, they sat tight
+   against the hint above and read as part of that paragraph. */
+.item-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:16px}
+.item-actions .hint{margin:0}
+/* A heading that groups items, hidden as a whole when a filter empties it. */
+.group[hidden]{display:none!important}
+.group-bar{padding:14px 20px;display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap}
+
+/* ---- summary bar ---------------------------------------------------------
+   Summary on the left, action on the right, stacking when there is no room. */
+.summarybar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  margin-top:12px;border-top:1px solid var(--rule);padding-top:12px}
+.summarybar .hint{margin:0;flex:1;min-width:260px}
+
+/* ---- misc ---------------------------------------------------------------- */
+/* Reference material that is not currently actionable. */
+details.quiet{border-top:1px solid var(--rule);margin-top:16px;padding-top:12px}
+details.quiet summary{cursor:pointer;font-size:13px;color:var(--ink-3);font-weight:600}
+details.quiet summary:hover{color:var(--ink-2)}
+
+/* Always on white — a QR code inverted in dark mode does not scan. */
+.qr{background:#fff;padding:14px;border-radius:var(--radius);
+  display:inline-block;border:1px solid var(--rule)}
+.qr svg,.qr img{display:block;width:190px;height:190px}
+
+/* Takes the room in a flex row, but yields it entirely rather than forcing
+   the row wider than the screen. */
+.growcol{flex:1 1 240px;min-width:0;margin:0}
+
+/* A two-column explanation inside a note: no header row, no rules, just
+   alignment. */
+table.plain{width:100%;border-collapse:collapse;font-size:13.5px}
+table.plain td{border:0;padding:6px 10px 6px 0;vertical-align:top}
+table.plain td+td{border-left:2px solid var(--rule);padding-left:12px}
+table.plain .det{font-size:12.5px;color:var(--ink-3);display:block;margin-top:2px}

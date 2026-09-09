@@ -5,38 +5,33 @@
 <h1>Audit log</h1>
 <p class="sub">Who listened to what, and when. Append-only &mdash; entries cannot be edited or removed.</p>
 
-<form class="card" method="get" action="/audit">
-  <div class="row">
-    <div>
-      <label for="action">Action</label>
-      <select id="action" name="action">
-        <option value="">Any</option>
-        {% for a in actions %}
-          <option value="{{ a }}" {{ 'selected' if selected_action == a }}>{{ a | lower }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div>
-      <label for="actor">Person</label>
-      <input id="actor" name="actor" type="search" value="{{ selected_actor or '' }}"
-             placeholder="email">
-    </div>
+{# The server sends the whole page of entries, so searching and paging happen
+   in the page: with a few hundred rows already rendered, a round trip per
+   keystroke is the thing worth removing (UX-NOTES §8). #}
+<div class="filters" style="margin-bottom:14px">
+  <button class="chip on" type="button" data-f="all">All <span class="n" data-count="all">0</span></button>
+  <button class="chip" type="button" data-f="play">Listened <span class="n" data-count="play">0</span></button>
+  <button class="chip" type="button" data-f="download">Downloaded <span class="n" data-count="download">0</span></button>
+  <button class="chip" type="button" data-f="denied">Refused <span class="n" data-count="denied">0</span></button>
+  <div class="chip-search">
+    <input id="audit-q" placeholder="Search people, actions, calls…" aria-label="Search the audit log">
+    <button class="chip" id="audit-qclear" type="button" hidden>Clear</button>
   </div>
-  <div class="actions">
-    <button type="submit">Filter</button>
-    <a class="btn ghost" href="/audit">Reset</a>
-  </div>
-</form>
+</div>
 
 <div class="tw stack logwrap">
-  <table class="log">
+  <table class="log" id="audit-table">
     <thead>
       <tr><th>When</th><th>Person</th><th>Address</th><th>Action</th><th>Result</th>
           <th>Recording</th><th>Call</th></tr>
     </thead>
     <tbody>
     {% for e in events %}
-      <tr class="{{ 'lvl-warn' if e.result != 'SUCCESS' }}">
+      {# Rows describe themselves; nothing in the kit knows what an audit
+         entry is, it just reads these attributes. #}
+      <tr class="row {{ 'lvl-warn' if e.result != 'SUCCESS' }}"
+          data-state="{{ e | audit_state }}"
+          data-search="{{ e | audit_search }}">
         <td class="nowrap mono" data-label="When">{{ e.at | dt }}</td>
         <td data-label="Person">{{ e.actor_label or '—' }}</td>
         <td class="mono" data-label="Address">{{ e.ip or '—' }}</td>
@@ -47,10 +42,40 @@
         <td class="mono" data-label="Recording">{{ e.recording_id or '—' }}</td>
         <td class="mono" data-label="Call">{{ (e.call_uuid or '')[:8] or '—' }}</td>
       </tr>
-    {% else %}
-      <tr><td colspan="7" class="empty">Nothing has been accessed yet.</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
+
+<div class="pager" id="audit-pager" hidden>
+  <label for="audit-per">Rows</label>
+  <select id="audit-per"><option>25</option><option>50</option><option>100</option></select>
+  <div class="pagebtns"></div>
+  <span class="range"></span>
+</div>
+
+<script type="module">
+  import { createDataTable } from '/static/ui-kit/js/data-table.js';
+
+  createDataTable({
+    table: '#audit-table',
+    rows: 'tr.row',
+    allowEmpty: true,
+    search: {el: '#audit-q', key: 'search'},
+    searchClear: '#audit-qclear',
+    chips: [{
+      selector: '.chip[data-f]',
+      match: (row, v) => v === 'all' || row.dataset.state === v,
+      counts: {all: '[data-count="all"]', play: '[data-count="play"]',
+               download: '[data-count="download"]', denied: '[data-count="denied"]'},
+    }],
+    page: {el: '#audit-pager', per: '#audit-per', defaultSize: 25,
+           storageKey: 'c2w.audit.per'},
+    labels: {
+      noneYet: 'No recording has been accessed yet.',
+      noneMatch: 'No entry matches these filters.',
+      showing: (a, b, n) => `Showing ${a}–${b} of ${n} entr${n === 1 ? 'y' : 'ies'}`,
+    },
+  });
+</script>
 {% endblock %}

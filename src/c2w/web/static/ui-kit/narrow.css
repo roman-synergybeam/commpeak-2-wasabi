@@ -1,0 +1,148 @@
+/* ============================================================================
+   Narrow screens.
+   Load this last — it is all overrides.
+
+   A console gets used from a phone as often as a desktop. The two rules that
+   matter most here: the header becomes brand-plus-account on one line with a
+   sideways-scrolling nav under it, and wide tables stop pretending to be
+   tables (see .tw.stack).
+   ============================================================================ */
+@media (max-width:820px){
+  body{font-size:15px}
+  main{max-width:100%;padding:16px 14px 70px}
+  main.measured,main.narrow{max-width:100%}
+  main.narrow{padding-top:32px}
+
+  h1{font-size:22px}
+  h2{font-size:17px;margin-top:24px}
+  .sub{font-size:14px}
+  .card{padding:14px 15px}
+
+  /* ---- header: brand and account on one line, nav scrolling under it ---- */
+  header.top{flex-direction:column;align-items:stretch;gap:0;padding:0 14px;
+    position:relative}
+  .brand{padding:12px 0 8px;font-size:16px;line-height:1.25}
+  .brand span{display:inline;font-size:10px;margin-left:6px}
+  nav.top{gap:0;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;
+    scrollbar-width:none;border-top:1px solid var(--rule)}
+  nav.top::-webkit-scrollbar{display:none}
+  nav.top a{padding:11px 13px;white-space:nowrap;font-size:14.5px}
+  .who{position:absolute;top:10px;right:14px;font-size:12px;gap:6px}
+  .who form{margin:0}
+  .who button{padding:3px 9px;font-size:11.5px}
+  .subnav{overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none}
+  .subnav::-webkit-scrollbar{display:none}
+  .subnav a{white-space:nowrap;padding:8px 11px;font-size:13.5px}
+
+  /* ---- tables ----------------------------------------------------------
+     Default: scroll sideways as one piece instead of reflowing into rows one
+     character wide. */
+  .tw table{min-width:max-content}
+  th,td{white-space:nowrap;padding:9px 11px;font-size:13.5px}
+  td code{white-space:nowrap;word-break:normal;font-size:12px}
+  /* Long identifiers get an ellipsis rather than one character per line. */
+  td code,td .mono{display:inline-block;max-width:200px;overflow:hidden;
+    text-overflow:ellipsis;vertical-align:bottom}
+
+  /* ---- .tw.stack: when sideways scrolling is not readable at all --------
+     Eleven columns on a 400px screen is a sideways scroll into blank space —
+     rows with height and nothing in them. Marked `.tw.stack`, each row
+     becomes a small card and each cell carries its own label from
+     `data-label`, which the server already knows when it renders the row.
+
+     The .tw overflow rule is deliberately left alone: a stacked table has
+     nothing to scroll, and leaving it is what stops a wide one hanging out
+     of the page if a cell forgets to wrap. */
+  .tw.stack table{min-width:0;width:100%;display:block}
+  .tw.stack tbody{display:block}
+  .tw.stack tr{display:block;padding:10px 0;border-bottom:1px solid var(--rule)}
+  .tw.stack tr:first-child{display:none}        /* the heading row, now on each cell */
+  .tw.stack tr:last-child{border-bottom:0}
+  .tw.stack tr[hidden]{display:none!important}  /* the pager still hides rows */
+  .tw.stack td{display:flex;align-items:baseline;justify-content:space-between;
+    gap:14px;width:auto;white-space:normal;border:0;padding:3px 13px;text-align:left}
+  .tw.stack td::before{content:attr(data-label);flex:none;color:var(--ink-3);
+    font:600 10px var(--mono);letter-spacing:.09em;text-transform:uppercase;
+    padding-top:2px}
+  /* A cell with nothing in it is noise once it has a label of its own. */
+  .tw.stack td:empty{display:none}
+  .tw.stack td .det{display:inline;margin:0}
+  .tw.stack .col-progress{width:auto}
+
+  .col-progress{width:auto}
+  .col-progress .det{max-width:160px}
+  table.log td{white-space:normal;min-width:210px}
+  table.log td:first-child{white-space:nowrap;min-width:0}
+  .logwrap{max-height:52vh}
+  td.clip{max-width:210px}
+  td.clip.wide-cell{max-width:260px}
+  .det.wrap{max-width:30ch}
+  .statuscell{min-width:190px;max-width:34ch}
+  .msgcell{min-width:210px;max-width:40ch}
+  .idline{max-width:22ch}
+  /* Four buttons abreast do not fit on a phone. */
+  .rowactions{max-width:none;justify-content:flex-start}
+  .rowactions .menu{justify-content:flex-start}
+  /* Wrapped onto its own line the count reads as a caption; pinned right it
+     reads as a stray number. */
+  .pager .range{margin-left:0}
+
+  /* ---- forms and layout ------------------------------------------------- */
+  .row{grid-template-columns:1fr}
+  /* One column means one column: an item spanning two columns of a
+     one-column grid creates an implicit second column, and the whole page
+     then scrolls sideways. */
+  .wide{grid-column:auto}
+  .checkrow{gap:12px 18px;margin-top:12px}
+  .actions{gap:8px}
+  .actions button,.actions .btn{flex:1 1 auto;text-align:center}
+  .split{grid-template-columns:1fr}
+
+  .stats{grid-template-columns:repeat(auto-fit,minmax(min(104px,100%),1fr));gap:8px}
+  .stats>div{padding:9px 10px}
+  /* Scales with the tile, so a seven-figure counter cannot force the page wider. */
+  .stats strong{font-size:clamp(14px,5.2vw,19px)}
+  .stats .hint{font-size:10px;min-height:2.4em}
+  .summarygrid{grid-template-columns:1fr 1fr}
+  .barline{gap:10px;font-size:12px}
+
+  .filters{gap:6px}
+  .chip{padding:5px 10px;font-size:12.5px}
+  .chip-search{margin-left:0;flex:1 1 100%}
+
+  .bulkbar{flex-direction:column;align-items:stretch;gap:10px}
+  .bulkbar .row{min-width:0}
+
+  .summarybar{align-items:stretch}
+  .summarybar .hint{min-width:0}
+  .summarybar form,.summarybar button{width:100%}
+  .group-bar{padding:12px 14px;gap:10px}
+  /* A fixed-width add field pushes the card off-screen. */
+  .addbox{margin-left:0;width:100%;gap:8px}
+  .addbox>div{flex:1 1 100%}
+  .addbox input{min-width:0;width:100%}
+  .addbox button{width:100%}
+
+  /* The bar, the percentage and the absolute figures do not fit on one line
+     at this width; the bar takes the row and the numbers sit under it. */
+  .meter{flex-wrap:wrap;gap:6px 8px}
+  .meter .bar{flex:1 1 100%;order:3}
+  .meter .abs{white-space:normal;font-size:12px}
+
+  .qr svg,.qr img{width:150px;height:150px}
+}
+
+@media (max-width:420px){
+  nav.top a{padding:10px 10px;font-size:14px}
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .summarygrid{grid-template-columns:1fr}
+  .checkrow{flex-direction:column;gap:10px}
+  td.clip{max-width:150px}
+  td.clip.wide-cell{max-width:190px}
+  .det.wrap{max-width:26ch}
+  .meter .abs{font-size:11.5px}
+  .statuscell{min-width:150px;max-width:26ch}
+  .msgcell{min-width:180px;max-width:32ch}
+  .rowactions{gap:5px}
+  .rowactions button,.rowactions .more summary{font-size:12px;padding:5px 9px}
+}

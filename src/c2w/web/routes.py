@@ -17,7 +17,13 @@ from typing import Annotated, Any
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -543,9 +549,52 @@ async def sync_page(request: Request, user: CurrentUser, session: ScopedSession)
 
 @router.get("/sync/panel", response_class=HTMLResponse)
 async def sync_panel(request: Request, user: CurrentUser, session: ScopedSession) -> Response:
+    """The panel fragment, for a browser without JavaScript."""
     context = await _sync_context(session)
     return templates.TemplateResponse(
         request, "_sync_panel.html", {**context, "request": request}
+    )
+
+
+@router.get("/sync/status.json")
+async def sync_status(user: CurrentUser, session: ScopedSession) -> Response:
+    """Counters for the kit's poll.js.
+
+    ``active`` is what stops the page polling a system that is doing nothing:
+    with no work queued or running there is nothing to watch, and poll.js
+    treats the transition to inactive as completion and reloads once -- which
+    is the honest way to show a dozen rows that have all changed.
+    """
+    jobs = await queue.queue_depth(session)
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT k.id, count(r.id) AS total,
+                       count(r.id) FILTER (
+                           WHERE r.state IN ('AVAILABLE','SOURCE_DELETED')
+                       ) AS archived,
+                       count(r.id) FILTER (
+                           WHERE r.state IN ('DISCOVERED','QUEUED','TRANSFERRING','UPLOADED')
+                       ) AS pending,
+                       count(r.id) FILTER (
+                           WHERE r.state IN ('FAILED','MISSING_SOURCE')
+                       ) AS failed
+                FROM commpeak_connections k
+                LEFT JOIN recordings r ON r.connection_id = k.id AND r.brand_id = k.brand_id
+                GROUP BY k.id
+                """
+            )
+        )
+    ).mappings().all()
+
+    in_flight = jobs.get("PENDING", 0) + jobs.get("RUNNING", 0)
+    return JSONResponse(
+        {
+            "active": in_flight > 0,
+            "jobs": jobs,
+            "connections": [dict(r) for r in rows],
+        }
     )
 
 

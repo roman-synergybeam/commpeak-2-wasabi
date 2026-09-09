@@ -260,6 +260,40 @@ def _chiplink(query_string: str, key: str, value: str) -> str:
     return urlencode(params, doseq=True)
 
 
+def _audit_state(event: dict[str, Any]) -> str:
+    """Which chip an audit entry belongs to.
+
+    Collapsed to four buckets deliberately: a chip per action would be a row of
+    chips nobody reads, and "was anyone refused?" is the question the log is
+    actually opened for.
+    """
+    if str(event.get("result")) != "SUCCESS":
+        return "denied"
+    action = str(event.get("action") or "").upper()
+    if action == "PLAY":
+        return "play"
+    if action == "DOWNLOAD":
+        return "download"
+    return "other"
+
+
+def _audit_search(event: dict[str, Any]) -> str:
+    """Everything an operator might type when looking for an entry.
+
+    Built on the server, which already has the row -- the client only ever does
+    a substring test against it.
+    """
+    parts = [
+        event.get("actor_label"),
+        event.get("action"),
+        event.get("result"),
+        event.get("call_uuid"),
+        str(event.get("recording_id") or ""),
+        str(event.get("ip") or ""),
+    ]
+    return " ".join(str(p).lower() for p in parts if p)
+
+
 def register(env: Any) -> None:
     env.filters.update(
         {
@@ -286,6 +320,8 @@ def register(env: Any) -> None:
             "sortlink": _sortlink,
             "offsetlink": _offsetlink,
             "chiplink": _chiplink,
+            "audit_state": _audit_state,
+            "audit_search": _audit_search,
             "tojson": json.dumps,
         }
     )

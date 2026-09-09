@@ -1,0 +1,71 @@
+/* ============================================================================
+   Forms.
+   Labels are small, bold and quiet; the value the operator typed is the loud
+   part. Inputs are full-width by default — in a console a field that is
+   narrower than its card reads as a stray control rather than part of a form.
+   ============================================================================ */
+label{display:block;font-size:12.5px;font-weight:600;color:var(--ink-2);
+  margin:14px 0 5px;letter-spacing:.01em}
+label:first-of-type{margin-top:0}
+
+input,select,textarea{width:100%;padding:8px 10px;
+  border:1px solid var(--rule-strong);border-radius:var(--radius-sm);
+  background:var(--surface);color:var(--ink);font:14px var(--sans)}
+textarea{line-height:1.5;resize:vertical}
+/* Anything the operator will compare character by character — keys, IDs,
+   passwords — is monospace, so a transposition is visible. */
+input[type=password],input.mono,textarea.mono{font-family:var(--mono);font-size:13px}
+input:disabled,select:disabled,textarea:disabled{opacity:.6;cursor:not-allowed}
+
+.hint{font-size:12.5px;color:var(--ink-3);margin:5px 0 0}
+
+/* A responsive field row. Fields sit side by side until they cannot. */
+.row{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+/* Load-bearing: without it a grid track cannot shrink below its content, and
+   one long value widens the whole page instead of wrapping. */
+.row>*{min-width:0}
+/* A field worth two columns. Reset to one on narrow screens — an item spanning
+   two columns of a one-column grid creates an implicit second column, and the
+   page then scrolls sideways. See narrow.css. */
+.wide{grid-column:span 2}
+
+/* A row of checkboxes, each one line. Checkboxes opt out of the full-width
+   input rule and out of the bold label weight — the text beside a checkbox is
+   the thing being agreed to, not a field name. */
+.checkrow{display:flex;gap:22px;margin-top:14px;flex-wrap:wrap}
+.checkrow label{margin:0;display:flex;align-items:center;gap:8px;font-weight:400}
+.checkrow label input{width:auto;flex:none}
+
+/* ---- buttons -------------------------------------------------------------
+   One primary per view. `.ghost` is the default for anything that is not the
+   main action, and `.danger` is an outline rather than a fill: a solid red
+   button is the easiest thing on a page to click by accident. */
+button,.btn{font:600 13.5px var(--sans);padding:8px 15px;
+  border-radius:var(--radius-sm);cursor:pointer;border:1px solid var(--accent);
+  background:var(--accent);color:#fff;text-decoration:none;display:inline-block}
+button:hover:not(:disabled){filter:brightness(1.08)}
+button:disabled{opacity:.45;cursor:not-allowed;filter:none}
+button.ghost,.btn.ghost{background:transparent;color:var(--ink-2);
+  border-color:var(--rule-strong)}
+button.ghost:hover:not(:disabled),.btn.ghost:hover{background:var(--surface-2);
+  color:var(--ink);filter:none}
+button.danger,.btn.danger{background:transparent;color:var(--danger);
+  border-color:var(--danger)}
+button.small,.btn.small{padding:5px 10px;font-size:12.5px}
+
+.actions{margin-top:18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+form.inline{display:inline}
+
+/* A select whose live value is destructive. The point is that it is a select
+   and not a checkbox: an unticked checkbox submits nothing at all, which is
+   indistinguishable from a caller that never mentioned the field. Forcing a
+   choice makes "destroy" something you picked, not something you left. */
+.select-danger{display:block;margin:14px 0 0;font-weight:600}
+.select-danger select{margin-top:5px}
+.select-danger select.live{border-color:var(--danger);color:var(--danger);
+  font-weight:600}
+
+/* An inline "add one more" form at the end of a list. */
+.addbox{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-left:auto}
+.addbox label{margin:0}
+.addbox input{min-width:240px}
