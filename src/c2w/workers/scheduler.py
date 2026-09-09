@@ -16,8 +16,9 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, text
 
+from c2w.alerts.base import Alert, Severity, dispatch
 from c2w.db.base import ConnectionStatus, JobKind, RecordingState, SyncRunKind
-from c2w.db.models.core import CommPeakConnection, Recording, SyncRun
+from c2w.db.models.core import Brand, CommPeakConnection, Recording, SyncRun
 from c2w.db.session import dispose_engine, get_platform_engine, platform_session
 from c2w.logging import configure_logging, get_logger, reconfigure_from_settings
 from c2w.settings import settings_service
@@ -35,6 +36,7 @@ class Scheduler:
     def __init__(self) -> None:
         self._stopping = asyncio.Event()
         self._last_inventory = 0.0
+        self._last_watch = 0.0
         self._last_retention = 0.0
         self._last_sms = 0.0
         self._last_transcribe = 0.0
@@ -62,6 +64,16 @@ class Scheduler:
             self._last_inventory = loop_now
             await self._run_incremental_inventory()
 
+        # Accounts that are not working get re-checked here and nowhere else,
+        # one at a time. See _watch_access.
+        async with platform_session() as session:
+            watch_every = await settings_service.get_int(
+                session, "source.watch_interval_seconds"
+            )
+        if loop_now - self._last_watch >= max(60, watch_every):
+            self._last_watch = loop_now
+            await self._watch_access()
+
         # Text messages, for organisations that have switched them on. Its own
         # interval because it is a different API with a different rhythm: a
         # delivery receipt can arrive hours after the message, so this re-reads
@@ -87,11 +99,25 @@ class Scheduler:
             await self._queue_eligible_recordings()
 
     async def _run_incremental_inventory(self) -> None:
+        """Scan every account that is currently working.
+
+        An account in ERROR is deliberately skipped and left to
+        :meth:`_watch_access`. It used to be scanned like the rest, which meant
+        eight refused accounts produced a failed request each every five
+        minutes -- around ninety-six an hour, for ever. Against a source that
+        rate-limits, and whose rate-limited refusal is indistinguishable from a
+        blocked address, that is not a retry policy: it is what keeps the block
+        alive. The watch retries these, one at a time, and hands an account
+        back here the moment it works.
+        """
         async with platform_session() as session:
             connections = (
                 (
                     await session.execute(
-                        select(CommPeakConnection).where(CommPeakConnection.is_enabled.is_(True))
+                        select(CommPeakConnection).where(
+                            CommPeakConnection.is_enabled.is_(True),
+                            CommPeakConnection.status != ConnectionStatus.ERROR,
+                        )
                     )
                 )
                 .scalars()
@@ -106,6 +132,100 @@ class Scheduler:
                     connection_id=connection.id,
                     error=str(exc),
                 )
+
+    async def _watch_access(self) -> None:
+        """Re-check one failing account, and say so when one starts working.
+
+        Written because the alternative was a person sitting on the settings
+        page pressing Test -- which is how the source came to refuse every
+        account in the first place, roughly twenty checks in half an hour being
+        enough to trip its rate limit.
+
+        Three properties matter, and each is a decision:
+
+        * **One account per turn, oldest check first.** Eight accounts spread
+          over eight turns rather than eight requests at once. Never a burst,
+          by construction rather than by hoping the interval is generous.
+        * **A single cheap listing**, not the full onboarding self-test, which
+          also downloads a sample object. The question here is only "does this
+          answer at all".
+        * **The alert is on the transition**, not on the state. Nobody needs
+          telling every two minutes that an account is still refused; the one
+          worth interrupting somebody for is the change.
+        """
+        async with platform_session() as session:
+            if not await settings_service.get_bool(session, "source.watch_enabled"):
+                return
+            # Oldest check first, NULLs first, so a never-checked account goes
+            # to the front and no account can be starved.
+            connection = (
+                await session.execute(
+                    select(CommPeakConnection)
+                    .where(
+                        CommPeakConnection.is_enabled.is_(True),
+                        CommPeakConnection.status == ConnectionStatus.ERROR,
+                    )
+                    .order_by(CommPeakConnection.last_probe_at.asc().nullsfirst())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if connection is None:
+                return
+
+            name = connection.name
+            brand_id = connection.brand_id
+            was = connection.status_detail or ""
+            try:
+                source = await open_source(session, connection)
+                async with source as src:
+                    # One delimited listing: a single request, and the reply is
+                    # just the top-level year prefixes however large the bucket
+                    # is. Enough to prove the address is accepted and the
+                    # signature is valid, which is the whole question.
+                    await src.list_common_prefixes("")
+            except Exception as exc:
+                error = exc if isinstance(exc, TransferError) else classify_exception(exc)
+                connection.status_detail = str(error)[:4000]
+                connection.last_probe_at = datetime.now(UTC)
+                await session.commit()
+                # Debug, not warning: this is the expected answer while an
+                # account is down, and at one line per turn it would otherwise
+                # be the only thing in the log.
+                log.debug(
+                    "scheduler.watch_still_failing",
+                    connection_id=connection.id,
+                    error=str(error)[:200],
+                )
+                return
+
+            connection.status = ConnectionStatus.OK
+            connection.status_detail = None
+            connection.last_probe_at = datetime.now(UTC)
+            brand = (
+                await session.execute(select(Brand).where(Brand.id == brand_id))
+            ).scalar_one_or_none()
+            await session.commit()
+
+        log.info("scheduler.watch_recovered", connection_id=connection.id, account=name)
+        async with platform_session() as session:
+            await dispatch(
+                session,
+                Alert(
+                    title="CommPeak account is working again",
+                    body=(
+                        f"{name} answered a bucket listing, after previously "
+                        f"failing with: {was[:200] or 'an unknown error'}\n\n"
+                        "Inventory has resumed for it; nothing needs doing."
+                    ),
+                    severity=Severity.INFO,
+                    brand_id=brand_id,
+                    brand_name=brand.name if brand else None,
+                    # Per account, so eight recoveries are eight messages
+                    # rather than one and seven suppressed as duplicates.
+                    dedupe_key=f"commpeak-recovered:{connection.id}",
+                    fields={"Account": name, "Bucket": connection.s3_bucket},
+                ),
+            )
 
     async def _scan_connection(self, connection_id: int) -> None:
         async with platform_session() as session:

@@ -14,6 +14,11 @@ WorkingDirectory=/home/c2w/commpeak-2-wasabi
 # checkout, and /etc/c2w/database.env does not exist. These mirror
 # c2w-api.service instead, which is the unit that actually works on this host.
 Environment=C2W_DATABASE_URL=postgresql+asyncpg://c2w@127.0.0.1:5432/c2w
+# The workers read across organisations, so they need the BYPASSRLS role.
+# Without this they fall back to C2W_DATABASE_URL, whose role has RLS forced
+# and no brand set -- every tenant-scoped table then reads as empty and the
+# scheduler, worker and reconciler do nothing at all, silently.
+Environment=C2W_PLATFORM_DATABASE_URL=postgresql+asyncpg://c2w_platform@127.0.0.1:5432/c2w
 Environment=C2W_MASTER_KEY_FILE=/home/c2w/.config/c2w/master.key
 Environment=C2W_WORKER_ID=%i
 ExecStart=/home/c2w/commpeak-2-wasabi/.venv/bin/python -m c2w.workers.worker

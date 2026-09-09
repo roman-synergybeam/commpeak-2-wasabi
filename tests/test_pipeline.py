@@ -10,6 +10,7 @@ Skipped unless C2W_TEST_DATABASE_URL is set; see tests/test_brand_isolation.py.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -835,3 +836,253 @@ class TestSidecar:
         assert payload["recording"]["source_key"] == SRC_KEY
         assert payload["correlation"]["call_uuid"] == rec.call_uuid
         assert payload["cdr"]["dst"] == "0007281"
+
+
+@contextlib.asynccontextmanager
+async def _scoped_platform_session(db, brand_id):
+    """A stand-in for `platform_session`, scoped to one organisation.
+
+    The real one connects as a BYPASSRLS role so a worker can read across
+    organisations. Tests run as the ordinary application role, where RLS is
+    forced and no brand is set, so the real call would see an empty database
+    and every assertion below would pass for the wrong reason. Scoping it
+    instead keeps these tests about the watch's own logic -- which account it
+    picks, when it alerts -- and leaves "is the platform role wired up" to the
+    deployment, where it is a privilege question rather than a code one.
+    """
+    async with db() as session:
+        await session.execute(
+            text("SELECT set_config('c2w.brand_id', :b, false)"), {"b": str(brand_id)}
+        )
+        yield session
+        await session.commit()
+
+
+
+class TestWatchingForAccessToComeBack:
+    """The scheduler re-checks failing accounts and announces recovery.
+
+    This replaces a person on the settings page pressing Test, which is how
+    the source came to refuse every account in the first place: roughly twenty
+    checks in half an hour tripped its rate limit, and a rate-limited refusal
+    is byte-for-byte the refusal an unlisted address gets. So the pacing here
+    is the feature, not an implementation detail.
+    """
+
+    async def test_it_checks_one_account_per_turn_oldest_first(self, db, scenario):
+        """Eight failing accounts must not become eight requests at once."""
+        from c2w.db.base import ConnectionStatus
+        from c2w.workers.scheduler import Scheduler
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            tenant_id = (
+                await s.execute(
+                    text(
+                        "SELECT tenant_id FROM commpeak_connections WHERE id = :i"
+                    ),
+                    {"i": scenario["connection_id"]},
+                )
+            ).scalar_one()
+            # Three failing accounts, checked at distinct times.
+            ids = []
+            for minutes in (30, 10, 20):
+                conn = CommPeakConnection(
+                    brand_id=scenario["brand_id"],
+                    tenant_id=tenant_id,
+                    name=f"watch-{minutes}",
+                    s3_endpoint="http://127.0.0.1:1",
+                    s3_region="us-east-1",
+                    s3_bucket=str(uuid.uuid4()),
+                    s3_access_key_sealed="x",
+                    s3_secret_sealed="x",
+                    status=ConnectionStatus.ERROR,
+                    last_probe_at=datetime.now(UTC) - timedelta(minutes=minutes),
+                )
+                s.add(conn)
+                await s.flush()
+                ids.append((minutes, conn.id))
+            await s.commit()
+
+        tried: list[int] = []
+
+        async def _fake_open_source(session, connection):
+            tried.append(connection.id)
+            raise OSError("refused")
+
+        import c2w.workers.scheduler as sched
+
+        original = sched.open_source
+        original_session = sched.platform_session
+        sched.open_source = _fake_open_source
+        sched.platform_session = lambda: _scoped_platform_session(
+            db, scenario["brand_id"]
+        )
+        try:
+            await Scheduler()._watch_access()
+        finally:
+            sched.open_source = original
+            sched.platform_session = original_session
+
+        assert len(tried) == 1, "more than one account was checked in a single turn"
+        oldest = next(cid for minutes, cid in ids if minutes == 30)
+        assert tried[0] == oldest, "the least recently checked account was not chosen"
+
+    async def test_recovery_flips_the_status_and_sends_one_alert(self, db, scenario):
+        """The alert is on the transition, not on the state."""
+        from c2w.db.base import ConnectionStatus
+        from c2w.workers.scheduler import Scheduler
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            tenant_id = (
+                await s.execute(
+                    text("SELECT tenant_id FROM commpeak_connections WHERE id = :i"),
+                    {"i": scenario["connection_id"]},
+                )
+            ).scalar_one()
+            # Only this account should be failing, or the watch legitimately
+            # recovers a leftover from another test in the same organisation
+            # and the count below is measuring the wrong thing.
+            await s.execute(
+                text(
+                    "UPDATE commpeak_connections SET status = 'OK' "
+                    "WHERE brand_id = :b"
+                ),
+                {"b": scenario["brand_id"]},
+            )
+            conn = CommPeakConnection(
+                brand_id=scenario["brand_id"],
+                tenant_id=tenant_id,
+                name="comes-back",
+                s3_endpoint="http://127.0.0.1:1",
+                s3_region="us-east-1",
+                s3_bucket=str(uuid.uuid4()),
+                s3_access_key_sealed="x",
+                s3_secret_sealed="x",
+                status=ConnectionStatus.ERROR,
+                status_detail="Forbidden",
+                last_probe_at=datetime.now(UTC) - timedelta(hours=5),
+            )
+            s.add(conn)
+            await s.flush()
+            conn_id = conn.id
+            await s.commit()
+
+        class _Src:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_a):
+                return None
+
+            async def list_common_prefixes(self, _prefix, delimiter="/"):
+                return ["2026/"]
+
+        async def _fake_open_source(_session, _connection):
+            return _Src()
+
+        sent: list[object] = []
+
+        async def _fake_dispatch(_session, alert):
+            sent.append(alert)
+            return ["telegram"]
+
+        import c2w.workers.scheduler as sched
+
+        open_original, dispatch_original = sched.open_source, sched.dispatch
+        session_original = sched.platform_session
+        sched.open_source = _fake_open_source
+        sched.dispatch = _fake_dispatch
+        sched.platform_session = lambda: _scoped_platform_session(
+            db, scenario["brand_id"]
+        )
+        try:
+            await Scheduler()._watch_access()
+            # A second turn must not re-announce: the account is OK now, so the
+            # watch does not even look at it.
+            await Scheduler()._watch_access()
+        finally:
+            sched.open_source = open_original
+            sched.dispatch = dispatch_original
+            sched.platform_session = session_original
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            row = (
+                await s.execute(
+                    select(CommPeakConnection).where(CommPeakConnection.id == conn_id)
+                )
+            ).scalar_one()
+            assert row.status == ConnectionStatus.OK
+            assert row.status_detail is None
+
+        assert len(sent) == 1, f"expected exactly one alert, got {len(sent)}"
+        assert "working again" in sent[0].title
+        assert "comes-back" in sent[0].body
+
+    async def test_inventory_leaves_failing_accounts_to_the_watch(self, db, scenario):
+        """Ninety-six refused requests an hour is what kept the block alive."""
+        from c2w.workers.scheduler import Scheduler
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            await s.execute(
+                text(
+                    "UPDATE commpeak_connections SET status = 'ERROR' WHERE id = :i"
+                ),
+                {"i": scenario["connection_id"]},
+            )
+            await s.commit()
+
+        scanned: list[int] = []
+
+        async def _record(_self, connection_id):
+            scanned.append(connection_id)
+
+        import c2w.workers.scheduler as sched
+
+        original = sched.Scheduler._scan_connection
+        session_original = sched.platform_session
+        sched.Scheduler._scan_connection = _record
+        sched.platform_session = lambda: _scoped_platform_session(
+            db, scenario["brand_id"]
+        )
+        try:
+            await Scheduler()._run_incremental_inventory()
+        finally:
+            sched.Scheduler._scan_connection = original
+
+        assert scenario["connection_id"] not in scanned
+        # And it is picked up again once the watch has cleared it.
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            await s.execute(
+                text("UPDATE commpeak_connections SET status = 'OK' WHERE id = :i"),
+                {"i": scenario["connection_id"]},
+            )
+            await s.commit()
+
+        scanned.clear()
+        sched.Scheduler._scan_connection = _record
+        try:
+            await Scheduler()._run_incremental_inventory()
+        finally:
+            sched.Scheduler._scan_connection = original
+            sched.platform_session = session_original
+        assert scenario["connection_id"] in scanned

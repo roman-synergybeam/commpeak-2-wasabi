@@ -913,6 +913,32 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         brand_overridable=True,
     ),
     SettingSpec(
+        key="source.watch_enabled",
+        type=SettingType.BOOL,
+        default=True,
+        category="CommPeak calls",
+        label="Watch accounts that are not working",
+        description="Re-checks each CommPeak account that is failing and tells "
+        "you the moment one starts working, so getting an account online does "
+        "not mean sitting on this page pressing Test.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="source.watch_interval_seconds",
+        choices=('60', '120', '300', '600', '900'),
+        type=SettingType.INT,
+        default=120,
+        category="CommPeak calls",
+        label="Re-check one failing account every",
+        description="One account per turn, oldest check first, so eight "
+        "accounts are spread across eight turns rather than tested at once. "
+        "CommPeak rate-limits, and a burst of checks is refused exactly like a "
+        "blocked address -- pacing them is what keeps the answer meaningful.",
+        unit="seconds",
+        validator=_positive,
+        brand_overridable=True,
+    ),
+    SettingSpec(
         key="source.incremental_overlap_hours",
         choices=('0', '1', '2', '3', '6', '12', '24'),
         type=SettingType.INT,
