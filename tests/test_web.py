@@ -356,8 +356,11 @@ class TestPermissions:
             assert response.status_code == 200, name
             # Its own settings are here...
             assert f'name="set:{specs[0].key}"' in response.text, name
-            # ...and it is the only card on the page.
-            assert response.text.count('name="category"') == 1, name
+            # ...and it is the only card on the page. Counted by the save
+            # form, not by `name="category"`: the test button posts its own
+            # form with the same field, so that count is two on any section
+            # that has something to test.
+            assert response.text.count('action="/admin/settings">') == 1, name
 
     async def test_an_unknown_section_falls_back_to_the_checklist(
         self, app_client, scenario

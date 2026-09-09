@@ -14,6 +14,19 @@
   {# How many of these this organisation already has, so the page states the
      model rather than implying one of each. #}
   {% if category == 'CommPeak calls' %}
+    {# The question people arrive with: "where are the S3 settings?" They are
+       not on this page and cannot be -- there is one bucket, token and secret
+       per CommPeak account, and an organisation has several. This page holds
+       only what they share. #}
+    <div class="note">
+      <h3>The S3 bucket, token and secret are not here</h3>
+      <p>They belong to each CommPeak account rather than to the organisation:
+         one bucket, one token and one secret per PBX or dialer, and
+         <strong>{{ active_brand.name if active_brand else 'this organisation' }}</strong>
+         has {{ account_counts.commpeak }} of them. Add and test those on the
+         <a href="/admin/connections"><strong>CommPeak</strong></a> page.</p>
+      <p>What follows applies to all of its accounts at once.</p>
+    </div>
     <div class="summarygrid">
       <div>
         <span class="hint">CommPeak accounts here</span>
@@ -21,10 +34,16 @@
       </div>
       <div>
         <span class="hint">Each has its own</span>
-        <strong>bucket and credentials</strong>
+        <strong>bucket, token and secret</strong>
       </div>
     </div>
   {% elif category == 'Wasabi storage' %}
+    <div class="note">
+      <h3>The bucket and keys are not here</h3>
+      <p>Each archive bucket has its own region, keys and path prefix, added and
+         tested on the <a href="/admin/storage"><strong>Archive</strong></a>
+         page. What follows applies to all of them.</p>
+    </div>
     <div class="summarygrid">
       <div>
         <span class="hint">Archive buckets here</span>
@@ -131,9 +150,24 @@
   {% if 'settings.manage' in permissions %}
     <div class="actions">
       <button type="submit">Save {{ category | lower }}</button>
+      {% if test_label %}
+        {# Its own form, and formaction is not used: the test must run against
+           what is *stored*, not against what happens to be typed into this
+           form, or a passing test proves nothing about what the workers will
+           read. Save first, then test. #}
+        <button type="submit" class="btn ghost" form="test-{{ active_slug }}">
+          {{ test_label }}
+        </button>
+      {% endif %}
       {% if category in manage_links %}
         <a class="btn ghost" href="{{ manage_links[category] }}">{{ manage_link_labels[category] }}</a>
       {% endif %}
     </div>
   {% endif %}
 </form>
+
+{% if test_label and 'settings.manage' in permissions %}
+  <form id="test-{{ active_slug }}" method="post" action="/admin/settings/test" hidden>
+    <input type="hidden" name="category" value="{{ category }}">
+  </form>
+{% endif %}

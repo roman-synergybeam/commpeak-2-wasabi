@@ -334,3 +334,10 @@ main > .note p,
 .note > p,
 .steps .det{max-width:88ch}
 .changelog .what{max-width:110ch}
+
+/* A test's individual checks. One line each, because "which of the six things
+   is wrong" is the whole point of running it. */
+.checks{list-style:none;margin:10px 0 0;padding:0;display:flex;
+  flex-direction:column;gap:6px}
+.checks li{display:flex;align-items:baseline;gap:8px}
+.checks li .det{display:block;margin-top:2px}

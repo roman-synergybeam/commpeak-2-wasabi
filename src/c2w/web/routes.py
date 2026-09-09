@@ -94,6 +94,7 @@ from c2w.web.accounts import (
     wasabi_region_choices,
 )
 from c2w.web.filters import register as register_filters
+from c2w.web.settings_tests import TESTABLE_SECTIONS, run_section_test
 
 log = get_logger(__name__)
 
@@ -1362,6 +1363,7 @@ async def admin_settings(
     section: str | None = None,
     saved: str | None = None,
     error: str | None = None,
+    tested: str | None = None,
 ) -> Response:
     """One section at a time, chosen from the rail on the left.
 
@@ -1431,6 +1433,8 @@ async def admin_settings(
             manage_links={k: v[0] for k, v in _MANAGE_LINKS.items()},
             manage_link_labels={k: v[1] for k, v in _MANAGE_LINKS.items()},
             setup_steps=await _setup_steps(session, brand),
+            test_label=TESTABLE_SECTIONS.get(active_section),
+            test_result=_SECTION_TESTS.pop(f"{user.id}:{tested}", None) if tested else None,
             saved=saved,
             error=error,
         ),
@@ -1491,6 +1495,43 @@ async def admin_settings_save(
         params["saved"] = category
     return RedirectResponse(
         f"/admin/settings?{urlencode(params)}", status_code=status.HTTP_303_SEE_OTHER
+    )
+
+
+#: Results of a section test, held between the POST and the redirect that
+#: follows it. In memory and per process, like the connection probes: a test
+#: result is worth showing once and is not worth a table.
+_SECTION_TESTS: dict[str, Any] = {}
+
+
+@router.post("/admin/settings/test")
+async def test_settings_section(
+    request: Request,
+    user: CurrentUser,
+    session: ScopedSession,
+    brand_id: Annotated[int, Depends(active_brand_id)],
+) -> Response:
+    """Prove one settings card actually reaches what it is configured for.
+
+    Every one of these cards is values copied out of somebody else's console,
+    and the failure mode is always the same: it looks configured and does
+    nothing. So the card talks to the thing now and says what came back.
+    """
+    if Permission.SETTINGS_MANAGE not in permissions_for(user.role):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not test settings")
+
+    form = await request.form()
+    category = str(form.get("category") or "")
+    outcome = await run_section_test(
+        session, category, brand_id=brand_id, actor=user.email
+    )
+    _SECTION_TESTS[f"{user.id}:{category}"] = outcome
+    log.info(
+        "settings.tested", category=category, ok=outcome.ok, actor=user.email
+    )
+    return RedirectResponse(
+        f"/admin/settings?section={_section_slug(category)}&tested={quote_plus(category)}",
+        status_code=status.HTTP_303_SEE_OTHER,
     )
 
 

@@ -77,6 +77,31 @@
       </div>
     {% else %}
       <h2>{{ active_section }}</h2>
+
+      {% if test_result %}
+        {# The result of the button below. Not a toast: a list of checks is
+           something you read and compare against, not something that should
+           slide away after six seconds. #}
+        <div class="note {{ '' if test_result.ok else 'caution' }}">
+          <h3>{{ 'Test passed' if test_result.ok else 'Test failed' }}</h3>
+          <p>{{ test_result.summary }}</p>
+          {% if test_result.checks %}
+            <ul class="checks">
+              {% for c in test_result.checks %}
+                <li>
+                  {% if c.ok is none %}<span class="pill idle">note</span>
+                  {% elif c.ok %}<span class="pill ok">ok</span>
+                  {% else %}<span class="pill err">no</span>{% endif %}
+                  <span><strong>{{ c.name }}</strong>{% if c.detail %} &mdash; {{ c.detail }}{% endif %}
+                    {% if c.hint %}<span class="det">{{ c.hint }}</span>{% endif %}
+                  </span>
+                </li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        </div>
+      {% endif %}
+
       {% set specs = categories[active_section] %}
       {% with category = active_section %}
         {% include "_settings_card.html" %}

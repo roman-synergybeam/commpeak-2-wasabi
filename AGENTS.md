@@ -399,6 +399,54 @@ decoration and several are enforced in `web/filters.py`:
   shared memory* at `max_locks_per_transaction` (default 64). Recreate the
   scratch database periodically, or raise that setting.
 
+## CommPeak's IP access control list
+
+**Recordings access is IP-restricted, and it is not optional.** CommPeak's own
+documentation for Recordings Access Accounts says it twice: *"Ensure that the
+public IP address of your remote server or PC is whitelisted in the Access
+Control List"* and *"To access your storage, you must configure access rules
+for your S3 accounts."*
+
+It is easy to conclude otherwise, because there is no separate page for it: the
+**IP ACL** is a *tab* inside the **Recordings Access Accounts** sidebar, next to
+the tab where the tokens were created. Portal path:
+
+> my.commpeak.com -> Cloud PBX -> **PBX Instances** (or Dialer -> Dialer
+> Instances) -> the instance's three-dot menu -> **Recording Access Accounts**
+> -> **IP ACL** tab -> address with a subnet mask -> **Add**
+
+Per account, not per portal. Eight S3 accounts means eight lists.
+
+**How the refusal looks, and how to tell it apart from bad keys.** The endpoint
+sits behind nginx, and a blocked address gets nginx's own HTML page:
+
+```
+HTTP/1.1 403 Forbidden
+Server: nginx
+Content-Type: text/html
+<html><head><title>403 Forbidden</title></head>...
+```
+
+No S3 XML, so botocore reports `Code: '403', Message: 'Forbidden'` rather than
+`AccessDenied`. That absence *is* the diagnosis -- the request never reached the
+S3 layer. Compare:
+
+| What you see | What is wrong |
+|---|---|
+| nginx HTML 403, code `403` | this host's address is not on the account's IP ACL |
+| XML `AccessDenied` | keys are valid, the operation is not permitted |
+| XML `SignatureDoesNotMatch` | the secret is wrong |
+| XML `InvalidAccessKeyId` | the token is wrong |
+
+An unsigned `curl https://recordings.commpeak.com/` from the host is the fastest
+check: nginx HTML 403 means the address is blocked, and no credential is
+involved.
+
+There is also an **Access Summary** tab beside the IP ACL one, with a
+downloadable CSV of "IP address, exact time, action, downloaded file path, and
+errors" -- refused attempts appear there, which confirms the address being
+rejected without guessing.
+
 ## Reading Active Directory
 
 `c2w.auth.directory` searches AD for people, groups and OUs so an
