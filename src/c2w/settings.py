@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from c2w.crypto import CryptoError, open_global, seal_global
 from c2w.db.models.settings import AppSetting, SettingHistory
+from c2w.logging import get_logger
 from c2w.settings_spec import SETTINGS, SettingSpec, SettingType, get_spec
 
 __all__ = ["SettingsError", "SettingsService", "coerce", "validate_value"]
@@ -34,6 +35,9 @@ T = TypeVar("T")
 #: Long enough to keep read load negligible, short enough that an operator
 #: changing a setting sees it apply without wondering whether it took.
 CACHE_TTL_SECONDS = 10.0
+
+
+log = get_logger(__name__)
 
 
 class SettingsError(ValueError):
@@ -82,16 +86,32 @@ class SettingsService:
 
     # -- reading -----------------------------------------------------------
 
-    async def get(self, session: AsyncSession, key: str, *, brand_id: int | None = None) -> Any:
-        """Resolve one setting: brand override, else global, else default."""
+    async def _resolve(
+        self, session: AsyncSession, key: str, *, brand_id: int | None
+    ) -> tuple[Any, int | None, bool]:
+        """Resolve one setting to ``(value, scope, from_a_row)``.
+
+        The scope is which row the value actually came from -- the brand's or
+        the global one -- and not the scope that was asked for. That
+        distinction matters for sealed values: the AAD binds a ciphertext to
+        its key *and* its scope, so unsealing a globally-stored secret with a
+        brand's AAD fails. It used to, silently: a token set globally read back
+        as empty for every brand, so the settings page showed "not set" and the
+        alerting code sent nothing, with no error anywhere.
+        """
         spec = get_spec(key)
         await self._ensure_loaded(session)
         if brand_id is not None and spec.brand_overridable:
             if (key, brand_id) in self._cache:
-                return self._cache[(key, brand_id)]
+                return self._cache[(key, brand_id)], brand_id, True
         if (key, None) in self._cache:
-            return self._cache[(key, None)]
-        return spec.default
+            return self._cache[(key, None)], None, True
+        return spec.default, None, False
+
+    async def get(self, session: AsyncSession, key: str, *, brand_id: int | None = None) -> Any:
+        """Resolve one setting: brand override, else global, else default."""
+        value, _, _ = await self._resolve(session, key, brand_id=brand_id)
+        return value
 
     async def get_int(self, session: AsyncSession, key: str, *, brand_id: int | None = None) -> int:
         return int(await self.get(session, key, brand_id=brand_id))
@@ -121,14 +141,18 @@ class SettingsService:
         spec = get_spec(key)
         if not spec.sensitive:
             return await self.get_str(session, key, brand_id=brand_id)
-        sealed = await self.get(session, key, brand_id=brand_id)
-        if not sealed:
+        sealed, scope, from_row = await self._resolve(session, key, brand_id=brand_id)
+        if not sealed or not from_row:
             return ""
         try:
-            return open_global(str(sealed), aad=_aad(key, brand_id))
+            # `scope`, not `brand_id`: the AAD has to match the row the value
+            # was found in. A brand inheriting the global secret resolves to
+            # scope=None even though brand_id was given.
+            return open_global(str(sealed), aad=_aad(key, scope))
         except CryptoError:
             # A secret sealed under a previous master key cannot be read. Treat
             # it as unset rather than crashing the caller, and say so clearly.
+            log.warning("settings.secret_unreadable", key=key, scope=scope)
             return ""
 
     async def all_effective(

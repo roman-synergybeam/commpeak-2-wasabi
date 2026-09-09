@@ -65,6 +65,20 @@ async def brand(session):
     return brand_id
 
 
+@pytest.fixture
+async def second_brand(session):
+    """Another organisation, for proving one cannot read the other's secrets."""
+    slug = f"b2-{uuid.uuid4().hex[:8]}"
+    brand_id = (
+        await session.execute(
+            text("INSERT INTO brands (name, slug) VALUES (:n, :s) RETURNING id"),
+            {"n": slug, "s": slug},
+        )
+    ).scalar_one()
+    await session.commit()
+    return brand_id
+
+
 class TestSettingsResolution:
     async def test_unset_setting_returns_registry_default(self, session, svc):
         value = await svc.get(session, "retention.offload_after_days")
@@ -190,6 +204,88 @@ class TestSecretSettings:
         ).one()
         assert "another-secret" not in " ".join(rows)
         assert rows[1] == '"***"'
+
+    async def test_a_brand_inherits_a_globally_set_secret(self, session, svc, brand):
+        """The documented order is brand override -> global row -> default.
+
+        For secrets it did not hold. The AAD binds a ciphertext to its key
+        *and* its scope, and `get_secret` was computing the AAD from the scope
+        that was *asked for* rather than the one the value was found in -- so a
+        globally-set token read back as empty for every brand. It failed
+        silently: the settings page showed "not set" and the alert senders got
+        an empty token and sent nothing, with no error anywhere.
+        """
+        await svc.set(session, "alerts.telegram_bot_token", "123:global-token")
+        await session.commit()
+        assert await svc.get_secret(session, "alerts.telegram_bot_token") == "123:global-token"
+        assert (
+            await svc.get_secret(session, "alerts.telegram_bot_token", brand_id=brand)
+            == "123:global-token"
+        )
+
+    async def test_a_brand_override_wins_and_leaves_the_global_intact(
+        self, session, svc, brand
+    ):
+        await svc.set(session, "alerts.telegram_bot_token", "123:global-token")
+        await svc.set(
+            session, "alerts.telegram_bot_token", "999:brand-token", brand_id=brand
+        )
+        await session.commit()
+        assert (
+            await svc.get_secret(session, "alerts.telegram_bot_token", brand_id=brand)
+            == "999:brand-token"
+        )
+        assert await svc.get_secret(session, "alerts.telegram_bot_token") == "123:global-token"
+
+    async def test_a_secret_moved_between_rows_still_refuses_to_decrypt(
+        self, session, svc, brand, second_brand
+    ):
+        """The property the AAD exists for, which the fix above must not weaken.
+
+        Making a brand able to read the *global* row is correct inheritance.
+        Making it able to read *another brand's* row would not be, so a
+        ciphertext lifted from one brand's row into another's must stay
+        unreadable.
+        """
+        import json
+
+        await svc.set(
+            session, "alerts.telegram_bot_token", "111:first-brand", brand_id=brand
+        )
+        await session.commit()
+        ciphertext = (
+            await session.execute(
+                text(
+                    "SELECT value #>> '{}' FROM app_settings "
+                    "WHERE key = :k AND brand_id = :b"
+                ),
+                {"k": "alerts.telegram_bot_token", "b": brand},
+            )
+        ).scalar_one()
+
+        # Planted directly, the way someone with write access to the table
+        # would; `set` would reseal it and prove nothing.
+        await session.execute(
+            text(
+                "INSERT INTO app_settings (key, brand_id, value, is_sealed) "
+                "VALUES (:k, :b, CAST(:v AS jsonb), true)"
+            ),
+            {"k": "alerts.telegram_bot_token", "b": second_brand,
+             "v": json.dumps(ciphertext)},
+        )
+        await session.commit()
+        svc.invalidate()
+
+        assert (
+            await svc.get_secret(
+                session, "alerts.telegram_bot_token", brand_id=second_brand
+            )
+            == ""
+        ), "a ciphertext moved between brands must not decrypt"
+        assert (
+            await svc.get_secret(session, "alerts.telegram_bot_token", brand_id=brand)
+            == "111:first-brand"
+        )
 
     async def test_clearing_a_secret_stores_nothing(self, session, svc):
         await svc.set(session, "alerts.telegram_bot_token", "123456:tmp")

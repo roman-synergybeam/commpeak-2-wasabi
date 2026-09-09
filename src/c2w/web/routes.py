@@ -11,9 +11,10 @@ bookmark or paste to a colleague -- which is most of what a CDR search is for.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Final
 from urllib.parse import quote_plus, urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
@@ -75,7 +76,7 @@ from c2w.db.models.auth import AuthSource, Role, User, UserBrand
 from c2w.db.models.core import Brand, CommPeakConnection, StorageDestination, Tenant
 from c2w.logging import get_logger
 from c2w.settings import SettingsError, settings_service
-from c2w.settings_spec import SETTINGS, SettingType, specs_by_category
+from c2w.settings_spec import SettingType, specs_by_category
 from c2w.storage.commpeak import COMMPEAK_ENDPOINT
 from c2w.storage.errors import ErrorClass, TransferError
 from c2w.sync import queue
@@ -1203,17 +1204,126 @@ async def _setup_steps(session: AsyncSession, brand: Brand | None) -> list[dict[
     return steps
 
 
+#: The left rail. One hundred and nine settings in seventeen cards was a single
+#: page you scrolled to find anything on, so each card is now its own view and
+#: these are the groups the rail is divided into. Order matters: it is roughly
+#: the order somebody sets the system up in, not alphabetical.
+#:
+#: `SETUP_SECTION` is not a settings category -- it is the checklist that used
+#: to sit above everything else, kept as the landing view because "what still
+#: needs doing" is the question a half-configured install raises.
+SETUP_SECTION = "Setup"
+
+_SETTING_GROUPS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
+    ("Getting started", (SETUP_SECTION,)),
+    (
+        "Calls and messages",
+        (
+            "CommPeak (source)",
+            "CommPeak SMS",
+            "Playback and downloads",
+            "Transcription and voice analysis",
+        ),
+    ),
+    ("Archive", ("Wasabi (archive)", "Archiving", "Retention")),
+    (
+        "People and sign-in",
+        (
+            "Two-factor and passwords",
+            "Active Directory",
+            "Microsoft 365",
+            "Google Workspace",
+        ),
+    ),
+    (
+        "This installation",
+        ("Organisation", "Notifications", "Scheduling", "Cloudflare",
+         "Logging and metrics", "General"),
+    ),
+)
+
+
+def _section_slug(name: str) -> str:
+    """A URL-safe id for a section name.
+
+    The section lives in the query string rather than in a fragment so that a
+    link to one is a link somebody can paste, and so the save handler can send
+    you back to the card you were editing instead of to the top of the page.
+    """
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def _settings_sections(categories: dict[str, Any]) -> list[dict[str, Any]]:
+    """The rail: groups, each with its sections and their setting counts.
+
+    Built from ``_SETTING_GROUPS`` but reconciled against the registry, so a
+    category added to `settings_spec` without being placed in a group still
+    appears -- at the end, under "Other". A new setting silently missing from
+    the UI is worse than one filed untidily.
+    """
+    placed = {name for _, names in _SETTING_GROUPS for name in names}
+    groups: list[dict[str, Any]] = []
+    for title, names in _SETTING_GROUPS:
+        # Named "sections", never "items": in a Jinja attribute lookup
+        # `group.items` finds dict.items -- the bound method -- rather than the
+        # key, and iterating it raises. Renaming the key is a better fix than
+        # remembering to write `group["items"]` in every template.
+        sections = []
+        for name in names:
+            if name != SETUP_SECTION and name not in categories:
+                continue
+            sections.append(
+                {
+                    "name": name,
+                    "slug": _section_slug(name),
+                    "count": len(categories.get(name, [])),
+                }
+            )
+        if sections:
+            groups.append({"title": title, "sections": sections})
+
+    unplaced = [name for name in categories if name not in placed]
+    if unplaced:
+        groups.append(
+            {
+                "title": "Other",
+                "sections": [
+                    {"name": n, "slug": _section_slug(n), "count": len(categories[n])}
+                    for n in unplaced
+                ],
+            }
+        )
+    return groups
+
+
 @router.get("/admin/settings", response_class=HTMLResponse)
 async def admin_settings(
     request: Request,
     user: CurrentUser,
     session: ScopedSession,
     brand_id: Annotated[int, Depends(active_brand_id)],
+    section: str | None = None,
     saved: str | None = None,
     error: str | None = None,
 ) -> Response:
+    """One section at a time, chosen from the rail on the left.
+
+    Everything used to render on one page: seventeen cards, a hundred and nine
+    settings, and no way to get to the one you wanted except scrolling. Only
+    the requested section is built now, so the page is also a great deal
+    smaller.
+    """
     if Permission.SETTINGS_VIEW not in permissions_for(user.role):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not view settings")
+
+    all_categories = specs_by_category()
+    groups = _settings_sections(all_categories)
+    by_slug = {
+        s["slug"]: s["name"] for group in groups for s in group["sections"]
+    }
+    # An unknown or absent section lands on the checklist rather than 404ing:
+    # a stale bookmark should show you something useful.
+    active_section = by_slug.get(str(section or ""), SETUP_SECTION)
 
     values = await settings_service.all_effective(session, brand_id=brand_id)
     brand = (
@@ -1222,13 +1332,16 @@ async def admin_settings(
 
     # The last few characters of a stored secret, so it can be checked against
     # the console it was copied from without being revealed.
+    # Only for the section on screen. Every one of these is an unseal, and
+    # doing all of them on every page load was work thrown away for the
+    # sixteen cards that were not being looked at.
     tails: dict[str, str] = {}
-    for key, spec in SETTINGS.items():
+    for spec in all_categories.get(active_section, []):
         if not spec.sensitive:
             continue
-        current = await settings_service.get_secret(session, key, brand_id=brand_id)
+        current = await settings_service.get_secret(session, spec.key, brand_id=brand_id)
         if current:
-            tails[key] = f"stored, ending …{current[-4:]}"
+            tails[spec.key] = f"stored, ending …{current[-4:]}"
 
     counts = (
         await session.execute(
@@ -1248,7 +1361,11 @@ async def admin_settings(
             user,
             "settings",
             account_counts=dict(counts),
-            categories=specs_by_category(),
+            categories=all_categories,
+            section_groups=groups,
+            active_section=active_section,
+            active_slug=_section_slug(active_section),
+            setup_section=SETUP_SECTION,
             values=values,
             secret_tails=tails,
             category_notes=_CATEGORY_NOTES,
@@ -1308,8 +1425,16 @@ async def admin_settings_save(
         except (SettingsError, KeyError) as exc:
             problems.append(str(exc))
 
-    params = urlencode({"error": "; ".join(problems)} if problems else {"saved": category})
-    return RedirectResponse(f"/admin/settings?{params}", status_code=status.HTTP_303_SEE_OTHER)
+    # Back to the same section: being bounced to the checklist after saving
+    # something would mean re-navigating for every change.
+    params = {"section": _section_slug(category)}
+    if problems:
+        params["error"] = "; ".join(problems)
+    else:
+        params["saved"] = category
+    return RedirectResponse(
+        f"/admin/settings?{urlencode(params)}", status_code=status.HTTP_303_SEE_OTHER
+    )
 
 
 @router.get("/audit", response_class=HTMLResponse)

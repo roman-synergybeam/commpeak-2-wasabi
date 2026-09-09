@@ -1,0 +1,139 @@
+{# One settings section: the card, its fields and its switches.
+
+   A partial because the page renders exactly one of these at a time now, and
+   the save handler posts the whole card so an unchecked switch can be told
+   apart from a field the form never mentioned. `category` and `specs` come
+   from the caller. #}
+<form class="card" method="post" action="/admin/settings">
+  <input type="hidden" name="category" value="{{ category }}">
+
+  {% if category_notes.get(category) %}
+    <p class="hint" style="margin:0 0 16px">{{ category_notes[category] }}</p>
+  {% endif %}
+
+  {# How many of these this organisation already has, so the page states the
+     model rather than implying one of each. #}
+  {% if category == 'CommPeak (source)' %}
+    <div class="summarygrid">
+      <div>
+        <span class="hint">CommPeak accounts here</span>
+        <strong>{{ account_counts.commpeak }}</strong>
+      </div>
+      <div>
+        <span class="hint">Each has its own</span>
+        <strong>bucket and credentials</strong>
+      </div>
+    </div>
+  {% elif category == 'Wasabi (archive)' %}
+    <div class="summarygrid">
+      <div>
+        <span class="hint">Archive buckets here</span>
+        <strong>{{ account_counts.wasabi }}</strong>
+      </div>
+      <div>
+        <span class="hint">Each has its own</span>
+        <strong>region, bucket and keys</strong>
+      </div>
+    </div>
+  {% endif %}
+
+  {# Values first, switches after: a switch reads as a statement about the
+     card, and mixed into a grid of text boxes it gets lost. #}
+  {% set fields = specs | rejectattr('type', 'equalto', 'bool') | list %}
+  {% set switches = specs | selectattr('type', 'equalto', 'bool') | list %}
+
+  {% if fields %}
+    <div class="row">
+      {% for spec in fields %}
+        <div {% if spec.type == 'json' or spec.key in wide_fields %}class="wide"{% endif %}>
+          <label for="f-{{ spec.key }}">
+            {{ spec.label }}{% if spec.unit %} <span class="hint" style="display:inline">({{ spec.unit }})</span>{% endif %}
+          </label>
+
+          {% if spec.choices %}
+            {# A stored value outside the menu has to appear in it. Without
+               this the select renders with nothing selected, so the page shows
+               a value that is not the one in force -- and the next save posts
+               whatever the browser defaults to, silently replacing it. Values
+               set from the CLI, or from an older version of this menu, are
+               exactly how that happens. #}
+            {% set current = values[spec.key] | string %}
+            {% set known = spec.choices | map('string') | list %}
+            <select id="f-{{ spec.key }}" name="set:{{ spec.key }}">
+              {% if current not in known %}
+                <option value="{{ current }}" selected>{{ current }} (set outside this list)</option>
+              {% endif %}
+              {% for choice in spec.choices %}
+                <option value="{{ choice }}" {{ 'selected' if current == choice }}>
+                  {{ choice }}
+                </option>
+              {% endfor %}
+            </select>
+          {% elif spec.type == 'secret' %}
+            {# Monospace and a tail of what is stored, so it can be checked
+               against the console it was copied from without revealing it. #}
+            <input id="f-{{ spec.key }}" name="set:{{ spec.key }}" type="password"
+                   class="mono" autocomplete="new-password"
+                   placeholder="{{ secret_tails.get(spec.key) or 'not set' }}">
+          {% elif spec.type == 'json' %}
+            <input id="f-{{ spec.key }}" name="set:{{ spec.key }}" class="mono"
+                   value="{{ values[spec.key] | json_attr }}">
+          {% else %}
+            <input id="f-{{ spec.key }}" name="set:{{ spec.key }}"
+                   value="{{ values[spec.key] }}"
+                   {% if spec.type in ('int', 'float') %}type="number" step="any"{% endif %}>
+          {% endif %}
+
+          <p class="hint">
+            {{ spec.description }}
+            {% if spec.help_url %}
+              <a href="{{ spec.help_url }}" target="_blank" rel="noopener">{{ spec.help_label or 'more' }}</a>.
+            {% endif %}
+            {% if spec.restart_required %}
+              <span class="pill idle">needs a restart</span>
+            {% endif %}
+            {% if not spec.brand_overridable %}
+              <span class="pill idle">all organisations</span>
+            {% endif %}
+          </p>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if switches %}
+    <div class="checkrow" style="flex-direction:column;align-items:stretch;gap:14px">
+      {% for spec in switches %}
+        <div>
+          <label>
+            <input type="checkbox" name="set:{{ spec.key }}" value="true"
+                   {{ 'checked' if values[spec.key] }}
+                   {{ 'disabled' if spec.key in locked_settings }}>
+            {{ spec.label }}
+            {% if spec.key in locked_settings %}
+              <span class="pill ok">enforced in the software</span>
+            {% endif %}
+            {% if not spec.brand_overridable %}
+              <span class="pill idle">all organisations</span>
+            {% endif %}
+          </label>
+          <p class="hint" style="margin-left:26px">
+            {{ spec.description }}
+            {% if spec.help_url %}
+              <a href="{{ spec.help_url }}" target="_blank" rel="noopener">{{ spec.help_label or 'more' }}</a>.
+            {% endif %}
+          </p>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if 'settings.manage' in permissions %}
+    <div class="actions">
+      <button type="submit">Save {{ category | lower }}</button>
+      {% if category in manage_links %}
+        <a class="btn ghost" href="{{ manage_links[category] }}">{{ manage_link_labels[category] }}</a>
+      {% endif %}
+    </div>
+  {% endif %}
+</form>

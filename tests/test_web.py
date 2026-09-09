@@ -321,24 +321,85 @@ class TestPermissions:
         assert (await app_client.get("/audit")).status_code == 403
 
     async def test_admin_can_reach_settings(self, app_client, scenario):
+        """The landing view is the setup checklist, with the rail beside it."""
         await _login(app_client, scenario["admin_email"], scenario["password"])
         response = await app_client.get("/admin/settings")
         assert response.status_code == 200
-        assert "retention.offload_after_days" in response.text
+        assert 'class="railnav"' in response.text
+        assert "/admin/settings?section=retention" in response.text
 
-    async def test_settings_page_never_renders_a_secret(self, app_client, scenario, db):
-        """The page shows whether a token is configured, never its value."""
+    async def test_every_section_renders_and_holds_its_own_settings(
+        self, app_client, scenario
+    ):
+        """Each section is its own view; a setting appears in exactly one.
+
+        Guards the reason the rail exists: if a category were dropped from the
+        groups it would become unreachable from the UI while still existing in
+        the registry, and nothing else would notice.
+        """
+        from c2w.settings_spec import specs_by_category
+        from c2w.web.routes import _section_slug, _settings_sections
+
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        categories = specs_by_category()
+        reachable = {
+            item["name"]
+            for group in _settings_sections(categories)
+            for item in group["sections"]
+        }
+        assert set(categories) <= reachable, set(categories) - reachable
+
+        for name, specs in categories.items():
+            response = await app_client.get(
+                f"/admin/settings?section={_section_slug(name)}"
+            )
+            assert response.status_code == 200, name
+            # Its own settings are here...
+            assert f'name="set:{specs[0].key}"' in response.text, name
+            # ...and it is the only card on the page.
+            assert response.text.count('name="category"') == 1, name
+
+    async def test_an_unknown_section_falls_back_to_the_checklist(
+        self, app_client, scenario
+    ):
+        """A stale bookmark should show something useful, not a 404."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        response = await app_client.get("/admin/settings?section=no-such-thing")
+        assert response.status_code == 200
+        assert 'class="steps"' in response.text
+
+    async def test_no_section_ever_renders_a_secret(self, app_client, scenario, db):
+        """Every section is swept, not just the one holding the token.
+
+        Stronger than the single-page check this replaces: splitting the page
+        up means a leak could hide on any one of eighteen views, so all of
+        them are checked.
+        """
         from c2w.settings import settings_service
+        from c2w.settings_spec import SETTINGS, specs_by_category
+        from c2w.web.routes import _section_slug
 
+        secret_keys = [k for k, spec in SETTINGS.items() if spec.sensitive]
+        assert secret_keys, "no sensitive settings to check"
         async with db() as s:
-            await settings_service.set(s, "alerts.telegram_bot_token", "123:super-secret-value")
+            for index, key in enumerate(secret_keys):
+                await settings_service.set(s, key, f"leak-canary-{index}")
             await s.commit()
         settings_service.invalidate()
 
         await _login(app_client, scenario["admin_email"], scenario["password"])
-        response = await app_client.get("/admin/settings")
-        assert "super-secret-value" not in response.text
-        assert "configured" in response.text
+        for name in specs_by_category():
+            response = await app_client.get(
+                f"/admin/settings?section={_section_slug(name)}"
+            )
+            assert "leak-canary" not in response.text, f"a secret leaked into {name}"
+
+        # And the section that holds one still says that it is set, with a tail
+        # short enough to check against the console it came from.
+        telegram = await app_client.get(
+            f"/admin/settings?section={_section_slug(SETTINGS['alerts.telegram_bot_token'].category)}"
+        )
+        assert "stored, ending" in telegram.text
 
 
 class TestBrandIsolationOverHttp:

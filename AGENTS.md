@@ -334,6 +334,19 @@ decoration and several are enforced in `web/filters.py`:
 - Migrations must use `postgresql.ENUM(name=..., create_type=False)`;
   `sa.Enum(name=..., create_type=False)` emits `CREATE TYPE ... AS ENUM ()`.
 - A Jinja filter returning HTML must return `Markup`, or it renders escaped.
+- **In Jinja, `x.items` is `dict.items`, not the key `"items"`.** Attribute
+  lookup wins over subscript, so a context dict with an `items` key iterates
+  the bound method and raises `'builtin_function_or_method' object is not
+  iterable`. The settings rail hit this; the key is named `sections` now,
+  which is a better fix than remembering to write `x["items"]` everywhere.
+- **A sealed setting's AAD must match the scope the value was *found* at**, not
+  the scope that was asked for. `get_secret(key, brand_id=X)` resolves brand
+  override -> global row, so a brand inheriting a global secret finds a
+  ciphertext sealed with the `global` AAD; unsealing it with the brand's AAD
+  fails, and the failure is caught and returned as `""`. That made every
+  globally-set credential read as unset for every brand -- the settings page
+  said "not set" and the alert senders sent nothing, silently.
+  `SettingsService._resolve` returns the scope for exactly this reason.
 - `pg_try_advisory_lock` is session-scoped: hold the connection for the life of
   the process, or the lock is released the moment the session returns to the pool.
 - **`RETURNING (xmax = 0)` does not work on a partitioned table.** It is the
