@@ -1,0 +1,118 @@
+{# Table fragment only: htmx swaps this in, so it must stand alone.
+
+   `.tw.stack` because this is eleven columns, and eleven columns on a phone is
+   a sideways scroll into blank space -- below 820px each row becomes a card
+   and every cell takes its heading from its own data-label. #}
+<div class="tw stack">
+  <table>
+    <thead>
+      <tr>
+        <th class="sortable {{ 'sorted' if q.sort == 'occurred' }}"
+            data-dir="{{ 'desc' if q.descending else 'asc' }}">
+          <a href="/messages?{{ query_string | sortlink('occurred') }}">When</a>
+        </th>
+        <th>Dir</th>
+        <th>From</th>
+        <th>To</th>
+        <th>Country</th>
+        <th>Status</th>
+        <th>Delivered</th>
+        <th>Message</th>
+        <th>Stream</th>
+        <th class="right">Parts</th>
+        <th class="right sortable {{ 'sorted' if q.sort == 'cost' }}"
+            data-dir="{{ 'desc' if q.descending else 'asc' }}">
+          <a href="/messages?{{ query_string | sortlink('cost') }}">Cost</a>
+        </th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in page.rows %}
+      <tr>
+        <td class="mono" data-label="When">{{ row.occurred_at | dt }}</td>
+        <td data-label="Direction">
+          <span class="dir-{{ row.direction }}">{{ 'sent' if row.direction == 'out' else 'received' }}</span>
+        </td>
+        <td class="mono" data-label="From">
+          {{ row.source_number | number if row.source_number else (row.source_name or '—') }}
+        </td>
+        <td class="mono" data-label="To">{{ row.destination_number | number }}</td>
+        <td data-label="Country">{{ row.country_name or '—' }}</td>
+        <td data-label="Status">
+          {% if row.direction == 'in' %}
+            {# An arrived message has no delivery status. Saying so beats an
+               empty cell that reads as missing data. #}
+            <span class="det">n/a inbound</span>
+          {% elif row.status %}
+            <span class="pill {{ row.status | sms_status_class }}"
+                  title="{{ row.status | sms_status_help }}">{{ row.status }}</span>
+          {% else %}
+            <span class="det">unknown</span>
+          {% endif %}
+        </td>
+        <td class="mono" data-label="Delivered">
+          {% if row.delivered_at %}{{ row.delivered_at | dt }}
+          {% elif row.direction == 'out' %}<span class="det">not yet</span>
+          {% else %}—{% endif %}
+        </td>
+        <td data-label="Message" class="msgcell">
+          {% if row.body %}
+            <span title="{{ row.body }}">{{ row.body | truncate(70, true, '…') }}</span>
+          {% else %}—{% endif %}
+        </td>
+        <td data-label="Stream">
+          {{ row.stream or '—' }}
+          {% if row.campaign %}<span class="det">{{ row.campaign }}</span>{% endif %}
+        </td>
+        <td class="right mono" data-label="Parts">
+          {{ row.segments or '—' }}
+          {% if row.message_length %}<span class="det">{{ row.message_length }} ch</span>{% endif %}
+        </td>
+        <td class="right mono" data-label="Cost">
+          {% if row.cost is not none %}{{ '%.4f' % row.cost }}{% else %}—{% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr>
+        <td colspan="11" class="empty">
+          {# "Nothing yet" and "nothing matches" are different sentences, and
+             only one is ever true. #}
+          {% if not any_messages %}
+            No text messages have been fetched from CommPeak yet.
+            <br><span class="det">Add a TextPeak API key under
+              <a href="/admin/settings">Settings &rarr; CommPeak SMS</a> to begin.</span>
+          {% else %}
+            No message matches these filters.
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="pager">
+  <div class="pagebtns">
+    {% if page.offset %}
+      <a class="btn" href="/messages?{{ query_string | offsetlink(page.offset - page.limit) }}"
+         hx-get="/messages/rows?{{ query_string | offsetlink(page.offset - page.limit) }}"
+         hx-target="#rows" hx-push-url="true">&lsaquo; Prev</a>
+    {% endif %}
+    {% if page.has_more %}
+      <a class="btn" href="/messages?{{ query_string | offsetlink(page.offset + page.limit) }}"
+         hx-get="/messages/rows?{{ query_string | offsetlink(page.offset + page.limit) }}"
+         hx-target="#rows" hx-push-url="true">Next &rsaquo;</a>
+    {% endif %}
+  </div>
+  <span class="range">
+    {% if page.rows %}
+      Showing {{ "{:,}".format(page.offset + 1) }}&ndash;{{ "{:,}".format(page.offset + page.rows|length) }}
+      of {{ count_label }}
+    {% else %}
+      Nothing to show
+    {% endif %}
+  </span>
+  {% if page.truncated %}
+    <span class="pill warn">too deep to page further &mdash; narrow the dates</span>
+  {% endif %}
+</div>

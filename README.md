@@ -54,7 +54,10 @@ All credential settings ship empty, to be filled in by an operator.
 | Workers | done — worker pool, scheduler, nightly reconciler (both singleton-locked) |
 | Media delivery | done — presigned URLs, separate play/download permissions, full audit |
 | CDR API client | done — against the documented PBX Stats API: form-encoded POST, `page`/`cdrs_per_page`, `from`/`till`. Accepts both CDR shapes CommPeak returns |
-| Web UI | done — built on the Console UI Kit design system; dashboard, call search, detail + player, sync status, settings, audit, people |
+| Text messages (SMS) | done — both TextPeak endpoints (sent and received), delivery status, late-receipt handling, search, export |
+| Two-factor | done — authenticator app (RFC 6238), single-use codes, recovery codes, forced enrolment, administrator reset |
+| People administration | done — create accounts from the console, enable/disable, only a platform admin can create another |
+| Web UI | done — built on the Console UI Kit design system; dashboard, call search, detail + player, messages, sync status, settings, audit, people, account |
 | Alerts | done — Telegram + Slack, per-brand, severity routing, deduplication |
 | Deployment | done — systemd units, nginx, idempotent installer |
 
@@ -70,9 +73,9 @@ each setting says so where it could be mistaken for working:
   is why it is the default in the settings.
 - **Single sign-on** through Microsoft 365, Google Workspace or Active
   Directory. Columns, group-to-role mapping and settings are there; the sign-in
-  flow is not.
-- **Two-factor** for local accounts. Single sign-on already carries whatever
-  second factor your directory enforces.
+  flow is not. Until it is, an account added as a directory account can be
+  created but cannot yet sign in — two-factor with a password covers the same
+  ground in the meantime.
 - **Cloudflare** tunnel and Turnstile.
 - Microsoft 365 / Google Drive export, FLAC→MP3 transcoding for older browsers,
   and a `connection test` CLI subcommand.
@@ -107,14 +110,14 @@ so the UI is useful in the meantime and nothing needs re-scanning later.
 
 ```bash
 uv sync --extra dev
-uv run pytest -q                     # 203 tests
+uv run pytest -q                     # 279 tests
 uv run ruff check src/ tests/
 uv run uvicorn c2w.api.app:app --reload
 ```
 
 Most tests need PostgreSQL, because what they test *is* database behaviour —
 RLS policies, `SKIP LOCKED` claims, partition routing. They skip cleanly
-without one (104 pass, 99 skip):
+without one (128 pass, 151 skip):
 
 ```bash
 createdb c2w_test

@@ -782,8 +782,21 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         type=SettingType.STRING,
         default="/textpeak/streams/messages",
         category="CommPeak SMS",
-        label="Messages path",
-        description="The part of the address that returns messages.",
+        label="Sent messages path",
+        description="The part of the address that returns messages you sent, "
+        "with their delivery status. Filled in already.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="sms.incoming_path",
+        choices=('/textpeak/streams/incoming_messages',),
+        type=SettingType.STRING,
+        default="/textpeak/streams/incoming_messages",
+        category="CommPeak SMS",
+        label="Received messages path",
+        description="Replies and inbound messages come from a different address "
+        "than sent ones, and carry different fields \u2014 there is no delivery "
+        "status on a message that has arrived. Filled in already.",
         brand_overridable=True,
     ),
     SettingSpec(

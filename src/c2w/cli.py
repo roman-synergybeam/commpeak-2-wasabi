@@ -243,7 +243,9 @@ async def cmd_brand_add(args: argparse.Namespace) -> int:
         await session.flush()
         await _scope_to_brand(session, brand.id)
 
-        for table in ("cdrs", "recordings"):
+        # Every brand-partitioned table, or the first insert into the one that
+        # was forgotten fails with "no partition of relation found".
+        for table in ("cdrs", "recordings", "sms_messages"):
             await session.execute(
                 text(
                     f"CREATE TABLE IF NOT EXISTS {table}_brand_{brand.id} "

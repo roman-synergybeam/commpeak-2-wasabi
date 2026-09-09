@@ -47,9 +47,18 @@ from c2w.api.v1.cdrs import (
     SortField,
     count_cdrs,
     dashboard_stats,
+    filter_options,
     get_call,
     get_recording,
     search_cdrs,
+)
+from c2w.api.v1.messages import (
+    MessageQuery,
+    MessageSort,
+    count_messages,
+    message_filter_options,
+    message_stats,
+    search_messages,
 )
 from c2w.auth import mfa
 from c2w.auth.local import (
@@ -135,6 +144,11 @@ async def _shell(
         "nav": nav,
         "role_here": role_here,
         "org_timezone": timezone,
+        # Drives whether the Messages tab appears at all: an empty page behind
+        # a menu item that will never have data is worse than no menu item.
+        "sms_enabled": await settings_service.get_bool(
+            session, "sms.enabled", brand_id=active.id if active else None
+        ),
         "prefs": user.preferences or {},
         "permissions": {str(p) for p in permissions_for(role_here)},
         **extra,
@@ -426,20 +440,31 @@ async def dashboard(
 
 
 def _parse_query(
-    number: str | None,
-    date_from: str | None,
-    date_to: str | None,
-    direction: str | None,
-    agent: str | None,
-    media: str | None,
-    connection_id: int | None,
-    status_filter: str | None,
-    min_duration: int | None,
-    sort: str,
-    desc: str,
-    limit: int,
-    offset: int,
+    *,
+    number: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    direction: str | None = None,
+    agent: str | None = None,
+    media: str | None = None,
+    connection_id: int | None = None,
+    status_filter: str | None = None,
+    min_duration: int | None = None,
+    country: str | None = None,
+    queue: str | None = None,
+    call_type: str | None = None,
+    sort: str = "started",
+    desc: str = "1",
+    limit: int = 50,
+    offset: int = 0,
 ) -> CdrQuery:
+    """Turn query-string strings into a validated :class:`CdrQuery`.
+
+    Keyword-only: this had thirteen positional parameters of which eight were
+    ``str | None``, called from three places. Adding one in the middle would
+    have silently shifted every argument after it, and every one of them would
+    still have type-checked.
+    """
     def _dt(value: str | None) -> datetime | None:
         if not value:
             return None
@@ -465,6 +490,9 @@ def _parse_query(
         connection_id=connection_id,
         status=status_filter or None,
         min_duration=min_duration or None,
+        country=country or None,
+        queue=queue or None,
+        call_type=call_type or None,
         sort=sort_field,
         descending=desc in ("1", "true", ""),
         limit=limit,
@@ -501,6 +529,7 @@ async def _calls_context(
         "page": page,
         "q": query,
         "connections": connections,
+        "options": await filter_options(session),
         "any_cdrs": any_cdrs,
         "count_label": count_label,
         "media_chips": media_chips,
@@ -524,14 +553,20 @@ async def calls(
     connection_id: int | None = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     min_duration: int | None = None,
+    country: str | None = None,
+    queue: str | None = None,
+    call_type: str | None = None,
     sort: str = "started",
     desc: str = "1",
     limit: int = 50,
     offset: int = 0,
 ) -> Response:
     query = _parse_query(
-        number, date_from, date_to, direction, agent, media, connection_id,
-        status_filter, min_duration, sort, desc, limit, offset,
+        number=number, date_from=date_from, date_to=date_to, direction=direction,
+        agent=agent, media=media, connection_id=connection_id,
+        status_filter=status_filter, min_duration=min_duration,
+        country=country, queue=queue, call_type=call_type,
+        sort=sort, desc=desc, limit=limit, offset=offset,
     )
     context = await _calls_context(request, session, query)
     return templates.TemplateResponse(
@@ -553,6 +588,9 @@ async def calls_rows(
     connection_id: int | None = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     min_duration: int | None = None,
+    country: str | None = None,
+    queue: str | None = None,
+    call_type: str | None = None,
     sort: str = "started",
     desc: str = "1",
     limit: int = 50,
@@ -560,8 +598,11 @@ async def calls_rows(
 ) -> Response:
     """The table fragment htmx swaps in."""
     query = _parse_query(
-        number, date_from, date_to, direction, agent, media, connection_id,
-        status_filter, min_duration, sort, desc, limit, offset,
+        number=number, date_from=date_from, date_to=date_to, direction=direction,
+        agent=agent, media=media, connection_id=connection_id,
+        status_filter=status_filter, min_duration=min_duration,
+        country=country, queue=queue, call_type=call_type,
+        sort=sort, desc=desc, limit=limit, offset=offset,
     )
     context = await _calls_context(request, session, query)
     return templates.TemplateResponse(
@@ -588,6 +629,9 @@ async def export_calls(
     media: str | None = None,
     connection_id: int | None = None,
     min_duration: int | None = None,
+    country: str | None = None,
+    queue: str | None = None,
+    call_type: str | None = None,
 ) -> Response:
     """Stream a CSV of the current filter.
 
@@ -599,8 +643,10 @@ async def export_calls(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not export CDRs")
 
     query = _parse_query(
-        number, date_from, date_to, direction, agent, media, connection_id,
-        None, min_duration, "started", "1", 200, 0,
+        number=number, date_from=date_from, date_to=date_to, direction=direction,
+        agent=agent, media=media, connection_id=connection_id,
+        min_duration=min_duration, country=country, queue=queue, call_type=call_type,
+        limit=200,
     )
 
     async def rows():
@@ -611,9 +657,10 @@ async def export_calls(
         writer = csv.writer(buffer)
         writer.writerow(
             [
-                "started_at", "ended_at", "direction", "from", "to", "agent",
-                "duration_seconds", "status", "call_uuid", "recording_state",
-                "recording_parts",
+                "started_at", "ended_at", "direction", "from", "to",
+                "country", "agent", "second_agent", "queue", "call_type",
+                "commpeak_account", "duration_seconds", "billed_seconds", "cost",
+                "status", "call_uuid", "recording_state", "recording_parts",
             ]
         )
         yield buffer.getvalue()
@@ -633,8 +680,15 @@ async def export_calls(
                         row["direction"] or "",
                         row["src"] or "",
                         row["dst"] or "",
+                        row["dst_country"] or "",
                         row["agent_name"] or row["agent_extension"] or "",
+                        row["bridged_agent_name"] or row["bridged_agent_extension"] or "",
+                        row["queue_name"] or "",
+                        row["call_type"] or "",
+                        row["connection_name"] or "",
                         row["call_duration"] or "",
+                        row["bill_duration"] or "",
+                        row["cost"] if row["cost"] is not None else "",
                         row["status"] or "",
                         row["call_uuid"] or "",
                         ",".join(row["recording_states"] or []),
@@ -1002,6 +1056,7 @@ _WIDE_FIELDS = frozenset(
         "commpeak.cdr_api_base",
         "sms.api_base",
         "sms.api_path",
+        "sms.incoming_path",
         "auth.entra_redirect_note",
         "auth.entra_allowed_domains",
         "auth.google_allowed_domains",
@@ -1576,6 +1631,230 @@ async def reset_user_2fa(
     return RedirectResponse(
         "/admin/users?saved=" + quote_plus(f"second factor cleared for {row.email}"),
         status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+# -------------------------------------------------------------------- messages
+
+
+def _parse_message_query(
+    *,
+    number: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    direction: str | None = None,
+    status: str | None = None,
+    country: str | None = None,
+    stream: str | None = None,
+    campaign: str | None = None,
+    body: str | None = None,
+    sort: str = "occurred",
+    desc: str = "1",
+    limit: int = 50,
+    offset: int = 0,
+) -> MessageQuery:
+    def _dt(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(value, fmt).replace(tzinfo=UTC)
+            except ValueError:
+                continue
+        return None
+
+    try:
+        sort_field = MessageSort(sort)
+    except ValueError:
+        sort_field = MessageSort.OCCURRED
+
+    return MessageQuery(
+        date_from=_dt(date_from),
+        date_to=_dt(date_to),
+        number=number or None,
+        direction=direction or None,
+        status=status or None,
+        country=country or None,
+        stream=stream or None,
+        campaign=campaign or None,
+        body=body or None,
+        sort=sort_field,
+        descending=desc in ("1", "true", ""),
+        limit=limit,
+        offset=offset,
+    )
+
+
+async def _messages_context(
+    request: Request, session: AsyncSession, query: MessageQuery
+) -> dict[str, Any]:
+    page = await search_messages(session, query)
+    total = await count_messages(session, query)
+    any_messages = (
+        await session.execute(text("SELECT EXISTS (SELECT 1 FROM sms_messages)"))
+    ).scalar_one()
+    count_label = f"{total:,}+ messages" if total >= 10_000 else f"{total:,} messages"
+    return {
+        "page": page,
+        "q": query,
+        "stats": await message_stats(session),
+        "options": await message_filter_options(session),
+        "any_messages": any_messages,
+        "count_label": count_label,
+        "direction_chips": (
+            ("", "All"),
+            ("out", "Sent"),
+            ("in", "Received"),
+        ),
+        "query_string": urlencode(
+            {k: v for k, v in request.query_params.items() if v}, doseq=True
+        ),
+    }
+
+
+@router.get("/messages", response_class=HTMLResponse)
+async def messages(
+    request: Request,
+    user: CurrentUser,
+    session: ScopedSession,
+    number: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    direction: str | None = None,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    country: str | None = None,
+    stream: str | None = None,
+    campaign: str | None = None,
+    body: str | None = None,
+    sort: str = "occurred",
+    desc: str = "1",
+    limit: int = 50,
+    offset: int = 0,
+) -> Response:
+    """Text messages, both directions, with delivery status and timestamps."""
+    query = _parse_message_query(
+        number=number, date_from=date_from, date_to=date_to, direction=direction,
+        status=status_filter, country=country, stream=stream, campaign=campaign,
+        body=body, sort=sort, desc=desc, limit=limit, offset=offset,
+    )
+    context = await _messages_context(request, session, query)
+    return templates.TemplateResponse(
+        request, "messages.html", await _shell(request, session, user, "messages", **context)
+    )
+
+
+@router.get("/messages/rows", response_class=HTMLResponse)
+async def messages_rows(
+    request: Request,
+    user: CurrentUser,
+    session: ScopedSession,
+    number: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    direction: str | None = None,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    country: str | None = None,
+    stream: str | None = None,
+    campaign: str | None = None,
+    body: str | None = None,
+    sort: str = "occurred",
+    desc: str = "1",
+    limit: int = 50,
+    offset: int = 0,
+) -> Response:
+    """The table only, for htmx to swap in."""
+    query = _parse_message_query(
+        number=number, date_from=date_from, date_to=date_to, direction=direction,
+        status=status_filter, country=country, stream=stream, campaign=campaign,
+        body=body, sort=sort, desc=desc, limit=limit, offset=offset,
+    )
+    context = await _messages_context(request, session, query)
+    return templates.TemplateResponse(request, "_messages_rows.html", context)
+
+
+@router.get("/messages/export.csv")
+async def export_messages_csv(
+    request: Request,
+    user: CurrentUser,
+    session: ScopedSession,
+    number: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    direction: str | None = None,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    country: str | None = None,
+    stream: str | None = None,
+    campaign: str | None = None,
+    body: str | None = None,
+) -> Response:
+    """Stream a CSV of the current filter.
+
+    Same permission as exporting calls: taking a copy of customer conversations
+    off the platform is the same act whether it is audio or text.
+    """
+    if Permission.CDR_EXPORT not in permissions_for(user.role):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not export messages")
+
+    query = _parse_message_query(
+        number=number, date_from=date_from, date_to=date_to, direction=direction,
+        status=status_filter, country=country, stream=stream, campaign=campaign,
+        body=body, limit=200,
+    )
+
+    async def rows():
+        import csv
+        import io
+
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(
+            [
+                "occurred_at", "direction", "status", "sent_at", "delivered_at",
+                "received_at", "from", "to", "country", "stream", "campaign",
+                "characters", "parts", "cost", "message", "message_uuid",
+            ]
+        )
+        yield buffer.getvalue()
+        buffer.seek(0), buffer.truncate(0)
+
+        offset = 0
+        while True:
+            query.offset = offset
+            page = await search_messages(session, query)
+            if not page.rows:
+                return
+            for row in page.rows:
+                writer.writerow(
+                    [
+                        row["occurred_at"].isoformat() if row["occurred_at"] else "",
+                        row["direction"] or "",
+                        row["status"] or "",
+                        row["sent_at"].isoformat() if row["sent_at"] else "",
+                        row["delivered_at"].isoformat() if row["delivered_at"] else "",
+                        row["received_at"].isoformat() if row["received_at"] else "",
+                        row["source_number"] or row["source_name"] or "",
+                        row["destination_number"] or "",
+                        row["country_name"] or "",
+                        row["stream"] or "",
+                        row["campaign"] or "",
+                        row["message_length"] or "",
+                        row["segments"] or "",
+                        row["cost"] if row["cost"] is not None else "",
+                        row["body"] or "",
+                        row["message_uuid"] or "",
+                    ]
+                )
+            yield buffer.getvalue()
+            buffer.seek(0), buffer.truncate(0)
+            if not page.has_more:
+                return
+            offset += page.limit
+
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M")
+    return StreamingResponse(
+        rows(),
+        media_type="text/csv",
+        headers={"content-disposition": f'attachment; filename="messages-{stamp}.csv"'},
     )
 
 

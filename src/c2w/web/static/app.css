@@ -194,3 +194,12 @@ input[type="range"]:focus-visible{outline:2px solid var(--accent);outline-offset
   background:var(--surface-2);text-align:center}
 .code-input{font:600 20px var(--mono);letter-spacing:.35em;text-align:center;
   max-width:200px}
+
+/* The message body cell -------------------------------------------------
+   Truncated to one line with the full text in the title: a table of SMS
+   bodies where every row is three lines tall cannot be scanned, and the
+   message is usually not what you are scanning for. */
+.msgcell{max-width:34ch}
+.msgcell span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tw.stack .msgcell{max-width:none}
+.tw.stack .msgcell span{white-space:normal}

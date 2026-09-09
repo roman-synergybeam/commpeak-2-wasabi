@@ -366,6 +366,53 @@ def _auth_label(value: Any) -> str:
     return _AUTH_LABEL.get(str(raw), str(raw).replace("_", " ").lower())
 
 
+#: TextPeak's delivery statuses collapsed onto the kit's four pill meanings.
+#: The reference documents the field only as "Delivery status" with the example
+#: "delivered" and gives no enumeration, so this is a mapping of what has been
+#: seen -- anything unrecognised stays `idle` and shows its own text rather
+#: than being forced into a colour that would claim something untrue.
+_SMS_STATUS_CLASS = {
+    "delivered": "ok",
+    "delivrd": "ok",           # the raw DLR code some routes return
+    "sent": "warn",            # accepted by the carrier, not yet confirmed
+    "queued": "warn",
+    "pending": "warn",
+    "accepted": "warn",
+    "submitted": "warn",
+    "buffered": "warn",
+    "failed": "err",
+    "rejected": "err",
+    "undelivered": "err",
+    "undeliv": "err",
+    "expired": "err",
+    "error": "err",
+    "blocked": "err",
+}
+
+#: What each status means, for the title attribute. "sent" and "delivered" look
+#: alike and are not: one is the carrier accepting it, the other is the handset
+#: confirming it, and the gap between them is where messages get lost.
+_SMS_STATUS_HELP = {
+    "delivered": "confirmed as arrived on the handset",
+    "sent": "accepted by the carrier, delivery not yet confirmed",
+    "queued": "waiting to be sent",
+    "pending": "waiting on the carrier",
+    "failed": "the carrier could not deliver it",
+    "rejected": "refused by the carrier or the destination network",
+    "undelivered": "did not arrive; the carrier gave up",
+    "expired": "the carrier stopped trying before it arrived",
+    "blocked": "refused, usually a block on the destination",
+}
+
+
+def _sms_status_class(value: Any) -> str:
+    return _SMS_STATUS_CLASS.get(str(value or "").strip().lower(), "idle")
+
+
+def _sms_status_help(value: Any) -> str:
+    return _SMS_STATUS_HELP.get(str(value or "").strip().lower(), "")
+
+
 def _json_attr(value: Any) -> str:
     """JSON for an HTML *attribute*, left as plain text so Jinja escapes it.
 
@@ -413,6 +460,8 @@ def register(env: Any) -> None:
             "zone_label": _zone_label,
             "json_attr": _json_attr,
             "role_label": _role_label,
+            "sms_status_class": _sms_status_class,
+            "sms_status_help": _sms_status_help,
             "auth_label": _auth_label,
             "audit_state": _audit_state,
             "audit_search": _audit_search,

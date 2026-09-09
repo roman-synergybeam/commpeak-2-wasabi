@@ -27,7 +27,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from c2w.commpeak.correlate import normalise_msisdn
 
-__all__ = ["CdrPage", "CdrQuery", "SortField", "dashboard_stats", "get_call", "search_cdrs"]
+__all__ = [
+    "CdrPage",
+    "CdrQuery",
+    "SortField",
+    "dashboard_stats",
+    "filter_options",
+    "get_call",
+    "search_cdrs",
+]
 
 MAX_PAGE_SIZE = 200
 #: Beyond this, offset paging is too slow to be useful; the UI narrows the
@@ -60,6 +68,10 @@ class CdrQuery:
     direction: str | None = None
     agent: str | None = None
     status: str | None = None
+    #: Destination country, matched on the name CommPeak sends.
+    country: str | None = None
+    queue: str | None = None
+    call_type: str | None = None
     call_uuid: str | None = None
     connection_id: int | None = None
     #: Filter by archive state: "available", "pending", "failed", "orphan".
@@ -129,6 +141,21 @@ def _build_filters(query: CdrQuery, params: dict[str, Any]) -> list[str]:
         clauses.append("c.status = :status")
         params["status"] = query.status
 
+    if query.country:
+        # Exact on the indexed column: the values come from a menu built out of
+        # what is actually in this organisation's data, so there is nothing to
+        # match loosely against.
+        clauses.append("c.dst_country = :country")
+        params["country"] = query.country.strip()
+
+    if query.queue:
+        clauses.append("c.queue_name = :queue")
+        params["queue"] = query.queue.strip()
+
+    if query.call_type:
+        clauses.append("c.call_type = :call_type")
+        params["call_type"] = query.call_type.strip()
+
     if query.min_duration:
         clauses.append("c.call_duration >= :min_duration")
         params["min_duration"] = query.min_duration
@@ -164,6 +191,14 @@ async def search_cdrs(session: AsyncSession, query: CdrQuery) -> CdrPage:
             c.id, c.call_uuid, c.call_id, c.start_at, c.end_at, c.call_duration,
             c.direction, c.src, c.dst, c.status, c.agent_extension, c.agent_name,
             c.caller_user, c.connection_id, c.public_recording_url,
+            c.dst_country, c.call_type, c.queue_name,
+            c.bridged_agent_name, c.bridged_agent_extension,
+            c.bill_duration, c.cost,
+            -- The nearest thing to a "SIP provider" that exists: CommPeak's
+            -- CDR carries no carrier and no trunk field, but each CommPeak
+            -- account is one PBX or dialer with its own trunk, and every call
+            -- already knows which account it arrived on.
+            conn.name                   AS connection_name,
             COALESCE(m.parts, 0)        AS recording_parts,
             m.states                    AS recording_states,
             m.first_recording_id        AS recording_id,
@@ -185,6 +220,8 @@ async def search_cdrs(session: AsyncSession, query: CdrQuery) -> CdrPage:
             WHERE r.cdr_id IS NOT NULL
             GROUP BY r.cdr_id, r.brand_id
         ) m ON m.cdr_id = c.id AND m.brand_id = c.brand_id
+        LEFT JOIN commpeak_connections conn
+               ON conn.id = c.connection_id AND conn.brand_id = c.brand_id
         WHERE {" AND ".join(clauses)}
         ORDER BY {query.sort.column} {direction} NULLS LAST, c.id {direction}
         LIMIT :limit OFFSET :offset
@@ -197,6 +234,33 @@ async def search_cdrs(session: AsyncSession, query: CdrQuery) -> CdrPage:
         offset=offset,
         truncated=offset >= MAX_OFFSET,
     )
+
+
+async def filter_options(session: AsyncSession, *, days: int = 90) -> dict[str, list[str]]:
+    """The values to offer in the country, queue and call-type menus.
+
+    Read from the data rather than hardcoded, because the answer is different
+    for each organisation and changes as they open new destinations -- a fixed
+    country list would be wrong the first time somebody dials somewhere new.
+
+    Bounded by a recent window and by RLS, so this is one index scan inside the
+    brand's own partition rather than a walk over every call ever made. An
+    empty list is a fine answer: it means the menu is not worth showing yet.
+    """
+    sql = """
+        SELECT
+            array_agg(DISTINCT dst_country) FILTER (WHERE dst_country IS NOT NULL) AS countries,
+            array_agg(DISTINCT queue_name)  FILTER (WHERE queue_name  IS NOT NULL) AS queues,
+            array_agg(DISTINCT call_type)   FILTER (WHERE call_type   IS NOT NULL) AS call_types
+        FROM cdrs
+        WHERE start_at >= now() - make_interval(days => :days)
+    """
+    row = (await session.execute(text(sql), {"days": days})).mappings().one()
+    return {
+        "countries": sorted(row["countries"] or []),
+        "queues": sorted(row["queues"] or []),
+        "call_types": sorted(row["call_types"] or []),
+    }
 
 
 async def count_cdrs(session: AsyncSession, query: CdrQuery, *, cap: int = 10_000) -> int:

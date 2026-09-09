@@ -15,7 +15,10 @@
         <th>Dir</th>
         <th>From</th>
         <th>To</th>
-        <th>Agent</th>
+        <th>Country</th>
+        <th>Operator</th>
+        <th>Queue</th>
+        <th>SIP account</th>
         <th class="right sortable {{ 'sorted' if q.sort == 'duration' }}"
             data-dir="{{ 'desc' if q.descending else 'asc' }}">
           <a href="/calls?{{ query_string | sortlink('duration') }}">Duration</a>
@@ -35,7 +38,19 @@
         </td>
         <td class="mono" data-label="From">{{ row.src | number }}</td>
         <td class="mono" data-label="To">{{ row.dst | number }}</td>
-        <td data-label="Agent">{{ row.agent_name or row.agent_extension or '' }}</td>
+        <td data-label="Country">{{ row.dst_country or '—' }}</td>
+        {# "Operator" is the person who handled the call. A transfer has a
+           second one, and naming only the first is wrong. #}
+        <td data-label="Operator">
+          {{ row.agent_name or row.agent_extension or '—' }}
+          {% if row.bridged_agent_name or row.bridged_agent_extension %}
+            <span class="det">then {{ row.bridged_agent_name or row.bridged_agent_extension }}</span>
+          {% endif %}
+        </td>
+        <td data-label="Queue">{{ row.queue_name or '—' }}</td>
+        {# CommPeak's CDR has no carrier or trunk field. The account the call
+           arrived on is the routing fact that does exist. #}
+        <td data-label="SIP account">{{ row.connection_name or '—' }}</td>
         <td class="right mono" data-label="Duration">{{ row.call_duration | duration }}</td>
         <td data-label="Outcome">
           {% if row.status %}
@@ -47,7 +62,7 @@
       </tr>
     {% else %}
       <tr>
-        <td colspan="9" class="empty">
+        <td colspan="13" class="empty">
           {# "Nothing yet" and "nothing matches" are different sentences, and
              only one is ever true. A list claiming "no calls yet" with a
              filter active lies to someone hunting a missing call. #}

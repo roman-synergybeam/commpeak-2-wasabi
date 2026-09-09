@@ -95,11 +95,57 @@ must keep doing so.
 
 ### SMS — TextPeak
 
-`GET https://gw.commpeak.com/textpeak/streams/messages`, API key in
-`Authorization`. Params `type`, `status`, `streamId`, `phone`, `startDate`,
-`endDate`, `page`, `itemsPerPage`; returns `{items, total}` with delivery
-status, `sent_at`/`delivered_at`, country fields, `cost` and `content.body`.
-Not yet built into this system.
+**Two endpoints, not one**, and they do not return the same fields. API key
+bare in `Authorization` for both; both answer `{items, total}`.
+
+| | Outgoing | Incoming |
+|---|---|---|
+| Path | `/textpeak/streams/messages` | `/textpeak/streams/incoming_messages` |
+| Params | `type` `status` `streamId` `phone` `startDate` `endDate` `page` `itemsPerPage` | `destination` `streamId` `phone` `startDate` `endDate` `page` `itemsPerPage` |
+| Timestamps | `sent_at`, `delivered_at` | `received_at` |
+| Numbers | `source_number`, `destination_number` | `from`, `to` |
+| Body | nested: `content.body` | top level: `body` |
+| Also | `status` `cost` `platform` `campaign` | `contact_name` `message_length` |
+
+`status` is a free string. The reference documents it as "Delivery status"
+with the single example `delivered` and gives **no enumeration**, so there is
+no enum for it in the schema -- one would reject real data the first time
+CommPeak adds a state. `web/filters.py` maps the values it knows onto the four
+pill meanings and shows anything else as-is.
+
+Both shapes land in one `sms_messages` table with a `direction` column, because
+what an operator wants is the exchange with a number and that interleaves the
+two. `occurred_at` is the one timestamp every row has and is what the index and
+the sort use. Several columns are null for one direction, which is honest: a
+delivery status on a message sent *to* us is meaningless, not unknown.
+
+**Delivery receipts arrive late** -- a message read a minute after sending says
+`sent` and the same message says `delivered` an hour later, sometimes the next
+day. So the poll re-reads a wide overlap (`sms.overlap_hours`, default 24) and
+the upsert COALESCEs, or the first answer stays on the record for ever.
+
+### The calls page: country, operator, SIP provider
+
+Asked for by name. CommPeak's Search CDRs response schema settles what exists:
+
+```
+id call_start call_end duration bill_duration type destination caller_id
+country_name agent_name agent_pbxExtension bridged_agent_name
+bridged_agent_pbxExtension hangup_cause waiting_time recording_link
+queue_alias queue_name desks custom_fields cost
+```
+
+* **country** -> `country_name`, stored as `dst_country`.
+* **operator** -> the agent who handled it, `agent_name` + extension. A
+  transfer has a *second* agent (`bridged_agent_*`) and naming only the first is
+  wrong, so the column shows "Ana Ruiz then Luis Diaz".
+* **SIP provider** -> **not in the CDR.** There is no carrier field and no trunk
+  field. What exists is the CommPeak account the call arrived on -- one account
+  per PBX or dialer, each with its own trunk -- which every row already carries
+  as `connection_id`. The page shows its name and the column is called "SIP
+  account", not "SIP provider", because that is what it is. If the destination
+  *network* operator is ever wanted, that is CommPeak's separate Lookup API
+  (HLR) and a new integration, not a column we are missing.
 
 ## CommPeak specifics
 
@@ -142,8 +188,8 @@ primary source.
 
 ## Configuration
 
-Everything tunable is a `SettingSpec` in `c2w/settings_spec.py` (46 of them,
-9 categories) and is stored in `app_settings`. Resolution is **brand override →
+Everything tunable is a `SettingSpec` in `c2w/settings_spec.py` (109 of them,
+17 categories) and is stored in `app_settings`. Resolution is **brand override →
 global row → registry default**. Read them through `settings_service`, never
 from the environment:
 
@@ -164,6 +210,17 @@ settings: `C2W_DATABASE_URL` and `C2W_MASTER_KEY_FILE`. See
 `c2w/config.py`.
 
 ## Authentication
+
+**Two-factor is built.** `c2w.auth.totp` is RFC 6238 on the standard library
+(checked against the RFC's own vectors) and `c2w.auth.mfa` holds the state
+machine: no secret -> pending -> active. A *pending* secret is one that has
+never been proved against a real authenticator and is never demanded at login,
+or an abandoned setup locks the account out. A code is single-use -- the
+accepted counter is persisted and `verify` returns it precisely so the caller
+must store it. Between the password and the code the browser holds a signed
+five-minute ticket (`c2w_mfa`), never a session: a session that exists before
+the code is checked is a session that works. Recovery codes are Argon2-hashed,
+single-use, and using one revokes every other session.
 
 Local accounts now, Active Directory / Entra ID later. `c2w-admin superadmin
 create` makes the first account; `SUPER_ADMIN` is the only brand-less role and
@@ -222,13 +279,13 @@ src/c2w/
   cli.py             c2w-admin
   logging.py         structlog, with credential redaction
   storage/    base.py errors.py s3_adapter.py commpeak.py wasabi.py factory.py
-  commpeak/   keyparse.py correlate.py cdr_client.py
+  commpeak/   keyparse.py correlate.py cdr_client.py sms_client.py
   db/         base.py session.py models/{core,auth,settings}.py
   sync/       queue.py inventory.py transfer.py
   media/      sdr.py
-  auth/       local.py rbac.py
+  auth/       local.py rbac.py totp.py mfa.py
   alerts/     base.py telegram.py slack.py
-  api/        app.py deps.py v1/cdrs.py
+  api/        app.py deps.py v1/cdrs.py v1/messages.py
   web/        routes.py filters.py templates/ static/
   workers/    worker.py scheduler.py reconciler.py
 deploy/       systemd/ nginx/ install.sh
@@ -279,6 +336,35 @@ decoration and several are enforced in `web/filters.py`:
 - A Jinja filter returning HTML must return `Markup`, or it renders escaped.
 - `pg_try_advisory_lock` is session-scoped: hold the connection for the life of
   the process, or the lock is released the moment the session returns to the pool.
+- **`RETURNING (xmax = 0)` does not work on a partitioned table.** It is the
+  usual way to ask an upsert "was this row new?", but `xmax` is a system column
+  and asyncpg refuses to read one from an INSERT routed through a partitioned
+  parent: *cannot retrieve a system column in this context*. `cdrs`,
+  `recordings` and `sms_messages` are all partitioned by brand, so the CDR
+  ingest carried this bug from the initial commit and would have failed on its
+  first real row -- nothing covered it. Both ingest paths now return
+  `(created_at = updated_at)` and set `updated_at = clock_timestamp()` on
+  update; `clock_timestamp()` advances within a transaction where `now()` does
+  not, which keeps the answer exact even when a batch inserts and updates the
+  same row.
+- **`normalise_msisdn` is for phone numbers only.** An SMS sender is often an
+  alphanumeric sender ID, and the normaliser dutifully extracted the stray
+  digit from `Go4Rex` and returned `"4"` -- which, in the indexed search
+  column, made every message from the brand match a search for a number ending
+  in 4. `sms_client._numeric_suffix` returns None for anything containing a
+  letter. Do not reuse `normalise_msisdn` on a field that can hold a name.
+- **`pg_trgm` is wanted, not required.** Migration 0001 used to abort without
+  it, which contradicted both `c2w-admin doctor` (reports it as a warning) and
+  the search builder (falls back to `ILIKE`), and locked out any host whose
+  PostgreSQL lacks contrib. It now probes `pg_available_extensions` first --
+  probing, not catching, because a failed `CREATE EXTENSION` aborts the
+  transaction alembic keeps its own version row in -- skips the two GIN indexes
+  and warns with the exact SQL to add them later.
+- The test suite creates a brand per run and never drops it, and each brand adds
+  a partition to three tables. A query on a partitioned parent takes one lock
+  per partition, so a long-lived scratch database eventually fails with *out of
+  shared memory* at `max_locks_per_transaction` (default 64). Recreate the
+  scratch database periodically, or raise that setting.
 
 ## The auto-sync hook
 

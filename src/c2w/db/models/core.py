@@ -14,6 +14,7 @@ these buckets already hold.
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
@@ -24,6 +25,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     SmallInteger,
     String,
     Text,
@@ -261,12 +263,83 @@ class Cdr(Base, TimestampMixin):
 
     agent_extension: Mapped[str | None] = mapped_column(String(40))
     agent_name: Mapped[str | None] = mapped_column(String(160))
+    #: A transfer has a second agent. "Who handled this call" then has two
+    #: answers, and showing only the first is wrong.
+    bridged_agent_name: Mapped[str | None] = mapped_column(String(160))
+    bridged_agent_extension: Mapped[str | None] = mapped_column(String(40))
+    #: CommPeak's own ``type``: what kind of call this was.
+    call_type: Mapped[str | None] = mapped_column(String(40))
+    queue_name: Mapped[str | None] = mapped_column(String(160))
+    #: Billed seconds, which is not the same as elapsed seconds.
+    bill_duration: Mapped[int | None] = mapped_column(Integer)
+    cost: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
     caller_user: Mapped[str | None] = mapped_column(String(160))
     client_callerid_name: Mapped[str | None] = mapped_column(String(160))
     client_callerid_number: Mapped[str | None] = mapped_column(String(80))
     status: Mapped[str | None] = mapped_column(String(60))
     hangup_disposition: Mapped[str | None] = mapped_column(String(40))
     public_recording_url: Mapped[str | None] = mapped_column(Text)
+
+    raw: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'"))
+
+
+class SmsMessage(Base, TimestampMixin):
+    """One text message, in either direction.
+
+    Sent and received messages share a table because what an operator wants is
+    the exchange with a number, and that interleaves the two. The cost is that
+    several columns apply to only one direction -- ``status``/``delivered_at``
+    for outgoing, ``received_at``/``contact_name`` for incoming. That is
+    honest: a delivery status on a message sent *to* us is meaningless rather
+    than merely unknown.
+
+    ``occurred_at`` is the one timestamp every row has, whichever direction it
+    went, so a single index orders the combined view.
+    """
+
+    __tablename__ = "sms_messages"
+    __table_args__ = (
+        UniqueConstraint("brand_id", "message_uuid", name="uq_sms_brand_uuid"),
+        CheckConstraint("direction IN ('in', 'out')", name="ck_sms_direction"),
+        {"postgresql_partition_by": "LIST (brand_id)"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    brand_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, nullable=False)
+    connection_id: Mapped[int | None] = mapped_column(BigInteger)
+
+    message_uuid: Mapped[str] = mapped_column(Text, nullable=False)
+    direction: Mapped[str] = mapped_column(Text, nullable=False)
+    #: As CommPeak sends it. Not an enum: the reference gives no enumeration,
+    #: so one here would reject real data the first time a state is added.
+    status: Mapped[str | None] = mapped_column(Text)
+
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    source_number: Mapped[str | None] = mapped_column(Text)
+    source_name: Mapped[str | None] = mapped_column(Text)
+    destination_number: Mapped[str | None] = mapped_column(Text)
+    source_norm: Mapped[str | None] = mapped_column(String(24))
+    destination_norm: Mapped[str | None] = mapped_column(String(24))
+
+    country_code: Mapped[str | None] = mapped_column(String(8))
+    country_name: Mapped[str | None] = mapped_column(Text)
+    contact_name: Mapped[str | None] = mapped_column(Text)
+
+    body: Mapped[str | None] = mapped_column(Text)
+    message_length: Mapped[int | None] = mapped_column(Integer)
+    #: A long message is billed as several parts; CommPeak charges per part.
+    segments: Mapped[int | None] = mapped_column(Integer)
+    cost: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+
+    platform: Mapped[str | None] = mapped_column(Text)
+    stream: Mapped[str | None] = mapped_column(Text)
+    campaign: Mapped[str | None] = mapped_column(Text)
+    conversation: Mapped[str | None] = mapped_column(Text)
+    external_key: Mapped[str | None] = mapped_column(Text)
 
     raw: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'"))
 

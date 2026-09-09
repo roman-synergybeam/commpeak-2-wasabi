@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Messages — c2w{% endblock %}
+{% block body %}
+
+<h1>Text messages</h1>
+<p class="sub">{{ count_label }} in the selected range. <span class="spin">searching…</span></p>
+
+{# Every figure carries a caption and a unit, per the kit. The delivery rate is
+   over messages we sent, because an inbound message has no delivery status and
+   including them would dilute a number they cannot describe. #}
+{# The kit's own stat block. Every figure carries a caption, because a bare
+   "1,204" reads as a count or a cost equally well. The delivery rate is over
+   messages we sent: an inbound message has no delivery status, and including
+   those would dilute a number they cannot describe. #}
+<div class="stats">
+  <div>
+    <p class="hint">Sent, 7 days</p>
+    <strong>{{ "{:,}".format(stats.sent) }}</strong>
+  </div>
+  <div>
+    <p class="hint">Received, 7 days</p>
+    <strong>{{ "{:,}".format(stats.received) }}</strong>
+  </div>
+  <div>
+    <p class="hint">Delivery confirmed</p>
+    <strong>
+      {% if stats.delivery_rate is not none %}{{ '%.1f' % stats.delivery_rate }}<span class="unit">%</span>
+      {% else %}&mdash;{% endif %}
+    </strong>
+  </div>
+  <div>
+    <p class="hint">Failed or rejected</p>
+    <strong {% if stats.failed %}class="bad"{% endif %}>{{ "{:,}".format(stats.failed) }}</strong>
+  </div>
+  <div>
+    <p class="hint">Cost, 7 days</p>
+    <strong>{{ '%.2f' % stats.cost }}</strong>
+  </div>
+</div>
+
+<div class="filters" style="margin-bottom:14px">
+  {% for key, label in direction_chips %}
+    <a class="chip {{ 'on' if (q.direction or '') == key }}"
+       href="/messages?{{ query_string | chiplink('direction', key) }}">{{ label }}</a>
+  {% endfor %}
+</div>
+
+{# A GET form so a filtered view is a URL you can bookmark or paste to a
+   colleague; htmx swaps only the table when a field changes. #}
+<form class="card" method="get" action="/messages"
+      hx-get="/messages/rows" hx-target="#rows" hx-swap="innerHTML"
+      hx-trigger="submit, change from:select, keyup changed delay:400ms from:input[type=search]"
+      hx-indicator=".spin" hx-push-url="true">
+  <input type="hidden" name="direction" value="{{ q.direction or '' }}">
+  <div class="row">
+    <div>
+      <label for="q">Number</label>
+      <input id="q" name="number" type="search" value="{{ q.number or '' }}"
+             placeholder="593990899917 or 0899">
+      <p class="hint">Either end of the message, full or partial.</p>
+    </div>
+    <div>
+      <label for="body">Text contains</label>
+      <input id="body" name="body" type="search" value="{{ q.body or '' }}"
+             placeholder="words in the message">
+    </div>
+    <div>
+      <label for="from">From</label>
+      <input id="from" name="date_from" type="datetime-local" value="{{ q.date_from | dtlocal }}">
+    </div>
+    <div>
+      <label for="to">To</label>
+      <input id="to" name="date_to" type="datetime-local" value="{{ q.date_to | dtlocal }}">
+    </div>
+    {# Menus built from what this account has actually produced. CommPeak
+       documents no list of statuses, so the only honest options are the ones
+       seen in the data. #}
+    {% if options.statuses %}
+      <div>
+        <label for="status">Status</label>
+        <select id="status" name="status">
+          <option value="">Any status</option>
+          {% for s in options.statuses %}
+            <option value="{{ s }}" {{ 'selected' if q.status == s }}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    {% endif %}
+    {% if options.countries %}
+      <div>
+        <label for="country">Country</label>
+        <select id="country" name="country">
+          <option value="">Anywhere</option>
+          {% for c in options.countries %}
+            <option value="{{ c }}" {{ 'selected' if q.country == c }}>{{ c }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    {% endif %}
+    {% if options.streams %}
+      <div>
+        <label for="stream">Stream</label>
+        <select id="stream" name="stream">
+          <option value="">Any stream</option>
+          {% for s in options.streams %}
+            <option value="{{ s }}" {{ 'selected' if q.stream == s }}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    {% endif %}
+    {% if options.campaigns %}
+      <div>
+        <label for="campaign">Campaign</label>
+        <select id="campaign" name="campaign">
+          <option value="">Any campaign</option>
+          {% for c in options.campaigns %}
+            <option value="{{ c }}" {{ 'selected' if q.campaign == c }}>{{ c }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    {% endif %}
+    <div>
+      <label for="limit">Rows</label>
+      <select id="limit" name="limit">
+        {% for n in [25, 50, 100, 200] %}
+          <option value="{{ n }}" {{ 'selected' if q.limit == n }}>{{ n }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+  <div class="actions">
+    <button type="submit">Search</button>
+    <a class="btn ghost" href="/messages">Reset</a>
+    {% if 'cdr.export' in permissions %}
+      <a class="btn ghost" href="/messages/export.csv?{{ query_string }}">Export CSV</a>
+    {% endif %}
+  </div>
+</form>
+
+<div class="note">
+  <h3>About delivery status</h3>
+  <p><em>Sent</em> means the carrier accepted the message; <em>delivered</em>
+     means a handset confirmed it. The gap between the two is where messages go
+     missing, so they are shown separately rather than merged. Receipts can
+     arrive hours later, so a recent message showing <em>not yet</em> is normal
+     &mdash; each poll re-reads a window of recent history, set under
+     <a href="/admin/settings">Settings &rarr; CommPeak SMS</a>, so a late
+     confirmation is picked up rather than left wrong for ever.</p>
+</div>
+
+<div id="rows">
+  {% include "_messages_rows.html" %}
+</div>
+{% endblock %}

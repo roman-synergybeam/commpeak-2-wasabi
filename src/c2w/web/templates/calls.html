@@ -47,17 +47,55 @@
       </select>
     </div>
     <div>
-      <label for="agent">Agent</label>
+      <label for="agent">Operator</label>
       <input id="agent" name="agent" type="search" value="{{ q.agent or '' }}"
              placeholder="extension or name">
+      <p class="hint">Whoever handled it, by extension or by name.</p>
     </div>
+    {# Menus rather than text boxes, built from what is actually in this
+       organisation's calls -- a fixed country list would be wrong the first
+       time somebody dials somewhere new. Hidden entirely when there is
+       nothing to choose from yet. #}
+    {% if options.countries %}
+      <div>
+        <label for="country">Country</label>
+        <select id="country" name="country">
+          <option value="">Anywhere</option>
+          {% for c in options.countries %}
+            <option value="{{ c }}" {{ 'selected' if q.country == c }}>{{ c }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    {% endif %}
+    {% if options.queues %}
+      <div>
+        <label for="queue">Queue</label>
+        <select id="queue" name="queue">
+          <option value="">Any queue</option>
+          {% for name in options.queues %}
+            <option value="{{ name }}" {{ 'selected' if q.queue == name }}>{{ name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    {% endif %}
+    {% if options.call_types %}
+      <div>
+        <label for="call_type">Call type</label>
+        <select id="call_type" name="call_type">
+          <option value="">Any type</option>
+          {% for t in options.call_types %}
+            <option value="{{ t }}" {{ 'selected' if q.call_type == t }}>{{ t }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    {% endif %}
     <div>
       <label for="min_duration">Longer than</label>
       <input id="min_duration" name="min_duration" type="number" min="0"
              value="{{ q.min_duration or '' }}" placeholder="seconds">
     </div>
     <div>
-      <label for="connection">CommPeak account</label>
+      <label for="connection">SIP account</label>
       <select id="connection" name="connection_id">
         <option value="">All accounts</option>
         {% for c in connections %}

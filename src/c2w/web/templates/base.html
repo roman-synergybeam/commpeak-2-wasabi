@@ -48,6 +48,11 @@
   <nav class="top">
     <a href="/" class="{{ 'on' if nav == 'dashboard' }}">Dashboard</a>
     <a href="/calls" class="{{ 'on' if nav == 'calls' }}">Calls</a>
+    {# Only where text messaging is switched on: an empty page for a menu item
+       that will never have data is worse than no menu item. #}
+    {% if sms_enabled %}
+      <a href="/messages" class="{{ 'on' if nav == 'messages' }}">Messages</a>
+    {% endif %}
     <a href="/sync" class="{{ 'on' if nav == 'sync' }}">Sync</a>
     {% if 'storage.view' in permissions %}
       <a href="/admin/connections" class="{{ 'on' if nav == 'connections' }}">CommPeak</a>

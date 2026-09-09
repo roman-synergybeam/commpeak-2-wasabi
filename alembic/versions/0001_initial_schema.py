@@ -13,6 +13,8 @@ Revision ID: 0001
 
 from __future__ import annotations
 
+import warnings
+
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
@@ -57,18 +59,46 @@ ENUMS = {
 
 
 def upgrade() -> None:
-    # pg_trgm powers partial phone-number search ("show me calls containing
-    # 96077"), which a btree index cannot serve.  It ships in the contrib
-    # package, so a bare server build fails here with an unhelpful message --
-    # translate it into the actual fix.
-    try:
+    # pg_trgm makes partial phone-number search ("show me calls containing
+    # 96077") fast; a btree index cannot serve it. It ships in the contrib
+    # package, so a bare server build does not have it.
+    #
+    # This used to abort the migration. That was wrong, and inconsistent with
+    # the rest of the system: the search builder already falls back to a plain
+    # ILIKE when it cannot use a suffix match, and `c2w-admin doctor` reports
+    # a missing pg_trgm as a warning rather than a failure. So the extension's
+    # absence makes partial search *slower*, not broken -- and refusing to
+    # create the schema at all over it locks out any host whose PostgreSQL was
+    # installed without contrib, including most managed offerings.
+    #
+    # It is still very much wanted at 19M rows, so its absence is recorded
+    # where an operator will see it rather than passed over in silence.
+    # Ask whether it is installable before trying, rather than catching the
+    # failure: a failed CREATE EXTENSION aborts the whole transaction, and
+    # alembic's own version bookkeeping is in that transaction. Rolling back to
+    # recover threw away the alembic_version row it had just written.
+    has_trgm = bool(
+        op.get_bind()
+        .execute(
+            sa.text("SELECT 1 FROM pg_available_extensions WHERE name = 'pg_trgm'")
+        )
+        .scalar()
+    )
+    if has_trgm:
         op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-    except Exception as exc:
-        raise RuntimeError(
-            "pg_trgm is required for partial phone-number search but is not available. "
-            "Install the contrib package on the database host "
-            "(`sudo apt-get install postgresql-contrib-17`) and re-run this migration."
-        ) from exc
+    else:
+        warnings.warn(
+            "pg_trgm is not available on this server, so the trigram indexes for "
+            "partial phone-number search will not be created. Searching for part "
+            "of a number still works but scans instead of using an index, which "
+            "is slow at scale. To fix it, install the contrib package on the "
+            "database host (for example `apt-get install postgresql-contrib-17`), "
+            "then run: CREATE EXTENSION pg_trgm; "
+            "CREATE INDEX ix_cdrs_src_trgm ON cdrs USING gin (src gin_trgm_ops); "
+            "CREATE INDEX ix_cdrs_dst_trgm ON cdrs USING gin (dst gin_trgm_ops);",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     for name, values in ENUMS.items():
         labels = ", ".join(f"'{v}'" for v in values)
@@ -381,8 +411,9 @@ def upgrade() -> None:
     op.execute("CREATE INDEX ix_cdrs_dst_norm ON cdrs (brand_id, dst_norm)")
     op.execute("CREATE INDEX ix_cdrs_agent ON cdrs (brand_id, agent_extension)")
     # Partial number search, e.g. "...96077...".
-    op.execute("CREATE INDEX ix_cdrs_src_trgm ON cdrs USING gin (src gin_trgm_ops)")
-    op.execute("CREATE INDEX ix_cdrs_dst_trgm ON cdrs USING gin (dst gin_trgm_ops)")
+    if has_trgm:
+        op.execute("CREATE INDEX ix_cdrs_src_trgm ON cdrs USING gin (src gin_trgm_ops)")
+        op.execute("CREATE INDEX ix_cdrs_dst_trgm ON cdrs USING gin (dst gin_trgm_ops)")
     # Correlation looks up candidates by tenant and a tight time range.
     op.execute(
         "CREATE INDEX ix_cdrs_correlation ON cdrs (brand_id, connection_id, start_at) "

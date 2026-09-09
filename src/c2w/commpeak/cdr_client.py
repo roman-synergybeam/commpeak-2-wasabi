@@ -39,6 +39,7 @@ import json
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -201,6 +202,22 @@ def _seconds(value: Any) -> int | None:
         return None
 
 
+def _decimal(value: Any) -> Decimal | None:
+    """Cost as an exact number, or None.
+
+    ``Decimal`` rather than ``float``: this is money, it is summed for
+    reporting, and CommPeak sends it as a string. Anything unparseable becomes
+    None rather than zero -- a missing cost and a free call are different
+    facts, and conflating them quietly understates a bill.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value).strip())
+    except (ArithmeticError, ValueError):
+        return None
+
+
 def normalise_cdr(record: dict[str, Any]) -> dict[str, Any]:
     """Map one documented CDR onto our columns.
 
@@ -238,10 +255,21 @@ def normalise_cdr(record: dict[str, Any]) -> dict[str, Any]:
         "dst_norm": normalise_msisdn(destination) or None,
         # The destination country, which the calls page shows as a column.
         "dst_country": record.get("country_name") or record.get("dst_country"),
-        # Whoever handled it. A transferred call has a second agent.
+        # Whoever handled it. A transferred call has a second agent, and
+        # "who dealt with this" then has two answers -- keep both.
         "agent_extension": record.get("agent_pbxExtension")
         or record.get("agent_callerid_number"),
         "agent_name": record.get("agent_name") or record.get("agent_callerid_name"),
+        "bridged_agent_name": record.get("bridged_agent_name"),
+        "bridged_agent_extension": record.get("bridged_agent_pbxExtension"),
+        # The route: what kind of call, and which queue it came through. There
+        # is no carrier or trunk field in the CDR -- the nearest thing to a
+        # provider is the CommPeak account it arrived on, which is the
+        # connection this row already belongs to.
+        "call_type": record.get("type") or record.get("call_type"),
+        "queue_name": record.get("queue_name") or record.get("queue_alias"),
+        "bill_duration": _seconds(record.get("bill_duration")),
+        "cost": _decimal(record.get("cost")),
         "caller_user": record.get("caller_user") or record.get("caller_username"),
         "client_callerid_name": record.get("source_name")
         or record.get("client_callerid_name"),
@@ -381,19 +409,43 @@ async def ingest_page(
                     brand_id, connection_id, tenant_id, call_uuid, call_id,
                     start_at, end_at, call_duration, direction, src, dst,
                     src_norm, dst_norm, dst_country, agent_extension, agent_name,
+                    bridged_agent_name, bridged_agent_extension,
+                    call_type, queue_name, bill_duration, cost,
                     caller_user, client_callerid_name, client_callerid_number,
                     status, hangup_disposition, public_recording_url, raw
                 ) VALUES (
                     :brand_id, :connection_id, :tenant_id, :call_uuid, :call_id,
                     :start_at, :end_at, :call_duration, :direction, :src, :dst,
                     :src_norm, :dst_norm, :dst_country, :agent_extension, :agent_name,
+                    :bridged_agent_name, :bridged_agent_extension,
+                    :call_type, :queue_name, :bill_duration, :cost,
                     :caller_user, :client_callerid_name, :client_callerid_number,
                     :status, :hangup_disposition, :public_recording_url, :raw
                 )
+                -- "Was this row new?" is normally answered with
+                -- RETURNING (xmax = 0), but xmax is a system column and
+                -- asyncpg refuses to read one from an INSERT routed through a
+                -- partitioned parent: "cannot retrieve a system column in this
+                -- context". cdrs is partitioned by brand, so that form failed
+                -- for every row -- ingest could not have worked at all. The
+                -- timestamps answer the same question without a system column.
                 ON CONFLICT (brand_id, connection_id, call_uuid) DO UPDATE SET
                     end_at = COALESCE(EXCLUDED.end_at, cdrs.end_at),
                     call_duration = COALESCE(EXCLUDED.call_duration, cdrs.call_duration),
                     status = COALESCE(EXCLUDED.status, cdrs.status),
+                    -- A re-read of the same call can fill in what was not
+                    -- known the first time: a transfer's second agent, the
+                    -- billed duration and the cost all settle after hangup.
+                    bridged_agent_name = COALESCE(
+                        EXCLUDED.bridged_agent_name, cdrs.bridged_agent_name
+                    ),
+                    bridged_agent_extension = COALESCE(
+                        EXCLUDED.bridged_agent_extension, cdrs.bridged_agent_extension
+                    ),
+                    call_type = COALESCE(EXCLUDED.call_type, cdrs.call_type),
+                    queue_name = COALESCE(EXCLUDED.queue_name, cdrs.queue_name),
+                    bill_duration = COALESCE(EXCLUDED.bill_duration, cdrs.bill_duration),
+                    cost = COALESCE(EXCLUDED.cost, cdrs.cost),
                     hangup_disposition = COALESCE(
                         EXCLUDED.hangup_disposition, cdrs.hangup_disposition
                     ),
@@ -401,8 +453,12 @@ async def ingest_page(
                         EXCLUDED.public_recording_url, cdrs.public_recording_url
                     ),
                     raw = EXCLUDED.raw,
-                    updated_at = now()
-                RETURNING (xmax = 0) AS was_inserted
+                    -- clock_timestamp(), not now(): now() is fixed for the
+                    -- whole transaction, so an insert and an update in the
+                    -- same batch would be indistinguishable. clock_timestamp()
+                    -- always advances, which makes the test below exact.
+                    updated_at = clock_timestamp()
+                RETURNING (created_at = updated_at) AS was_inserted
                 """
             ),
             {
