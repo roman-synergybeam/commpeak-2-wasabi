@@ -45,11 +45,20 @@ fi
 # ---------------------------------------------------------------- credentials
 # Everything git is about to commit: tracked modifications plus untracked,
 # non-ignored files. -I skips binaries; a match anywhere stops the push.
-PATTERNS='BEGIN [A-Z ]*PRIVATE KEY|-----BEGIN|aws_secret_access_key|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|C2W_MASTER_KEY[=:]'
+# Each pattern must match a *value*, not merely a key name, or the guard blocks
+# the documentation that describes it -- which is exactly what happened to this
+# file's own README section. A real secret is long; a prose mention is not.
+PATTERNS='-----BEGIN [A-Z ]*PRIVATE KEY'
+PATTERNS+='|aws_secret_access_key["'"'"' ]*[=:][ "'"'"']*[A-Za-z0-9/+=]{16,}'
+PATTERNS+='|AKIA[0-9A-Z]{16}'
+PATTERNS+='|ghp_[A-Za-z0-9]{20,}'
+PATTERNS+='|xox[baprs]-[A-Za-z0-9-]{10,}'
+PATTERNS+='|C2W_MASTER_KEY["'"'"' ]*[=:][ "'"'"']*[A-Za-z0-9/+=_-]{16,}'
+PATTERNS+='|://[^/[:space:]:@]+:[^/[:space:]@]{8,}@'   # a URL with a password in it
 
 # Added lines only. A "-" line means a credential is being *removed*, which is
 # the one change involving a credential that must always be allowed through.
-if git diff HEAD --no-color | grep '^+' | grep -v '^+++' | grep -qE "$PATTERNS"; then
+if git diff HEAD --no-color | grep '^+' | grep -v '^+++' | grep -qE -e "$PATTERNS"; then
     say "REFUSED: a credential pattern is being added to a tracked file"
     exit 0
 fi
@@ -57,7 +66,7 @@ fi
 UNTRACKED=$(git ls-files --others --exclude-standard)
 if [[ -n "$UNTRACKED" ]]; then
     HIT=$(printf '%s\n' "$UNTRACKED" | tr '\n' '\0' \
-          | xargs -0 -r grep -lIE "$PATTERNS" 2>/dev/null | head -3 | paste -sd', ' -)
+          | xargs -0 -r grep -lIE -e "$PATTERNS" 2>/dev/null | head -3 | paste -sd', ' -)
     if [[ -n "$HIT" ]]; then
         say "REFUSED: a credential pattern is in new file(s): $HIT"
         exit 0

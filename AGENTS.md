@@ -280,6 +280,25 @@ decoration and several are enforced in `web/filters.py`:
 - `pg_try_advisory_lock` is session-scoped: hold the connection for the life of
   the process, or the lock is released the moment the session returns to the pool.
 
+## The auto-sync hook
+
+`.claude/auto-sync.sh` commits and pushes on every Stop. Two things about it
+are load-bearing, and both were learned the hard way when its first run pushed
+a file containing a fake AWS key past its own guard:
+
+- **The credential scan must read the working tree, not `git diff`.** `git diff`
+  reports tracked changes only, so a brand-new file — the shape a leak actually
+  takes — is invisible to it. It greps `git ls-files --others
+  --exclude-standard` too, and restricts the tracked scan to `+` lines so that
+  *removing* a credential is never blocked.
+- **A guard that depends on an environment variable a hook cannot see is not a
+  guard.** The test gate keyed off `C2W_TEST_DATABASE_URL`, which a Stop hook
+  does not inherit, so the RLS, pipeline and web suites silently never ran. It
+  now reads `~/.config/c2w/test-database-url`, probes the port before trusting
+  it, and states in the log and the commit message whether those suites really
+  ran. If you add a gate here, ask what it does when its input is missing —
+  silently passing is the wrong answer.
+
 ## Out of scope for v1
 
 Voice transcription and analysis, FXRide CRM, Zendesk. Do not build these; do
