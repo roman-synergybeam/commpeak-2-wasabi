@@ -565,3 +565,161 @@ class TestAdministratorReset:
             f"/admin/users/{people['platform_id']}/2fa/reset", follow_redirects=False
         )
         assert "error=" in response.headers["location"]
+
+
+@needs_db
+class TestAdministrationIsAudited:
+    """Account administration belongs in the append-only trail, not a log file.
+
+    Media access was audited from the start; administration was not, so
+    creating an account, disabling one or clearing somebody's second factor
+    left no durable record. A log file is rotated and is writable by whoever
+    reaches the disk; `audit_events` has UPDATE and DELETE revoked precisely so
+    it can answer "who gave this person access".
+    """
+
+    async def _actions(self, db, brand_id: int) -> list[tuple[str, str, dict]]:
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"), {"b": str(brand_id)}
+            )
+            rows = (
+                await s.execute(
+                    text(
+                        "SELECT action, result, detail FROM audit_events "
+                        "ORDER BY id DESC LIMIT 20"
+                    )
+                )
+            ).all()
+        return [(r[0], r[1], r[2]) for r in rows]
+
+    async def test_creating_and_disabling_an_account_is_recorded(
+        self, app_client, people, db
+    ):
+        await app_client.post(
+            "/login", data={"email": people["platform"], "password": people["password"]}
+        )
+        app_client.cookies.set("c2w_brand", str(people["brand_id"]))
+
+        email = f"audited-{uuid.uuid4().hex[:6]}@example.com"
+        created = await app_client.post(
+            "/admin/users",
+            data={
+                "email": email, "auth_source": "LOCAL", "role": "OPERATOR",
+                "brand_id": str(people["brand_id"]),
+                "password": "a-long-enough-password",
+                "password_again": "a-long-enough-password",
+            },
+            follow_redirects=False,
+        )
+        assert "saved=" in created.headers["location"], created.headers["location"]
+
+        actions = await self._actions(db, people["brand_id"])
+        creation = [a for a in actions if a[0] == "USER_CREATED"]
+        assert creation, [a[0] for a in actions]
+        # SUCCESS, not a third vocabulary: the audit page treats anything else
+        # as a refusal.
+        assert creation[0][1] == "SUCCESS"
+        assert creation[0][2]["target_email"] == email
+
+        async with db() as s:
+            new_id = (
+                await s.execute(select(User.id).where(User.email == email))
+            ).scalar_one()
+        await app_client.post(
+            f"/admin/users/{new_id}/active", data={"active": "0"}, follow_redirects=False
+        )
+        actions = await self._actions(db, people["brand_id"])
+        assert any(a[0] == "USER_DISABLED" for a in actions), [a[0] for a in actions]
+
+    async def test_clearing_someone_elses_second_factor_is_recorded(
+        self, app_client, people, db
+    ):
+        """The most abusable action in the system, so the one most worth keeping."""
+        await app_client.post(
+            "/login", data={"email": people["operator"], "password": people["password"]}
+        )
+        await app_client.post("/me/2fa/start")
+        await app_client.post(
+            "/me/2fa/confirm", data={"code": await _current_code(db, people["operator"])}
+        )
+        app_client.cookies.clear()
+
+        await app_client.post(
+            "/login", data={"email": people["platform"], "password": people["password"]}
+        )
+        app_client.cookies.set("c2w_brand", str(people["brand_id"]))
+        await app_client.post(
+            f"/admin/users/{people['operator_id']}/2fa/reset", follow_redirects=False
+        )
+
+        actions = await self._actions(db, people["brand_id"])
+        reset = [a for a in actions if a[0] == "MFA_RESET_BY_ADMIN"]
+        assert reset, [a[0] for a in actions]
+        assert reset[0][2]["target_user_id"] == people["operator_id"]
+        # Turning it on is recorded too, by the person who did it.
+        assert any(a[0] == "MFA_ENABLED" for a in actions)
+
+    async def test_the_trail_cannot_be_edited(self, app_client, db, people):
+        """An audit trail you can change is not one.
+
+        Enforced with PostgreSQL rules (`ON UPDATE/DELETE DO INSTEAD NOTHING`),
+        so an attempt is *discarded* rather than refused: the statement reports
+        zero rows affected and raises nothing. That fails in the safe
+        direction -- the row survives -- but it does mean a stray
+        `DELETE FROM audit_events` looks like it worked on an empty table. What
+        matters, and what is asserted here, is that the row is still there
+        afterwards and still says what it said.
+        """
+        await app_client.post(
+            "/login", data={"email": people["platform"], "password": people["password"]}
+        )
+        app_client.cookies.set("c2w_brand", str(people["brand_id"]))
+        email = f"tamper-{uuid.uuid4().hex[:6]}@example.com"
+        await app_client.post(
+            "/admin/users",
+            data={
+                "email": email, "auth_source": "LOCAL", "role": "OPERATOR",
+                "brand_id": str(people["brand_id"]),
+                "password": "a-long-enough-password",
+                "password_again": "a-long-enough-password",
+            },
+        )
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(people["brand_id"])},
+            )
+            before = (
+                await s.execute(
+                    text(
+                        "SELECT count(*) FROM audit_events "
+                        "WHERE detail->>'target_email' = :e"
+                    ),
+                    {"e": email},
+                )
+            ).scalar_one()
+            assert before == 1, "the account creation was not recorded"
+
+            await s.execute(text("UPDATE audit_events SET action = 'TAMPERED'"))
+            await s.execute(text("DELETE FROM audit_events"))
+            await s.commit()
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(people["brand_id"])},
+            )
+            row = (
+                await s.execute(
+                    text(
+                        "SELECT action, result FROM audit_events "
+                        "WHERE detail->>'target_email' = :e"
+                    ),
+                    {"e": email},
+                )
+            ).all()
+        assert len(row) == 1, "an audit row was deleted"
+        assert row[0][0] == "USER_CREATED", "an audit row was altered"
+        assert row[0][1] == "SUCCESS"

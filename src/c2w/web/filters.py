@@ -278,6 +278,28 @@ def _audit_state(event: dict[str, Any]) -> str:
     return "other"
 
 
+#: The kit's rule again: the database stores USER_CREATED, the page reads
+#: "account created". The raw value stays searchable via `_audit_search`, so
+#: nothing is lost by making the column readable.
+_AUDIT_ACTION_LABEL = {
+    "PLAY": "listened",
+    "DOWNLOAD": "downloaded",
+    "USER_CREATED": "account created",
+    "USER_ENABLED": "account enabled",
+    "USER_DISABLED": "account disabled",
+    "MFA_RESET_BY_ADMIN": "two-factor cleared by an administrator",
+    "MFA_ENABLED": "two-factor turned on",
+    "MFA_DISABLED": "two-factor turned off",
+    "RECOVERY_CODES_REISSUED": "recovery codes reissued",
+    "PASSWORD_CHANGED": "password changed",
+}
+
+
+def _audit_action(value: Any) -> str:
+    raw = str(value or "").upper()
+    return _AUDIT_ACTION_LABEL.get(raw, raw.replace("_", " ").lower())
+
+
 def _audit_search(event: dict[str, Any]) -> str:
     """Everything an operator might type when looking for an entry.
 
@@ -464,6 +486,7 @@ def register(env: Any) -> None:
             "sms_status_help": _sms_status_help,
             "auth_label": _auth_label,
             "audit_state": _audit_state,
+            "audit_action": _audit_action,
             "audit_search": _audit_search,
         }
     )

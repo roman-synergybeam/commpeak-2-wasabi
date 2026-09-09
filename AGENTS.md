@@ -334,6 +334,20 @@ decoration and several are enforced in `web/filters.py`:
 - Migrations must use `postgresql.ENUM(name=..., create_type=False)`;
   `sa.Enum(name=..., create_type=False)` emits `CREATE TYPE ... AS ENUM ()`.
 - A Jinja filter returning HTML must return `Markup`, or it renders escaped.
+- **`audit_events` is append-only by PostgreSQL *rules*** (`ON UPDATE/DELETE
+  DO INSTEAD NOTHING`), not by revoked privileges -- the app role owns the
+  table and an owner keeps its own UPDATE/DELETE grants, so revoking from
+  PUBLIC does not stop it. The consequence to know: an attempt is *discarded*,
+  reporting zero rows and raising nothing, so a stray
+  `DELETE FROM audit_events` looks like it succeeded on an empty table. Data is
+  safe; the silence is the surprise.
+- **Writing an audit row needs the brand scope set.** The administrative routes
+  run on an unscoped session on purpose -- they work across organisations -- so
+  `record_admin_event` sets `c2w.brand_id` for the insert and restores it
+  afterwards. Without that the RLS `WITH CHECK` rejects every row, and with a
+  NULL brand it rejects them anyway (`NULL = NULL` is not true), which is why a
+  platform-level action with no organisation in scope is logged as a warning
+  instead.
 - **In Jinja, `x.items` is `dict.items`, not the key `"items"`.** Attribute
   lookup wins over subscript, so a context dict with an `items` key iterates
   the bound method and raises `'builtin_function_or_method' object is not

@@ -61,6 +61,7 @@ from c2w.api.v1.messages import (
     message_stats,
     search_messages,
 )
+from c2w.audit import AdminAction, record_admin_event
 from c2w.auth import directory, mfa
 from c2w.auth.local import (
     AuthError,
@@ -1569,6 +1570,19 @@ async def _users_context(
     )
 
 
+async def _audit_scope(request: Request, session: AsyncSession, user: User) -> int | None:
+    """The brand an audit row must be written under.
+
+    Not the target's brand: ``audit_events`` carries the same forced RLS as
+    everything else, and its WITH CHECK rejects a row for any brand other than
+    the one the session is scoped to. A platform administrator acting from a
+    different organisation would otherwise fail to write the very row that
+    records what they did.
+    """
+    _, active = await _brand_scope(request, session, user)
+    return active.id if active else None
+
+
 def _assert_may_manage(actor: User) -> None:
     if Permission.USERS_MANAGE not in permissions_for(actor.role):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not manage users")
@@ -1679,6 +1693,16 @@ async def add_user(
     log.info(
         "users.created", actor_id=user.id, user_id=row.id, role=str(role), source=str(source)
     )
+    await record_admin_event(
+        session,
+        actor=user,
+        action=AdminAction.USER_CREATED,
+        brand_id=await _audit_scope(request, session, user),
+        target=row,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"organisation_id": brand_id, "signs_in_with": str(source)},
+    )
     return RedirectResponse(
         f"/admin/users?saved={quote_plus(email)}", status_code=status.HTTP_303_SEE_OTHER
     )
@@ -1784,6 +1808,16 @@ async def set_user_active(
         await revoke_all_sessions(session, row.id)
     await session.flush()
     log.info("users.active", actor_id=user.id, user_id=row.id, active=active)
+    await record_admin_event(
+        session,
+        actor=user,
+        action=AdminAction.USER_ENABLED if active else AdminAction.USER_DISABLED,
+        brand_id=await _audit_scope(request, session, user),
+        target=row,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"sessions_revoked": not active},
+    )
     return RedirectResponse("/admin/users", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -1820,6 +1854,17 @@ async def reset_user_2fa(
     await revoke_all_sessions(session, row.id)
     await session.flush()
     log.info("mfa.reset_by_admin", actor_id=user.id, user_id=row.id)
+    # The most abusable action here: it removes a factor from an account the
+    # actor does not own, so it is the one most worth keeping for ever.
+    await record_admin_event(
+        session,
+        actor=user,
+        action=AdminAction.MFA_RESET_BY_ADMIN,
+        brand_id=await _audit_scope(request, session, user),
+        target=row,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
     return RedirectResponse(
         "/admin/users?saved=" + quote_plus(f"second factor cleared for {row.email}"),
         status_code=status.HTTP_303_SEE_OTHER,
@@ -2169,6 +2214,15 @@ async def change_my_password(
 
     await revoke_all_sessions(session, row.id)
     await session.flush()
+    await record_admin_event(
+        session,
+        actor=row,
+        action=AdminAction.PASSWORD_CHANGED,
+        brand_id=await _audit_scope(request, session, row),
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"sessions_revoked": True},
+    )
     response = RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
     response.delete_cookie(SESSION_COOKIE)
     return response
@@ -2245,6 +2299,14 @@ async def confirm_my_2fa(
         return RedirectResponse(
             f"/me/2fa?error={quote_plus(str(exc))}", status_code=status.HTTP_303_SEE_OTHER
         )
+    await record_admin_event(
+        session,
+        actor=row,
+        action=AdminAction.MFA_ENABLED,
+        brand_id=await _audit_scope(request, session, row),
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
     # Rendered rather than redirected: these exist once and a redirect drops them.
     return templates.TemplateResponse(
         request, "recovery_codes.html",
@@ -2281,6 +2343,14 @@ async def disable_my_2fa(
             f"/me?error={quote_plus(str(exc))}", status_code=status.HTTP_303_SEE_OTHER
         )
     log.info("mfa.disabled", user_id=row.id)
+    await record_admin_event(
+        session,
+        actor=row,
+        action=AdminAction.MFA_DISABLED,
+        brand_id=await _audit_scope(request, session, row),
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
     return RedirectResponse("/me?saved=2fa-off#twofactor", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -2304,6 +2374,15 @@ async def regenerate_my_recovery(
     codes = _totp.new_recovery_codes()
     row.totp_recovery_hashes = [_totp.hash_recovery_code(c) for c in codes]
     await session.flush()
+    await record_admin_event(
+        session,
+        actor=row,
+        action=AdminAction.RECOVERY_CODES_REISSUED,
+        brand_id=await _audit_scope(request, session, row),
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        detail={"count": len(codes)},
+    )
     return templates.TemplateResponse(
         request, "recovery_codes.html",
         {"request": request, "codes": codes, "next_url": "/me#twofactor", "standalone": True},

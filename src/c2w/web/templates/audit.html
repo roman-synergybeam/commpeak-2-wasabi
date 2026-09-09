@@ -35,7 +35,7 @@
         <td class="nowrap mono" data-label="When">{{ e.at | dt }}</td>
         <td data-label="Person">{{ e.actor_label or '—' }}</td>
         <td class="mono" data-label="Address">{{ e.ip or '—' }}</td>
-        <td data-label="Action">{{ e.action | lower }}</td>
+        <td data-label="Action">{{ e.action | audit_action }}</td>
         <td data-label="Result">
           <span class="pill {{ 'ok' if e.result == 'SUCCESS' else 'err' }}">{{ e.result | lower }}</span>
         </td>
