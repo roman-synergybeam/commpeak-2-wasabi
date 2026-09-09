@@ -57,7 +57,11 @@ All credential settings ship empty, to be filled in by an operator.
 | Text messages (SMS) | done — both TextPeak endpoints (sent and received), delivery status, late-receipt handling, search, export |
 | Two-factor | done — authenticator app (RFC 6238), single-use codes, recovery codes, forced enrolment, administrator reset |
 | People administration | done — create accounts from the console, enable/disable, only a platform admin can create another |
-| Active Directory picker | done — search people, groups and OUs from the people page, with bounded timeouts and a message naming what is misconfigured. Reads only |
+| Active Directory picker | done — search people, groups and OUs from the users page, with bounded timeouts and a message naming what is misconfigured. Reads only |
+| Active Directory sign-in | done — bind-as authentication, group→role on every sign-in, empty passwords refused before the server is contacted |
+| Turnstile at sign-in | done — enforced, exempt on the LAN, and fails *open* on a Cloudflare outage so a third party cannot lock you out |
+| Text-message polling | done — both TextPeak endpoints on a schedule, per organisation, cursor advanced only after the rows are stored |
+| Cloudflare tunnel | done — `cloudflared` as a user service, token read from the database and passed by environment so it never reaches argv |
 | Web UI | done — built on the Console UI Kit design system; dashboard, call search, detail + player, messages, sync status, settings, audit, people, account |
 | Alerts | done — Telegram + Slack, per-brand, severity routing, deduplication |
 | Deployment | done — systemd units, nginx, idempotent installer |
@@ -72,12 +76,11 @@ each setting says so where it could be mistaken for working:
   calls are in. The recogniser adapter is the remaining work; Whisper on this
   server keeps recordings and transcripts inside your own infrastructure, which
   is why it is the default in the settings.
-- **Single sign-on** through Microsoft 365, Google Workspace or Active
-  Directory. Columns, group-to-role mapping and settings are there; the sign-in
-  flow is not. Until it is, an account added as a directory account can be
-  created but cannot yet sign in — two-factor with a password covers the same
-  ground in the meantime.
-- **Cloudflare** tunnel and Turnstile.
+- **Single sign-on** through Microsoft 365 and Google Workspace. Active
+  Directory now works end to end — bind-as authentication with group-to-role
+  mapping applied on every sign-in — but the two OIDC flows are still
+  settings-and-columns only, so an Entra or Google account can be created and
+  cannot yet sign in.
 - Microsoft 365 / Google Drive export, FLAC→MP3 transcoding for older browsers,
   and a `connection test` CLI subcommand.
 

@@ -43,6 +43,8 @@ __all__ = [
     "DirectoryError",
     "DirectoryResult",
     "EntryKind",
+    "authenticate",
+    "group_memberships",
     "load_config",
     "probe",
     "search",
@@ -393,6 +395,148 @@ async def probe(config: DirectoryConfig, *, connection: Any = None) -> Directory
                   "starting point. Check 'Where to start searching'."
         )
     return result
+
+
+async def authenticate(
+    config: DirectoryConfig, email: str, password: str, *, connection: Any = None
+) -> DirectoryEntry | None:
+    """Check a password against the directory. Returns the person, or None.
+
+    The bind *is* the check: LDAP has no "verify this password" call, so
+    authenticating means binding as that user and seeing whether the server
+    accepts it. Which means the account has to be found first, with the
+    reading account, and then a *second* connection opened as them -- the
+    reading connection cannot be re-bound without losing it for everyone else.
+
+    Deliberately returns None rather than raising for a wrong password: the
+    caller turns that into the same message an unknown local account gets, so
+    the sign-in form cannot be used to find out who exists.
+
+    An empty password is refused without contacting the server at all. Many
+    directories treat a bind with no password as an *anonymous* bind and
+    happily succeed, which would turn "leave the password blank" into a way in.
+    """
+    if not config.configured:
+        return None
+    if not password:
+        log.info("directory.empty_password_refused", email=email[:64])
+        return None
+
+    found = await search(config, EntryKind.USER, email, connection=connection)
+    if not found.ok or not found.entries:
+        return None
+
+    # An address that matches more than one directory account is not something
+    # to guess at.
+    matches = [
+        e for e in found.entries
+        if e.email.lower() == email.strip().lower()
+        or e.login.lower() == email.strip().lower().split("@")[0]
+    ]
+    if len(matches) != 1:
+        log.info(
+            "directory.ambiguous_or_missing", email=email[:64], candidates=len(matches)
+        )
+        return None
+    person = matches[0]
+
+    if await asyncio.to_thread(_bind_as, config, person.dn, password):
+        return person
+    return None
+
+
+def _bind_as(config: DirectoryConfig, dn: str, password: str) -> bool:
+    """Try to bind as one account. True when the directory accepts it.
+
+    Its own connection, because re-binding the reading connection would break
+    it for every other request, and its own short timeout, because a sign-in
+    must not hang on a slow controller.
+    """
+    from ldap3 import SAFE_SYNC, Connection, Server
+    from ldap3.core.exceptions import LDAPException
+
+    server = Server(
+        config.server_uri,
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+        use_ssl=config.uses_tls,
+    )
+    connection = None
+    try:
+        connection = Connection(
+            server,
+            user=dn,
+            password=password,
+            read_only=True,
+            auto_bind=True,
+            receive_timeout=RECEIVE_TIMEOUT_SECONDS,
+            client_strategy=SAFE_SYNC,
+        )
+        return bool(connection.bound)
+    except LDAPException:
+        # A refused bind is the expected answer to a wrong password, so it is
+        # not logged as an error.
+        return False
+    except Exception as exc:   # anything else is worth seeing
+        log.warning("directory.bind_failed", error=str(exc)[:160])
+        return False
+    finally:
+        if connection is not None:
+            try:
+                connection.unbind()
+            except Exception:  # noqa: S110 - closing must not mask the answer
+                pass
+
+
+async def group_memberships(
+    config: DirectoryConfig, dn: str, *, connection: Any = None
+) -> set[str]:
+    """The groups this account belongs to, by common name.
+
+    Read with the *reading* account, not as the person signing in: their own
+    rights over the directory are not this platform's business, and a
+    directory that hides group membership from ordinary users would otherwise
+    silently produce nobody having any role.
+    """
+    if not config.configured:
+        return set()
+    safe = escape_filter(dn)
+    result = await asyncio.wait_for(
+        asyncio.to_thread(
+            _groups_blocking, config, f"(&(objectClass=group)(member={safe}))", connection
+        ),
+        timeout=CONNECT_TIMEOUT_SECONDS + RECEIVE_TIMEOUT_SECONDS + 2,
+    )
+    return result
+
+
+def _groups_blocking(config: DirectoryConfig, search_filter: str, connection: Any) -> set[str]:
+    borrowed = connection is not None
+    try:
+        if connection is None:
+            connection = _connection(config)
+        connection.search(
+            search_base=config.base_dn,
+            search_filter=search_filter,
+            attributes=["cn", "sAMAccountName"],
+            size_limit=200,
+        )
+        names: set[str] = set()
+        for item in connection.entries:
+            for attr in ("cn", "sAMAccountName"):
+                if attr in item:
+                    value = _one(item[attr].value)
+                    if value:
+                        names.add(value)
+        return names
+    except Exception as exc:
+        log.warning("directory.groups_failed", error=str(exc)[:160])
+        return set()
+    finally:
+        if connection is not None and not borrowed:
+            try:
+                connection.unbind()
+            except Exception:  # noqa: S110
+                pass
 
 
 def dn_looks_valid(dn: str) -> bool:

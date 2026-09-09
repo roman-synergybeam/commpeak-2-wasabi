@@ -23,7 +23,8 @@ from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatc
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from c2w.db.models.auth import AuthSource, Role, User, UserSession
+from c2w.db.models.auth import AuthSource, Role, User, UserBrand, UserSession
+from c2w.db.models.core import Brand
 from c2w.settings import settings_service
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "MAX_FAILED_LOGINS",
     "AuthError",
     "authenticate",
+    "authenticate_directory",
     "create_session",
     "create_super_admin",
     "hash_password",
@@ -87,6 +89,108 @@ def needs_rehash(password_hash: str) -> bool:
         return _hasher.check_needs_rehash(password_hash)
     except InvalidHashError:
         return True
+
+
+async def authenticate_directory(
+    session: AsyncSession, email: str, password: str
+) -> User | None:
+    """Sign somebody in against Active Directory. None if it is not their route.
+
+    Returns None -- rather than raising -- when this is not a directory
+    account, so the caller can fall through to a local password. Raises
+    :class:`AuthError` only when it *is* a directory account and the directory
+    refused, because at that point saying "wrong password" is correct.
+
+    Group membership decides the role on every sign-in, not just the first:
+    somebody removed from the admins group should stop being an admin the next
+    time they sign in, not whenever a sync happens to run.
+    """
+    from c2w.auth import directory
+
+    email = email.strip().lower()
+    if not await settings_service.get_bool(session, "ldap.enabled"):
+        return None
+
+    config = await directory.load_config(session)
+    if not config.configured:
+        return None
+
+    person = await directory.authenticate(config, email, password)
+    if person is None:
+        # Either not in the directory at all, or the directory refused. If we
+        # hold a directory account for this address, the refusal is theirs to
+        # hear; otherwise say nothing and let the local path answer.
+        existing = (
+            await session.execute(
+                select(User).where(
+                    User.email == email, User.auth_source == AuthSource.LDAP
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            raise AuthError("invalid email or password")
+        return None
+
+    groups = await directory.group_memberships(config, person.dn)
+    admin_group = (await settings_service.get_str(session, "ldap.admin_group") or "").strip()
+    user_group = (await settings_service.get_str(session, "ldap.user_group") or "").strip()
+
+    role: Role | None = None
+    if admin_group and admin_group in groups:
+        role = Role.ADMIN
+    elif user_group and user_group in groups:
+        role = Role.OPERATOR
+    elif not admin_group and not user_group:
+        # No mapping configured: everyone the directory accepts gets the least
+        # privilege, rather than nobody being able to sign in at all.
+        role = Role.OPERATOR
+
+    if role is None:
+        raise AuthError(
+            "your directory account is not in a group that has access to this system"
+        )
+
+    user = (
+        await session.execute(select(User).where(User.email == email))
+    ).scalar_one_or_none()
+    if user is None:
+        # Pre-provisioned accounts are the normal path, but somebody in the
+        # right group who was never added by hand should still get in.
+        brands = (
+            await session.execute(
+                select(Brand.id).where(Brand.is_active).order_by(Brand.id).limit(1)
+            )
+        ).scalar_one_or_none()
+        if brands is None:
+            raise AuthError("this system has no organisation to place you in yet")
+        user = User(
+            brand_id=brands,
+            email=email,
+            display_name=person.name or email,
+            role=role,
+            auth_source=AuthSource.LDAP,
+            password_hash=None,
+            is_active=True,
+        )
+        session.add(user)
+        await session.flush()
+        session.add(UserBrand(user_id=user.id, brand_id=brands, role=role))
+    elif user.auth_source != AuthSource.LDAP:
+        # A local account already owns this address. Silently converting it
+        # would let anyone who can create a directory entry take it over.
+        raise AuthError("this account signs in with a password kept here")
+
+    if not user.is_active:
+        raise AuthError("account is disabled")
+
+    user.role = role
+    user.oidc_subject = person.dn
+    user.oidc_groups = sorted(groups)
+    user.last_login_at = datetime.now(UTC)
+    user.failed_logins = 0
+    user.locked_until = None
+    await session.flush()
+    return user
 
 
 async def authenticate(session: AsyncSession, email: str, password: str) -> User:

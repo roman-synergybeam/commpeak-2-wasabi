@@ -38,6 +38,16 @@
 
     <label for="password">Password</label>
     <input id="password" name="password" type="password" autocomplete="current-password" required>
+    {% if turnstile and turnstile.show_widget %}
+      {# Cloudflare's widget. It needs outbound internet from the *browser*,
+         which is why the local network is exempt by default -- see
+         turnstile.skip_on_lan. #}
+      <div class="cf-turnstile" data-sitekey="{{ turnstile.site_key }}"
+           data-theme="auto" style="margin-top:16px"></div>
+      <script src="https://challenges.cloudflare.com/turnstile/v0/api.js"
+              async defer></script>
+    {% endif %}
+
 
     <button type="submit">Sign in</button>
 

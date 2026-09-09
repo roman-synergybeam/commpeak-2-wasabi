@@ -28,3 +28,32 @@ The API binds `0.0.0.0` here because nothing terminates TLS in front of it. That
 is a stopgap: the console carries passwords and call recordings, so put
 `deploy/nginx/` in front and set `--host 127.0.0.1` as soon as there is a
 certificate.
+
+## The Cloudflare tunnel
+
+`c2w-tunnel.service` runs `cloudflared` so the console can be reached from
+outside without opening a port. Two things about it are deliberate:
+
+* **The token is read from the database at start and passed as
+  `TUNNEL_TOKEN`.** Never as `--token`: an argument is visible to every account
+  on the host in `ps`, while a process environment is readable only by its
+  owner and root. It is not written to a file either — the database is where
+  every other credential here lives.
+* **`--no-autoupdate`.** An unattended binary replacing itself is a change
+  nobody approved, on a host that publishes an admin console.
+
+The tunnel connecting is not the same as the hostname working. A connector
+token authorises the daemon to join the tunnel; it cannot create the DNS route,
+which needs an origin certificate from `cloudflared login`. So the public
+hostname has to be routed in the dashboard:
+
+> Cloudflare Zero Trust → Networks → Tunnels → this tunnel → **Public
+> Hostname** → add the hostname, service `http://localhost:8000`
+
+Until that exists the hostname resolves to whatever it pointed at before, and
+the tunnel sits connected with nothing routed into it. `journalctl --user -u
+c2w-tunnel` shows `Registered tunnel connection` lines when the daemon is
+healthy, which is the half this host controls.
+
+The `ping_group_range` warning in its log is harmless: it only disables
+cloudflared's ICMP proxy, which HTTP does not use.

@@ -62,10 +62,11 @@ from c2w.api.v1.messages import (
     search_messages,
 )
 from c2w.audit import AdminAction, record_admin_event
-from c2w.auth import directory, mfa
+from c2w.auth import directory, mfa, turnstile
 from c2w.auth.local import (
     AuthError,
     authenticate,
+    authenticate_directory,
     create_session,
     hash_password,
     revoke_all_sessions,
@@ -268,6 +269,7 @@ async def login_form(
             "sso_enabled": sso,
             "platform_name": await settings_service.get_str(session, "core.platform_name"),
             "asset_v": _asset_version(),
+            "turnstile": await turnstile.load_gate(session, client_ip=client_ip(request)),
         },
     )
 
@@ -348,7 +350,12 @@ async def login_submit(
     password: Annotated[str, Form()],
 ) -> Response:
     try:
-        user = await authenticate(session, email, password)
+        # The directory first: an account that belongs to Active Directory has
+        # no local password to check, and asking the local path first would
+        # only produce a misleading "invalid email or password" for it.
+        user = await authenticate_directory(session, email, password)
+        if user is None:
+            user = await authenticate(session, email, password)
     except AuthError as exc:
         log.info("login.failed", email=email[:64], reason=str(exc))
         return templates.TemplateResponse(

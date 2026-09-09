@@ -377,3 +377,148 @@ class TestBrandIsolation:
             with pytest.raises(sqlalchemy.exc.DBAPIError):
                 await store_messages(s, b, [normalise_message(OUTGOING, Direction.OUT)])
             await s.rollback()
+
+
+@needs_db
+class TestScheduledPolling:
+    """The poller, which is what makes the Messages page fill itself.
+
+    The client and the table existed; nothing called them, so the page was
+    always empty. These drive the scheduler's own function against a stubbed
+    TextPeak, because the parts worth testing are the ones around the HTTP
+    call: that each organisation is polled under its own brand id, that a
+    failure does not move the cursor, and that the cursor only advances after
+    the rows are stored.
+    """
+
+    @pytest.fixture
+    async def wired(self, db):
+        """An organisation with SMS switched on and a CommPeak account."""
+        from c2w.settings import settings_service
+
+        slug = f"poll-{uuid.uuid4().hex[:8]}"
+        async with db() as s:
+            brand_id = (
+                await s.execute(
+                    text("INSERT INTO brands (name, slug) VALUES (:n, :s) RETURNING id"),
+                    {"n": slug, "s": slug},
+                )
+            ).scalar_one()
+            await s.execute(
+                text(
+                    f"CREATE TABLE IF NOT EXISTS sms_messages_brand_{brand_id} "
+                    f"PARTITION OF sms_messages FOR VALUES IN ({brand_id})"
+                )
+            )
+            await s.commit()
+            await _scope(s, brand_id)
+            tenant_id = (
+                await s.execute(
+                    text(
+                        "INSERT INTO tenants (brand_id, name, slug) "
+                        "VALUES (:b, 'pbx', :s) RETURNING id"
+                    ),
+                    {"b": brand_id, "s": slug},
+                )
+            ).scalar_one()
+            conn_id = (
+                await s.execute(
+                    text(
+                        "INSERT INTO commpeak_connections (brand_id, tenant_id, name, "
+                        "s3_bucket, s3_access_key_sealed, s3_secret_sealed) "
+                        "VALUES (:b, :t, 'pbx', :s, 'x', 'x') RETURNING id"
+                    ),
+                    {"b": brand_id, "t": tenant_id, "s": slug},
+                )
+            ).scalar_one()
+            await settings_service.set(s, "sms.enabled", True, brand_id=brand_id)
+            await settings_service.set(s, "sms.api_token", "tp-key", brand_id=brand_id)
+            await s.commit()
+        settings_service.invalidate()
+        yield {"brand_id": brand_id, "connection_id": conn_id}
+        async with db() as s:
+            await s.execute(
+                text("DELETE FROM app_settings WHERE brand_id = :b"), {"b": brand_id}
+            )
+            await s.commit()
+        settings_service.invalidate()
+
+    async def test_a_poll_stores_both_directions_and_moves_the_cursor(
+        self, wired, db, monkeypatch
+    ):
+        from c2w.commpeak import sms_client
+        from c2w.workers import scheduler
+
+        async def fake_fetch(config, direction, filters=None, **kw):
+            assert config.token == "tp-key", "the organisation's own key must be used"
+            return [OUTGOING] if direction is sms_client.Direction.OUT else [INCOMING]
+
+        monkeypatch.setattr(scheduler, "platform_session", db)
+        monkeypatch.setattr(sms_client, "fetch_messages", fake_fetch)
+        await scheduler._poll_text_messages()
+
+        async with db() as s:
+            await _scope(s, wired["brand_id"])
+            rows = (
+                await s.execute(
+                    text("SELECT direction, message_uuid FROM sms_messages ORDER BY direction")
+                )
+            ).all()
+            cursor = (
+                await s.execute(
+                    text("SELECT last_sms_cursor FROM commpeak_connections WHERE id = :i"),
+                    {"i": wired["connection_id"]},
+                )
+            ).scalar_one()
+        assert {r[0] for r in rows} == {"in", "out"}
+        assert cursor is not None, "the cursor must advance once the rows are stored"
+
+    async def test_a_refused_key_leaves_the_cursor_alone(self, wired, db, monkeypatch):
+        """The window has to be retried, or those messages are lost for good."""
+        import httpx
+
+        from c2w.commpeak import sms_client
+        from c2w.workers import scheduler
+
+        async def refuse(config, direction, filters=None, **kw):
+            raise httpx.HTTPStatusError(
+                "401", request=httpx.Request("GET", "http://x"),
+                response=httpx.Response(401),
+            )
+
+        monkeypatch.setattr(scheduler, "platform_session", db)
+        monkeypatch.setattr(sms_client, "fetch_messages", refuse)
+        await scheduler._poll_text_messages()   # must not raise
+
+        async with db() as s:
+            cursor = (
+                await s.execute(
+                    text("SELECT last_sms_cursor FROM commpeak_connections WHERE id = :i"),
+                    {"i": wired["connection_id"]},
+                )
+            ).scalar_one()
+        assert cursor is None
+
+    async def test_an_organisation_with_sms_off_is_not_polled(self, wired, db, monkeypatch):
+        from c2w.commpeak import sms_client
+        from c2w.settings import settings_service
+        from c2w.workers import scheduler
+
+        async with db() as s:
+            await settings_service.set(
+                s, "sms.enabled", False, brand_id=wired["brand_id"]
+            )
+            await s.commit()
+        settings_service.invalidate()
+
+        called = False
+
+        async def fake_fetch(config, direction, filters=None, **kw):
+            nonlocal called
+            called = True
+            return []
+
+        monkeypatch.setattr(scheduler, "platform_session", db)
+        monkeypatch.setattr(sms_client, "fetch_messages", fake_fetch)
+        await scheduler._poll_text_messages()
+        assert not called, "a switched-off organisation must not be contacted"

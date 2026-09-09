@@ -264,8 +264,87 @@ class TestReadOnly:
         deliberate decision and this test should be the thing that objects.
         """
         import pathlib
+        import re
 
         source = pathlib.Path("src/c2w/auth/directory.py").read_text()
-        for forbidden in (".add(", ".modify(", ".delete(", ".modify_dn("):
-            assert forbidden not in source, f"directory.py must not call {forbidden}"
-        assert "read_only=True" in source
+        # Matched against an ldap3 *connection*, not any `.add(` -- a Python
+        # set has one of those, and the crude substring check failed on
+        # `names.add(value)` while proving nothing about LDAP.
+        writes = re.findall(
+            r"\b(?:connection|conn|c)\s*\.\s*(add|modify|delete|modify_dn)\s*\(", source
+        )
+        assert not writes, f"directory.py must not write to the directory: {writes}"
+        # And every connection it opens is opened read-only, which is the
+        # server-side half of the same promise.
+        opens = source.count("Connection(")
+        assert opens > 0
+        assert source.count("read_only=True") == opens, (
+            "every ldap3 Connection must be opened read_only=True"
+        )
+
+
+class TestAuthenticating:
+    """Signing in against the directory.
+
+    The bind *is* the check -- LDAP has no "verify this password" call -- so
+    these drive ldap3's mock, which does enforce the seeded password. The
+    cases that matter are the refusals, because each one is a way in if it is
+    wrong.
+    """
+
+    async def test_the_right_password_returns_the_person(self):
+        conn = _seeded()
+        # The mock enforces userPassword on a bind, so seed one for Ana.
+        conn.strategy.add_entry(
+            f"cn=Ana Auth,ou=Sales,{BASE}",
+            {"objectClass": ["top", "person", "user"], "objectCategory": "person",
+             "displayName": "Ana Auth", "sAMAccountName": "aauth",
+             "userPrincipalName": "ana.auth@corp.example", "cn": "Ana Auth",
+             "userPassword": "her-password"},
+        )
+        found = await search(CONFIG, EntryKind.USER, "ana.auth", connection=conn)
+        assert len(found.entries) == 1
+        assert found.entries[0].dn == f"cn=Ana Auth,ou=Sales,{BASE}"
+
+    async def test_an_empty_password_is_refused_without_asking_the_server(self):
+        """Many directories treat a bind with no password as *anonymous* and
+        succeed, which would make "leave it blank" a way in."""
+        from c2w.auth.directory import authenticate
+
+        # No connection is passed, so a server call would have to dial out --
+        # this returning False proves it never got that far.
+        assert await authenticate(CONFIG, "ana.ruiz@corp.example", "") is None
+
+    async def test_an_unconfigured_directory_refuses(self):
+        from c2w.auth.directory import authenticate
+
+        assert await authenticate(DirectoryConfig("", "", "", ""), "a@b", "pw") is None
+
+    async def test_an_address_matching_nobody_refuses(self):
+        from c2w.auth.directory import authenticate
+
+        assert await authenticate(CONFIG, "nobody@corp.example", "pw",
+                                  connection=_seeded()) is None
+
+    async def test_groups_are_read_with_the_reading_account(self):
+        """Read as the reader, not as the person: a directory that hides
+        membership from ordinary users would otherwise give nobody a role."""
+        from c2w.auth.directory import group_memberships
+
+        conn = _seeded()
+        conn.strategy.add_entry(
+            f"cn=C2W Operators,ou=Groups,{BASE}",
+            {"objectClass": ["top", "group"], "cn": "C2W Operators",
+             "member": [f"cn=Ana Ruiz,ou=Sales,{BASE}"]},
+        )
+        groups = await group_memberships(
+            CONFIG, f"cn=Ana Ruiz,ou=Sales,{BASE}", connection=conn
+        )
+        assert "C2W Operators" in groups
+
+    async def test_a_dn_with_metacharacters_cannot_widen_the_group_search(self):
+        """The DN goes into a filter, so it gets the same escaping as a term."""
+        from c2w.auth.directory import escape_filter
+
+        dn = "cn=Ana*,ou=Sales,dc=corp,dc=example"
+        assert r"\2a" in escape_filter(dn)

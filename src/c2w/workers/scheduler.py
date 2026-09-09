@@ -36,6 +36,7 @@ class Scheduler:
         self._stopping = asyncio.Event()
         self._last_inventory = 0.0
         self._last_retention = 0.0
+        self._last_sms = 0.0
 
     def request_stop(self) -> None:
         self._stopping.set()
@@ -59,6 +60,16 @@ class Scheduler:
         if loop_now - self._last_inventory >= poll:
             self._last_inventory = loop_now
             await self._run_incremental_inventory()
+
+        # Text messages, for organisations that have switched them on. Its own
+        # interval because it is a different API with a different rhythm: a
+        # delivery receipt can arrive hours after the message, so this re-reads
+        # a wide window rather than only asking for what is new.
+        async with platform_session() as session:
+            sms_minutes = await settings_service.get_int(session, "sms.poll_minutes")
+        if loop_now - self._last_sms >= max(60, sms_minutes * 60):
+            self._last_sms = loop_now
+            await _poll_text_messages()
 
         # Retention only gates which discovered recordings become eligible for
         # offload; it never deletes anything at the source.
@@ -234,6 +245,125 @@ class Scheduler:
                         queued=len(pending),
                         offload_after_days=days,
                     )
+
+
+async def _poll_text_messages() -> None:
+    """Fetch sent and received messages for every organisation that wants them.
+
+    Per organisation, because the API key, the stream and the switch are all
+    per-organisation settings -- and because one company's messages must never
+    be written under another's brand id.
+
+    The cursor is stored on the organisation's first CommPeak connection rather
+    than on the settings row: TextPeak is billed per account and an
+    organisation with no PBX connection at all has no messages to fetch, so
+    there is always a connection to hang it on when there is anything to do.
+    """
+    from c2w.commpeak.sms_client import (
+        Direction,
+        SmsApiConfig,
+        SmsQueryFilters,
+        fetch_messages,
+        normalise_message,
+        poll_window,
+        store_messages,
+    )
+
+    async with platform_session() as session:
+        brands = (
+            await session.execute(text("SELECT id, name FROM brands WHERE is_active"))
+        ).all()
+
+    for brand_id, brand_name in brands:
+        async with platform_session() as session:
+            if not await settings_service.get_bool(
+                session, "sms.enabled", brand_id=brand_id
+            ):
+                continue
+            token = await settings_service.get_secret(
+                session, "sms.api_token", brand_id=brand_id
+            )
+            if not token:
+                log.info("sms.skipped", brand_id=brand_id, reason="no api key")
+                continue
+            config = SmsApiConfig(
+                token=token,
+                base_url=await settings_service.get_str(
+                    session, "sms.api_base", brand_id=brand_id
+                ),
+                outgoing_path=await settings_service.get_str(
+                    session, "sms.api_path", brand_id=brand_id
+                ),
+                incoming_path=await settings_service.get_str(
+                    session, "sms.incoming_path", brand_id=brand_id
+                ),
+                stream_id=await settings_service.get_str(
+                    session, "sms.stream_id", brand_id=brand_id
+                ),
+                page_size=await settings_service.get_int(
+                    session, "sms.page_size", brand_id=brand_id
+                ),
+            )
+            overlap = await settings_service.get_int(
+                session, "sms.overlap_hours", brand_id=brand_id
+            )
+            row = (
+                await session.execute(
+                    text(
+                        "SELECT id, last_sms_cursor FROM commpeak_connections "
+                        "WHERE brand_id = :b ORDER BY id LIMIT 1"
+                    ),
+                    {"b": brand_id},
+                )
+            ).first()
+
+        if row is None:
+            log.info("sms.skipped", brand_id=brand_id, reason="no commpeak account")
+            continue
+        connection_id, cursor = row
+        start, end = poll_window(cursor, overlap_hours=overlap)
+        filters = SmsQueryFilters(start=start, end=end)
+
+        rows: list[dict] = []
+        try:
+            for direction in (Direction.OUT, Direction.IN):
+                items = await fetch_messages(config, direction, filters)
+                rows.extend(normalise_message(item, direction) for item in items)
+        except Exception as exc:
+            # A refused key or an unreachable host must not stop the other
+            # organisations, and must not move the cursor -- the window has to
+            # be retried, or those messages are lost for good.
+            log.warning(
+                "sms.poll_failed", brand_id=brand_id, brand=brand_name, error=str(exc)[:200]
+            )
+            continue
+
+        async with platform_session() as session:
+            await session.execute(
+                text("SELECT set_config('c2w.brand_id', :b, true)"), {"b": str(brand_id)}
+            )
+            inserted, updated = await store_messages(
+                session, brand_id, rows, connection_id=connection_id
+            )
+            # Only advanced once the rows are safely stored, so a crash between
+            # the fetch and the write re-reads the same window instead of
+            # skipping it.
+            await session.execute(
+                text(
+                    "UPDATE commpeak_connections SET last_sms_cursor = :c, "
+                    "last_sms_sync_at = now() WHERE id = :i"
+                ),
+                {"c": end, "i": connection_id},
+            )
+            await session.commit()
+        log.info(
+            "sms.polled",
+            brand_id=brand_id,
+            brand=brand_name,
+            fetched=len(rows),
+            inserted=inserted,
+            updated=updated,
+        )
 
 
 @contextlib.asynccontextmanager
