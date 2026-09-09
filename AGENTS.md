@@ -283,7 +283,8 @@ src/c2w/
   db/         base.py session.py models/{core,auth,settings}.py
   sync/       queue.py inventory.py transfer.py
   media/      sdr.py
-  auth/       local.py rbac.py totp.py mfa.py directory.py
+  auth/       local.py rbac.py totp.py mfa.py directory.py oidc.py turnstile.py
+  transcribe/ base.py whisper_local.py service.py
   alerts/     base.py telegram.py slack.py
   api/        app.py deps.py v1/cdrs.py v1/messages.py
   web/        routes.py filters.py templates/ static/
@@ -481,6 +482,65 @@ verifiable without a domain controller. The mock's entries live on the
 *connection's* strategy, not the server's, which is why `search()` takes a
 connection. Not covered, and needing a real controller: TLS negotiation,
 referrals, paging past the size limit.
+
+## Signing in with Microsoft or Google
+
+`c2w.auth.oidc` is the authorization-code flow with PKCE, written out rather
+than handed to a framework helper -- the parts that matter are the checks, and
+a helper that silently skips one is worse than code you can read. On the way
+back, all of these are verified before any claim is trusted: **state** (against
+a signed short-lived cookie), **nonce** (which ties the token to *this*
+attempt), the **PKCE verifier**, the **signature** against the provider's JWKS,
+the **issuer** and **audience** (a valid token minted for another application
+is still not for us), **expiry**, and the **domain allow list** -- because
+"signed in with Google" is not "works for this company".
+
+Two details that will bite anyone editing it:
+
+- **The flow cookie must be `samesite=lax`, never `strict`.** The provider
+  redirects the browser back with a top-level GET, and `strict` withholds the
+  cookie on exactly that request, breaking every sign-in.
+- **`none` is stripped from the accepted algorithm list.** An unsigned token is
+  the whole attack, and a permissive list is how it gets accepted.
+
+`link_federated_user` refuses to attach an external identity to an address
+already held by a **local** account, or by a *different* provider. Either would
+be account takeover by anyone able to create a directory entry.
+
+Tested by minting ID tokens with a locally generated RSA key against a stubbed
+discovery document, so every refusal above is exercised. Not covered, and
+needing a real tenant: the consent screen and whether the registered redirect
+address matches.
+
+`authlib.jose` is deprecated in favour of `joserfc` and stays compatible until
+authlib 2.0; it is the only thing pinning that.
+
+## Transcription
+
+Whisper on this server, via `faster-whisper` (CTranslate2) -- several times
+quicker on CPU for the same model, which matters with no GPU and 19M
+recordings. Local by default on purpose: the alternative is posting recorded
+customer calls to a third party, and that should be a deliberate choice rather
+than an inherited default.
+
+- **Read from the archive, never from CommPeak.** Pulling 13.9 TB through here
+  a second time to transcribe it would double the transfer this system exists
+  to do once. A recording with no `destination_key` is skipped, not fetched
+  from source.
+- **The engine menu offers six and two are built.** Choosing one of the other
+  four raises `EngineUnavailable` with a sentence saying so, once per pass --
+  not silently nothing, and not a failure per recording.
+- **Whisper wants a base language code.** The menu reads "pt-BR — Portuguese
+  (Brazil)" because that is what a person chooses between; Whisper takes "pt"
+  and silently ignores a regional variant, so `_language_code` strips it.
+- **Redaction starts at seven digits.** Six is a date or an amount far more
+  often than an account number, and masking those makes a transcript unreadable
+  for no gain. The last two digits are kept, because "ending 44" is what makes
+  a redacted transcript still findable.
+- Recognition runs in a worker thread: CTranslate2 is CPU-bound C++ and would
+  block the event loop for the length of the recording otherwise.
+- `transcribe.diarize` is in the settings and does nothing yet. faster-whisper
+  does not diarise; doing it properly needs a second model.
 
 ## The auto-sync hook
 

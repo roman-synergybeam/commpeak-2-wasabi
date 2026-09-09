@@ -341,3 +341,9 @@ main > .note p,
   flex-direction:column;gap:6px}
 .checks li{display:flex;align-items:baseline;gap:8px}
 .checks li .det{display:block;margin-top:2px}
+
+/* Sign-in with a provider. Outside the form, because these are links: a
+   non-submit button inside a form is a trap for anyone pressing Enter. */
+.sso{margin-top:18px;text-align:center}
+.sso .hint{margin:0 0 10px}
+.sso .btn{margin:0 4px}

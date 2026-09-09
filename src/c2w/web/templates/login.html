@@ -51,12 +51,20 @@
 
     <button type="submit">Sign in</button>
 
-    {% if sso_enabled %}
-      <p class="hint" style="text-align:center;margin-top:16px">
-        <a href="/auth/entra">Sign in with your organisation account</a>
-      </p>
-    {% endif %}
   </form>
+
+  {# Outside the form: these are links, not submits, and a button inside a
+     form that is not a submit is a trap for anyone pressing Enter. Shown only
+     for providers that are switched on *and* have their client details, since
+     a button that always fails is worse than no button. #}
+  {% if sso_providers %}
+    <div class="sso">
+      <p class="hint">or sign in with</p>
+      {% for p in sso_providers %}
+        <a class="btn ghost" href="/auth/{{ p.key }}/start">{{ p.label }}</a>
+      {% endfor %}
+    </div>
+  {% endif %}
 </main>
 </body>
 </html>

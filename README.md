@@ -62,6 +62,8 @@ All credential settings ship empty, to be filled in by an operator.
 | Turnstile at sign-in | done — enforced, exempt on the LAN, and fails *open* on a Cloudflare outage so a third party cannot lock you out |
 | Text-message polling | done — both TextPeak endpoints on a schedule, per organisation, cursor advanced only after the rows are stored |
 | Cloudflare tunnel | done — `cloudflared` as a user service, token read from the database and passed by environment so it never reaches argv |
+| Microsoft / Google sign-in | done — authorization code with PKCE; state, nonce, signature, issuer, audience, expiry and the domain allow list all verified |
+| Transcription | done — Whisper on this server via faster-whisper, digit redaction, per-organisation settings, on a schedule |
 | Web UI | done — built on the Console UI Kit design system; dashboard, call search, detail + player, messages, sync status, settings, audit, people, account |
 | Alerts | done — Telegram + Slack, per-brand, severity routing, deduplication |
 | Deployment | done — systemd units, nginx, idempotent installer |
@@ -70,17 +72,16 @@ All credential settings ship empty, to be filled in by an operator.
 so nothing has to be migrated when the work happens — but no code runs yet, and
 each setting says so where it could be mistaken for working:
 
-- **Transcription and voice analysis.** `transcripts` and `transcript_segments`
-  exist, partitioned and isolated like everything else, with full-text indexes
-  for English, Spanish and Brazilian Portuguese — the three languages these
-  calls are in. The recogniser adapter is the remaining work; Whisper on this
-  server keeps recordings and transcripts inside your own infrastructure, which
-  is why it is the default in the settings.
-- **Single sign-on** through Microsoft 365 and Google Workspace. Active
-  Directory now works end to end — bind-as authentication with group-to-role
-  mapping applied on every sign-in — but the two OIDC flows are still
-  settings-and-columns only, so an Entra or Google account can be created and
-  cannot yet sign in.
+- **Voice analysis** beyond transcription — sentiment and keyword scoring.
+  The `transcripts` columns for it exist and are not populated. Transcription
+  itself runs.
+- **Speaker separation.** `transcribe.diarize` is offered and does nothing yet:
+  faster-whisper does not diarise, and doing it properly means a second model.
+  Transcripts are stored with segments and timings but a single speaker.
+- **The four remote recognisers** in the engine menu — OpenAI, Azure, Google,
+  AWS. Choosing one says so plainly rather than failing quietly. Whisper on
+  this server is the default because the alternative is posting recorded
+  customer calls to a third party, which is a decision to make on purpose.
 - Microsoft 365 / Google Drive export, FLAC→MP3 transcoding for older browsers,
   and a `connection test` CLI subcommand.
 

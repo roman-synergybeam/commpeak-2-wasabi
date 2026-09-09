@@ -62,13 +62,14 @@ from c2w.api.v1.messages import (
     search_messages,
 )
 from c2w.audit import AdminAction, record_admin_event
-from c2w.auth import directory, mfa, turnstile
+from c2w.auth import directory, mfa, oidc, turnstile
 from c2w.auth.local import (
     AuthError,
     authenticate,
     authenticate_directory,
     create_session,
     hash_password,
+    link_federated_user,
     revoke_all_sessions,
     revoke_session,
 )
@@ -259,7 +260,17 @@ async def login_form(
     if user is not None:
         return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
     no_users = (await session.execute(select(func.count()).select_from(User))).scalar_one() == 0
-    sso = await settings_service.get_bool(session, "auth.oidc_entra_enabled")
+    # Only providers that could actually complete a sign-in. `load_provider`
+    # raises when one is switched off or missing its client details, and a
+    # button that always fails is worse than no button.
+    providers = []
+    for key in ("entra", "google"):
+        try:
+            await oidc.load_provider(session, key)
+        except oidc.OidcError:
+            continue
+        providers.append({"key": key, "label": oidc.PROVIDERS[key].label})
+    sso = bool(providers)
     return templates.TemplateResponse(
         request,
         "login.html",
@@ -267,6 +278,7 @@ async def login_form(
             "request": request,
             "no_users": no_users,
             "sso_enabled": sso,
+            "sso_providers": providers,
             "platform_name": await settings_service.get_str(session, "core.platform_name"),
             "asset_v": _asset_version(),
             "turnstile": await turnstile.load_gate(session, client_ip=client_ip(request)),
@@ -376,6 +388,107 @@ async def login_submit(
     return await _sign_in(
         request, session, user, RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
     )
+
+
+@router.get("/auth/{provider}/start")
+async def oidc_start(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    provider: str,
+) -> Response:
+    """Send the browser to Microsoft or Google to sign in."""
+    try:
+        config = await oidc.load_provider(session, provider)
+        url, cookie = await oidc.authorize_url(config, _oidc_redirect_uri(request, provider))
+    except oidc.OidcError as exc:
+        return RedirectResponse(
+            f"/login?error={quote_plus(str(exc))}", status_code=status.HTTP_303_SEE_OTHER
+        )
+    except Exception as exc:
+        log.warning("oidc.start_failed", provider=provider, error=str(exc)[:200])
+        return RedirectResponse(
+            "/login?error=" + quote_plus("Could not reach that sign-in provider"),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    response = RedirectResponse(url, status_code=status.HTTP_303_SEE_OTHER)
+    response.set_cookie(
+        oidc.COOKIE, cookie, **oidc.flow_cookie_kwargs(secure=request.url.scheme == "https")
+    )
+    return response
+
+
+@router.get("/auth/{provider}/callback")
+async def oidc_callback(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    provider: str,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+) -> Response:
+    """Finish the flow, and sign the person in if everything checks out."""
+
+    def refuse(message: str) -> Response:
+        response = RedirectResponse(
+            f"/login?error={quote_plus(message)}", status_code=status.HTTP_303_SEE_OTHER
+        )
+        # The flow cookie is single-use whatever happens; leaving it would let
+        # a stale state be replayed.
+        response.delete_cookie(oidc.COOKIE, path="/")
+        return response
+
+    if error:
+        # The provider itself refused -- consent declined, account blocked.
+        log.info("oidc.provider_error", provider=provider, error=error)
+        return refuse(error_description or f"{provider} refused the sign-in")
+    if not code or not state:
+        return refuse("That sign-in was incomplete; please start again")
+
+    try:
+        config = await oidc.load_provider(session, provider)
+        identity = await oidc.complete(
+            config,
+            code=code,
+            state=state,
+            cookie=request.cookies.get(oidc.COOKIE) or "",
+        )
+    except oidc.OidcError as exc:
+        return refuse(str(exc))
+    except Exception as exc:
+        log.warning("oidc.callback_failed", provider=provider, error=str(exc)[:200])
+        return refuse("That sign-in could not be completed")
+
+    try:
+        user = await link_federated_user(
+            session,
+            identity_email=identity.email,
+            subject=identity.subject,
+            display_name=identity.name,
+            groups=identity.groups,
+            source=AuthSource.ENTRA if provider == "entra" else AuthSource.GOOGLE,
+        )
+    except AuthError as exc:
+        return refuse(str(exc))
+
+    log.info("oidc.signed_in", provider=provider, user_id=user.id)
+    signed_in = await _sign_in(
+        request, session, user, RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+    )
+    signed_in.delete_cookie(oidc.COOKIE, path="/")
+    return signed_in
+
+
+def _oidc_redirect_uri(request: Request, provider: str) -> str:
+    """The callback address, which must match what is registered at the provider.
+
+    Built from the request rather than from a setting, so it is right on the
+    LAN address, through the tunnel and on localhost without three settings
+    that can disagree. `core.base_url` overrides it when set, because behind a
+    proxy the request's own host can be the internal one.
+    """
+    return f"{str(request.base_url).rstrip('/')}/auth/{provider}/callback"
 
 
 @router.get("/login/code", response_class=HTMLResponse)

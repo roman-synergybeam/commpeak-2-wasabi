@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from c2w.db.models.auth import AuthSource, Role, User, UserBrand, UserSession
 from c2w.db.models.core import Brand
+from c2w.logging import get_logger
 from c2w.settings import settings_service
 
 __all__ = [
@@ -37,12 +38,14 @@ __all__ = [
     "create_super_admin",
     "hash_password",
     "hash_recovery_secret",
+    "link_federated_user",
     "resolve_session",
     "revoke_all_sessions",
     "revoke_session",
     "verify_password",
 ]
 
+log = get_logger(__name__)
 _hasher = PasswordHasher()
 
 MAX_FAILED_LOGINS = 8
@@ -186,6 +189,88 @@ async def authenticate_directory(
     user.role = role
     user.oidc_subject = person.dn
     user.oidc_groups = sorted(groups)
+    user.last_login_at = datetime.now(UTC)
+    user.failed_logins = 0
+    user.locked_until = None
+    await session.flush()
+    return user
+
+
+async def link_federated_user(
+    session: AsyncSession,
+    *,
+    identity_email: str,
+    subject: str,
+    display_name: str = "",
+    groups: list[str] | None = None,
+    source: AuthSource,
+) -> User:
+    """Attach a verified external identity to an account, creating it if needed.
+
+    Called only after the provider's token has been checked -- this function
+    trusts what it is given, which is why nothing but the OIDC callback may
+    call it.
+
+    The two refusals are the ones that would otherwise be account takeover:
+
+    * an address already held by a **local** account is not converted. If it
+      were, anyone able to create a directory entry for an existing address
+      could inherit that account's role and history.
+    * an address held by a *different* provider is not moved either, for the
+      same reason in the other direction.
+
+    The subject is stored on first sign-in and compared afterwards. A provider
+    reissuing a different subject for the same address is a signal worth
+    keeping rather than quietly accepting.
+    """
+    email = identity_email.strip().lower()
+    user = (
+        await session.execute(select(User).where(User.email == email))
+    ).scalar_one_or_none()
+
+    if user is not None and user.auth_source == AuthSource.LOCAL:
+        raise AuthError("this account signs in with a password kept here")
+    if user is not None and user.auth_source != source:
+        raise AuthError("this account signs in through a different provider")
+
+    if user is None:
+        brand_id = (
+            await session.execute(
+                select(Brand.id).where(Brand.is_active).order_by(Brand.id).limit(1)
+            )
+        ).scalar_one_or_none()
+        if brand_id is None:
+            raise AuthError("this system has no organisation to place you in yet")
+        user = User(
+            brand_id=brand_id,
+            email=email,
+            display_name=display_name or email,
+            # Least privilege on first sign-in. Somebody who should be an
+            # admin is made one deliberately, not by arriving first.
+            role=Role.OPERATOR,
+            auth_source=source,
+            password_hash=None,
+            oidc_subject=subject,
+            is_active=True,
+        )
+        session.add(user)
+        await session.flush()
+        session.add(UserBrand(user_id=user.id, brand_id=brand_id, role=Role.OPERATOR))
+    elif user.oidc_subject and user.oidc_subject != subject:
+        log.warning(
+            "auth.subject_changed",
+            email=email,
+            stored=user.oidc_subject[:24],
+            offered=subject[:24],
+        )
+
+    if not user.is_active:
+        raise AuthError("account is disabled")
+
+    user.oidc_subject = subject
+    user.oidc_groups = list(groups or [])
+    if display_name and not user.display_name:
+        user.display_name = display_name
     user.last_login_at = datetime.now(UTC)
     user.failed_logins = 0
     user.locked_until = None
