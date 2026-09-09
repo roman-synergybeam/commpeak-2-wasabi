@@ -565,3 +565,74 @@ class TestOrganisationsAndUsersMovedIntoSettings:
         nav = page.text.split('<nav class="top">', 1)[1].split("</nav>", 1)[0]
         assert "/admin/organisations" not in nav
         assert "/admin/users" not in nav
+
+
+class TestTheProbeCooldown:
+    """Testing an account twice in a row must not reach CommPeak twice.
+
+    CommPeak rate-limits, and its rate-limited 403 is indistinguishable from
+    the 403 an address that is not on the account's access list gets. Eight
+    accounts all showing red is an invitation to click Test repeatedly, and
+    doing so manufactures the exact failure the page is meant to diagnose --
+    that is how an address which had listed a bucket successfully came to be
+    refused for the next hour. So the second click is refused locally.
+    """
+
+    async def test_a_second_probe_within_the_window_sends_nothing(self, db, scenario):
+        from datetime import UTC, datetime
+
+        from c2w.web import accounts
+
+        sent: list[int] = []
+
+        async def _explode(session, conn):
+            sent.append(conn.id)
+            raise AssertionError("the cooldown should have stopped this")
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            conn_id = (
+                await s.execute(
+                    text(
+                        "SELECT id FROM commpeak_connections WHERE brand_id = :b "
+                        "ORDER BY id LIMIT 1"
+                    ),
+                    {"b": scenario["brand_id"]},
+                )
+            ).scalar_one()
+            await s.execute(
+                text(
+                    "UPDATE commpeak_connections SET last_probe_at = :now WHERE id = :i"
+                ),
+                {"now": datetime.now(UTC), "i": conn_id},
+            )
+            await s.commit()
+
+        original = accounts.open_source
+        accounts.open_source = _explode
+        try:
+            async with db() as s:
+                await s.execute(
+                    text("SELECT set_config('c2w.brand_id', :b, false)"),
+                    {"b": str(scenario["brand_id"])},
+                )
+                outcome = await accounts.test_connection(
+                    s, scenario["brand_id"], conn_id
+                )
+        finally:
+            accounts.open_source = original
+
+        assert sent == [], "a request went to CommPeak inside the cooldown"
+        assert not outcome.ok
+        assert "Wait" in outcome.summary
+        # Reported as a note, not as a failure of the account itself.
+        assert outcome.checks[0]["ok"] is None
+
+    async def test_the_window_is_short_enough_to_stay_usable(self):
+        """Long enough to stop a burst, short enough not to be in the way."""
+        from c2w.web.accounts import PROBE_COOLDOWN_SECONDS
+
+        assert 5 <= PROBE_COOLDOWN_SECONDS <= 60

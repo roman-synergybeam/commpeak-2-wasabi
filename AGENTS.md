@@ -443,6 +443,21 @@ An unsigned `curl https://recordings.commpeak.com/` from the host is the fastest
 check: nginx HTML 403 means the address is blocked, and no credential is
 involved.
 
+**Probing in quick succession manufactures the failure it diagnoses.** After
+roughly twenty Test clicks across the eight accounts in half an hour, every
+account began returning nginx 403 from an address that had listed a bucket
+successfully one minute earlier, and stayed refused for over an hour.
+CommPeak rate-limits, and its rate-limited 403 is byte-for-byte the one an
+unlisted address gets -- so a burst does not merely waste requests, it
+destroys the only signal this page has. `test_connection` therefore enforces
+`PROBE_COOLDOWN_SECONDS` using the row's own `last_probe_at`, so the cooldown
+holds across processes and restarts, and the refusal is reported as a note
+saying nothing was sent.
+
+Egress from this host, confirmed twice against independent services and by
+`ip route get`: one interface, `192.168.21.241`, NAT to `145.239.102.215`.
+There is no second public address for an ACL entry to be missing.
+
 There is also an **Access Summary** tab beside the IP ACL one, with a
 downloadable CSV of "IP address, exact time, action, downloaded file path, and
 errors" -- refused attempts appear there, which confirms the address being

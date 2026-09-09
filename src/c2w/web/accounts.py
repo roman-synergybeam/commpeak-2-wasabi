@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -267,6 +267,20 @@ async def delete_connection(
     return name
 
 
+#: How long a probe waits before it will talk to CommPeak about the same
+#: account again.
+#:
+#: Not a nicety. Eight accounts each with a Test button, all of them refusing,
+#: is an invitation to click them repeatedly -- and roughly twenty probes in
+#: half an hour was followed by every account being refused at nginx from an
+#: address that had listed a bucket successfully one minute earlier. CommPeak
+#: rate-limits, and its rate-limited 403 is byte-for-byte the 403 an
+#: unlisted address gets, so tripping it does more than waste a request: it
+#: destroys the diagnosis this page exists to give. Refusing locally is
+#: cheaper than being refused remotely for an hour.
+PROBE_COOLDOWN_SECONDS: Final[int] = 20
+
+
 async def test_connection(
     session: AsyncSession, brand_id: int, connection_id: int
 ) -> ProbeOutcome:
@@ -286,6 +300,30 @@ async def test_connection(
     ).scalar_one_or_none()
     if conn is None:
         raise AccountError("that CommPeak account no longer exists")
+
+    # The last probe's own timestamp is the clock, so the cooldown holds across
+    # processes and restarts rather than only within one worker's memory.
+    if conn.last_probe_at is not None:
+        waited = (datetime.now(UTC) - conn.last_probe_at).total_seconds()
+        if waited < PROBE_COOLDOWN_SECONDS:
+            remaining = int(PROBE_COOLDOWN_SECONDS - waited) + 1
+            return ProbeOutcome(
+                False,
+                f"Tested moments ago. Wait {remaining}s before testing this "
+                f"account again.",
+                [
+                    {
+                        "name": "not tested",
+                        "ok": None,
+                        "detail": "no request was sent to CommPeak",
+                        "hint": "CommPeak rate-limits, and a rate-limited "
+                                "refusal looks exactly like an address that is "
+                                "not on the account's access list -- so testing "
+                                "in quick succession can manufacture the very "
+                                "failure you are trying to diagnose",
+                    }
+                ],
+            )
 
     try:
         client = await open_source(session, conn)
