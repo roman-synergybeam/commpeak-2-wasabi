@@ -570,6 +570,40 @@ a file containing a fake AWS key past its own guard:
   quietly dying again. Fixtures in it are assembled from two halves on purpose
   — as literals they trip the guard and it refuses to commit its own tests.
 
+## The settings rail holds two things that are not settings
+
+`Organisations` and `Users` were pages of their own in the top menu and are now
+sections of `/admin/settings`. Both are configuration by any reading -- an
+organisation is the thing every other setting hangs off, and who may sign in
+belongs beside the sign-in sources it depends on -- and the top menu is for
+what an operator does daily.
+
+They are not `SettingSpec` categories, so three things had to be arranged and
+must stay arranged:
+
+- **Each keeps its own permission.** `_SECTION_PERMISSION` maps the section to
+  `brands.manage` and `users.manage`, and `_settings_sections` drops a section
+  the role lacks. The settings page itself only requires `settings.view`, so
+  without that map, moving these pages in would have handed every organisation
+  admin the platform-wide organisations view. A section the role may not see is
+  absent from `by_slug` and so falls back to the checklist, which is also the
+  right answer for a link pasted by somebody with more access. Nobody is locked
+  out by the move: `ADMIN` holds everything except `brands.manage`, so anyone
+  who could manage users could already view settings.
+- **The pane branches before the settings card.** `categories[active_section]`
+  raises a `KeyError` for a section with no specs, so `settings.html` renders
+  `_organisations.html` / `_users.html` and returns rather than falling through
+  to `_settings_card.html`.
+- **The old addresses stay, as 303s.** About a dozen POST handlers redirect to
+  `/admin/users?saved=…` afterwards, and `_moved_to` forwards those to the
+  section with the message intact. Forwarding from one place beats editing a
+  dozen and missing one. In-app links (`_MANAGE_LINKS`, the setup checklist,
+  the back-link on `/admin/users/<email>`) point at the section directly, so
+  only outside links pay for the hop.
+
+`/admin/users/<email>` is still a page in its own right. Editing one person is
+not a settings pane.
+
 ## Out of scope for v1
 
 Voice transcription and analysis, FXRide CRM, Zendesk. Do not build these; do

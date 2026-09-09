@@ -99,7 +99,9 @@ class TestStaticScripts:
 class TestRenderedInlineScripts:
     """The templates that carry inline script, rendered and parsed."""
 
-    @pytest.mark.parametrize("template", ["base.html", "users.html"])
+    # `_users.html` rather than a page: the users view is a section of the
+    # settings rail now, so its type-ahead script lives in the partial.
+    @pytest.mark.parametrize("template", ["base.html", "_users.html"])
     def test_parses(self, template: str) -> None:
         html = _env().get_template(template).render(**_context())
         blocks = _inline_scripts(html)

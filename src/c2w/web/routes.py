@@ -37,7 +37,6 @@ from c2w.api.deps import (
     ScopedSession,
     active_brand_id,
     client_ip,
-    current_user,
     effective_role,
     get_session,
     optional_user,
@@ -1342,7 +1341,9 @@ _LOCKED_SETTINGS = frozenset({"source.read_only", "retention.allow_source_deleti
 _MANAGE_LINKS = {
     "CommPeak calls": ("/admin/connections", "Manage CommPeak accounts"),
     "Wasabi storage": ("/admin/storage", "Manage archive storage"),
-    "Two-factor and passwords": ("/admin/users", "Manage users"),
+    # A section of this same page now, so the link goes straight there
+    # instead of out to the old address and back through its redirect.
+    "Two-factor and passwords": ("/admin/settings?section=users", "Manage users"),
 }
 
 
@@ -1440,7 +1441,7 @@ async def _setup_steps(session: AsyncSession, brand: Brand | None) -> list[dict[
             "detail": f"{users} account(s)",
             "done": users > 1,
             "optional": True,
-            "href": "/admin/users",
+            "href": "/admin/settings?section=users",
             "action": "Manage",
         },
     ]
@@ -1465,11 +1466,26 @@ async def _setup_steps(session: AsyncSession, brand: Brand | None) -> list[dict[
 #: needs doing" is the question a half-configured install raises.
 SETUP_SECTION = "Setup"
 
+#: Two more sections that are not settings categories either: they were pages
+#: of their own in the main menu, and both are configuration by any reading --
+#: an organisation is the thing every other setting hangs off, and who may
+#: sign in belongs beside the sign-in sources it depends on. Each one is
+#: guarded by its own permission rather than by `settings.view`, so the rail
+#: shows an organisation admin the users section and not the organisations one.
+ORGANISATIONS_SECTION = "Organisations"
+USERS_SECTION = "Users"
+
+#: What a section needs beyond `settings.view` to appear in the rail at all.
+_SECTION_PERMISSION: Final[dict[str, Permission]] = {
+    ORGANISATIONS_SECTION: Permission.BRANDS_MANAGE,
+    USERS_SECTION: Permission.USERS_MANAGE,
+}
+
 _SETTING_GROUPS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
     # "Your company" belongs here rather than off in a technical group: the
     # name, the time zone and where recordings may live are the first things
     # anyone sets, and the checklist points at them.
-    ("Getting started", (SETUP_SECTION, "Your company")),
+    ("Getting started", (SETUP_SECTION, "Your company", ORGANISATIONS_SECTION)),
     (
         "Calls and messages",
         (
@@ -1481,13 +1497,14 @@ _SETTING_GROUPS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
     ),
     ("Archive", ("Wasabi storage", "Copying to the archive", "Retention")),
     (
-        "People and sign-in",
+        "Users and sign-in",
         (
             "Two-factor and passwords",
             "Web address and sessions",
             "Active Directory",
             "Microsoft 365",
             "Google Workspace",
+            USERS_SECTION,
         ),
     ),
     ("Alerts and schedules", ("Alerts", "Scheduling")),
@@ -1505,13 +1522,20 @@ def _section_slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
-def _settings_sections(categories: dict[str, Any]) -> list[dict[str, Any]]:
+def _settings_sections(
+    categories: dict[str, Any], permissions: frozenset[Permission]
+) -> list[dict[str, Any]]:
     """The rail: groups, each with its sections and their setting counts.
 
     Built from ``_SETTING_GROUPS`` but reconciled against the registry, so a
     category added to `settings_spec` without being placed in a group still
     appears -- at the end, under "Other". A new setting silently missing from
     the UI is worse than one filed untidily.
+
+    Sections in ``_SECTION_PERMISSION`` are dropped for anyone without that
+    permission. They are the two that were pages of their own, and each is
+    still guarded by the permission its old page checked -- moving a page into
+    this rail must not widen who can reach it.
     """
     placed = {name for _, names in _SETTING_GROUPS for name in names}
     groups: list[dict[str, Any]] = []
@@ -1522,7 +1546,11 @@ def _settings_sections(categories: dict[str, Any]) -> list[dict[str, Any]]:
         # remembering to write `group["items"]` in every template.
         sections = []
         for name in names:
-            if name != SETUP_SECTION and name not in categories:
+            needed = _SECTION_PERMISSION.get(name)
+            if needed is not None:
+                if needed not in permissions:
+                    continue
+            elif name != SETUP_SECTION and name not in categories:
                 continue
             sections.append(
                 {
@@ -1567,16 +1595,19 @@ async def admin_settings(
     the requested section is built now, so the page is also a great deal
     smaller.
     """
-    if Permission.SETTINGS_VIEW not in permissions_for(user.role):
+    permissions = permissions_for(user.role)
+    if Permission.SETTINGS_VIEW not in permissions:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not view settings")
 
     all_categories = specs_by_category()
-    groups = _settings_sections(all_categories)
+    groups = _settings_sections(all_categories, permissions)
     by_slug = {
         s["slug"]: s["name"] for group in groups for s in group["sections"]
     }
     # An unknown or absent section lands on the checklist rather than 404ing:
-    # a stale bookmark should show you something useful.
+    # a stale bookmark should show you something useful. A section the role may
+    # not see is absent from `by_slug` and so lands there too, which is the
+    # right answer for a link passed on by somebody with more access.
     active_section = by_slug.get(str(section or ""), SETUP_SECTION)
 
     values = await settings_service.all_effective(session, brand_id=brand_id)
@@ -1636,8 +1667,17 @@ async def admin_settings(
                 if active_section == "CommPeak calls"
                 else await _archive_section_context(session, tested_id=probe_id)
                 if active_section == "Wasabi storage"
+                # These two were pages of their own. Their context builders are
+                # unchanged and still used by the pages that replaced them, so
+                # what the pane renders cannot drift from what they served.
+                else await _organisations_pane(session)
+                if active_section == ORGANISATIONS_SECTION
+                else await _users_pane(request, session, user, error=error, saved=saved)
+                if active_section == USERS_SECTION
                 else {}
             ),
+            organisations_section=ORGANISATIONS_SECTION,
+            users_section=USERS_SECTION,
             section_tests=tests_for(active_section),
             test_result=_SECTION_TESTS.pop(f"{user.id}:{tested}", None) if tested else None,
             saved=saved,
@@ -1940,25 +1980,39 @@ async def audit_page(
     )
 
 
-@router.get("/admin/users", response_class=HTMLResponse)
+@router.get("/admin/users")
 async def admin_users(
-    request: Request,
     user: CurrentUser,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    _guard: Annotated[User, Depends(current_user)],
     error: str | None = None,
     saved: str | None = None,
 ) -> Response:
+    """Moved into the settings rail; kept as a redirect.
+
+    Who may sign in is configuration, so it sits with the sign-in sources it
+    depends on rather than beside them in the main menu. This stays because
+    every one of the dozen POST handlers below redirects here afterwards, and
+    because the address has been handed round -- one place to forward from is
+    better than a dozen places to edit and one to forget.
+    """
     if Permission.USERS_MANAGE not in permissions_for(user.role):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not manage users")
-    return templates.TemplateResponse(
-        request,
-        "users.html",
-        await _users_context(request, session, user, error=error, saved=saved),
+    return RedirectResponse(
+        _moved_to(USERS_SECTION, saved=saved, error=error),
+        status_code=status.HTTP_303_SEE_OTHER,
     )
 
 
-async def _users_context(
+def _moved_to(section: str, *, saved: str | None, error: str | None) -> str:
+    """The settings address for a section that used to be a page."""
+    params = {"section": _section_slug(section)}
+    if saved:
+        params["saved"] = saved
+    if error:
+        params["error"] = error
+    return f"/admin/settings?{urlencode(params)}"
+
+
+async def _users_pane(
     request: Request,
     session: AsyncSession,
     user: User,
@@ -1966,7 +2020,11 @@ async def _users_context(
     error: str | None = None,
     saved: str | None = None,
 ) -> dict[str, Any]:
-    """The users page: the list, plus everything the add form has to offer."""
+    """The users pane: the list, plus everything the add form has to offer.
+
+    Returns the pane's own context and not a rendered shell, because it is now
+    one section of the settings page rather than a page of its own.
+    """
     stmt = select(User).order_by(User.email)
     if not user.is_super_admin:
         stmt = stmt.where(User.brand_id == user.brand_id)
@@ -2016,20 +2074,18 @@ async def _users_context(
         for uid, role, brand_name in rows:
             memberships.setdefault(uid, []).append({"brand": brand_name, "role": Role(role)})
 
-    return await _shell(
-        request,
-        session,
-        user,
-        "users",
-        users=users,
-        user_brands=brands,
-        assignable_roles=assignable,
-        memberships=memberships,
-        directory=directory,
-        min_password_length=await settings_service.get_int(session, "auth.password_min_length"),
-        users_error=error,
-        users_saved=saved,
-    )
+    return {
+        "users": users,
+        "user_brands": brands,
+        "assignable_roles": assignable,
+        "memberships": memberships,
+        "directory": directory,
+        "min_password_length": await settings_service.get_int(
+            session, "auth.password_min_length"
+        ),
+        "users_error": error,
+        "users_saved": saved,
+    }
 
 
 async def _audit_scope(request: Request, session: AsyncSession, user: User) -> int | None:
@@ -2930,26 +2986,37 @@ def _slugify(value: str) -> str:
     return slug[:60] or "org"
 
 
-@router.get("/admin/organisations", response_class=HTMLResponse)
+@router.get("/admin/organisations")
 async def admin_organisations(
-    request: Request,
     user: CurrentUser,
-    session: Annotated[AsyncSession, Depends(get_session)],
     error: str | None = None,
     saved: str | None = None,
 ) -> Response:
-    """The companies this platform holds recordings for, and their PBX domains.
+    """Moved into the settings rail; kept as a redirect.
 
-    Creating one used to be `c2w-admin brand add` and nothing else, so the one
-    thing you cannot do without -- an organisation to put anything in -- was
-    the one thing the console could not do.
+    An organisation is the top-level thing every other setting hangs off, so
+    it belongs with the settings rather than beside them in the main menu.
+    The address stays because the create/rename/tenant handlers all redirect
+    here afterwards.
     """
     if Permission.BRANDS_MANAGE not in permissions_for(user.role):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "only a platform administrator can manage organisations",
         )
+    return RedirectResponse(
+        _moved_to(ORGANISATIONS_SECTION, saved=saved, error=error),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
+
+async def _organisations_pane(session: AsyncSession) -> dict[str, Any]:
+    """The organisations pane: each company, its PBXes and what it holds.
+
+    Creating one used to be `c2w-admin brand add` and nothing else, so the one
+    thing you cannot do without -- an organisation to put anything in -- was
+    the one thing the console could not do.
+    """
     brands = (await session.execute(select(Brand).order_by(Brand.name))).scalars().all()
     counts = (
         await session.execute(
@@ -2980,22 +3047,12 @@ async def admin_organisations(
     for row in tenants:
         by_brand.setdefault(row["brand_id"], []).append(dict(row))
 
-    return templates.TemplateResponse(
-        request,
-        "organisations.html",
-        await _shell(
-            request,
-            session,
-            user,
-            "organisations",
-            organisations=brands,
-            counts={row["id"]: dict(row) for row in counts},
-            tenants=by_brand,
-            timezone_choices=SETTINGS["org.timezone"].choices,
-            org_error=error,
-            org_saved=saved,
-        ),
-    )
+    return {
+        "organisations": brands,
+        "counts": {row["id"]: dict(row) for row in counts},
+        "tenants": by_brand,
+        "timezone_choices": SETTINGS["org.timezone"].choices,
+    }
 
 
 @router.post("/admin/organisations")

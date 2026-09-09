@@ -1,8 +1,11 @@
-{% extends "base.html" %}
-{% block title %}Organisations — c2w{% endblock %}
-{% block body %}
+{# The organisations, and the forms to create and change one.
 
-<h1>Organisations</h1>
+   Rendered inside the settings rail rather than as a page of its own: an
+   organisation is the top-level thing every other setting hangs off, so it
+   belongs with the settings and not beside them in the main menu.
+
+   The heading is the pane's, so the per-organisation headings below are one
+   level down from it. #}
 <p class="sub">
   The companies this platform holds recordings for. Their data never mixes:
   each has its own encryption key, its own storage and its own people.
@@ -12,7 +15,7 @@
 {% if org_saved %}<div class="flash ok">Saved {{ org_saved }}.</div>{% endif %}
 
 {% for org in organisations %}
-  <h2>{{ org.name }}</h2>
+  <h3>{{ org.name }}</h3>
   <div class="card">
     <div class="stats">
       <div>
@@ -119,7 +122,7 @@
   </div>
 {% endfor %}
 
-<h2>Add an organisation</h2>
+<h3>Add an organisation</h3>
 <form class="card" method="post" action="/admin/organisations">
   <div class="row">
     <div>
@@ -164,4 +167,3 @@
      company really has to go, that is a deliberate job for the command line
      with a backup taken first.</p>
 </div>
-{% endblock %}

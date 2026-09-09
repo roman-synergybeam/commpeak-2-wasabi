@@ -1,14 +1,17 @@
-{% extends "base.html" %}
-{% block title %}People — c2w{% endblock %}
-{% block body %}
+{# The users list, the add form and the directory type-ahead.
 
-<h1>Users</h1>
+   Rendered inside the settings rail rather than as a page of its own -- who
+   may sign in is configuration, and it sits with the sign-in sources it
+   depends on. `/admin/users/<email>` is still a page in its own right,
+   because editing one person is not a settings pane.
+
+   The heading is the pane's, so the headings below are one level down. #}
 <p class="sub">Who can sign in, and what each role may do.</p>
 
 {% if users_error %}<div class="flash err">{{ users_error }}</div>{% endif %}
 {% if users_saved %}<div class="flash ok">{{ users_saved }}</div>{% endif %}
 
-<h2>Add a user</h2>
+<h3>Add a user</h3>
 
 {% if directory.any %}
   <div class="note">
@@ -153,7 +156,7 @@
   <div class="actions"><button type="submit">Add user</button></div>
 </form>
 
-<h2>All users</h2>
+<h3>All users</h3>
 <div class="tw stack">
   <table>
     <thead>
@@ -258,4 +261,3 @@
     });
   })();
 </script>
-{% endblock %}

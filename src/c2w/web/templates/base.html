@@ -76,17 +76,14 @@
     {% endif %}
     <a href="/sync" class="{{ 'on' if nav == 'sync' }}">Sync</a>
     {% if 'storage.view' in permissions %}
-      {% if 'brands.manage' in permissions %}
-        <a href="/admin/organisations" class="{{ 'on' if nav == 'organisations' }}">Organisations</a>
-      {% endif %}
       <a href="/admin/connections" class="{{ 'on' if nav == 'connections' }}">CommPeak</a>
       <a href="/admin/storage" class="{{ 'on' if nav == 'storage' }}">Archive</a>
     {% endif %}
+    {# Organisations and Users are sections of the settings rail, not menu
+       entries of their own: both are configuration, and the top menu is for
+       the things an operator does daily. #}
     {% if 'settings.view' in permissions %}
       <a href="/admin/settings" class="{{ 'on' if nav == 'settings' }}">Settings</a>
-    {% endif %}
-    {% if 'users.manage' in permissions %}
-      <a href="/admin/users" class="{{ 'on' if nav == 'users' }}">Users</a>
     {% endif %}
     {% if 'audit.view' in permissions %}
       <a href="/audit" class="{{ 'on' if nav == 'audit' }}">Audit</a>

@@ -337,14 +337,18 @@ class TestPermissions:
         groups it would become unreachable from the UI while still existing in
         the registry, and nothing else would notice.
         """
+        from c2w.auth.rbac import permissions_for
+        from c2w.db.models.auth import Role
         from c2w.settings_spec import specs_by_category
         from c2w.web.routes import _section_slug, _settings_sections
 
         await _login(app_client, scenario["admin_email"], scenario["password"])
         categories = specs_by_category()
+        # As a platform administrator, so the two permission-gated sections are
+        # included and the assertion below still covers every category.
         reachable = {
             item["name"]
-            for group in _settings_sections(categories)
+            for group in _settings_sections(categories, permissions_for(Role.SUPER_ADMIN))
             for item in group["sections"]
         }
         assert set(categories) <= reachable, set(categories) - reachable
@@ -460,3 +464,104 @@ class TestOps:
         response = await app_client.get("/api/metrics")
         assert response.status_code == 200
         assert "python_gc_objects_collected_total" in response.text
+
+
+class TestOrganisationsAndUsersMovedIntoSettings:
+    """Both were pages in the top menu and are now sections of the rail.
+
+    The move is only correct if it changed where they are and nothing else --
+    in particular not who can reach them. `/admin/organisations` was guarded
+    by `brands.manage` and `/admin/users` by `users.manage`, and the settings
+    page is guarded by `settings.view`, so rendering them inside it is a
+    chance to widen access by accident.
+    """
+
+    async def test_both_sections_are_in_the_rail_for_a_platform_admin(
+        self, app_client, scenario
+    ):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/admin/settings")
+        assert page.status_code == 200
+        assert "/admin/settings?section=organisations" in page.text
+        assert "/admin/settings?section=users" in page.text
+
+    async def test_the_organisations_pane_renders_its_own_content(
+        self, app_client, scenario
+    ):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/admin/settings?section=organisations")
+        assert page.status_code == 200
+        # The create form, and no settings card -- this section has no specs.
+        assert 'action="/admin/organisations"' in page.text
+        assert 'action="/admin/settings">' not in page.text
+
+    async def test_the_users_pane_renders_its_own_content(self, app_client, scenario):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/admin/settings?section=users")
+        assert page.status_code == 200
+        assert 'action="/admin/users"' in page.text
+        assert scenario["agent_email"] in page.text
+
+    async def test_the_old_addresses_forward_to_the_sections(
+        self, app_client, scenario
+    ):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        for old, slug in (
+            ("/admin/organisations", "organisations"),
+            ("/admin/users", "users"),
+        ):
+            moved = await app_client.get(old, follow_redirects=False)
+            assert moved.status_code == 303, old
+            assert moved.headers["location"] == f"/admin/settings?section={slug}"
+
+    async def test_a_saved_message_survives_the_forward(self, app_client, scenario):
+        """The dozen POST handlers still redirect to the old address."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        moved = await app_client.get(
+            "/admin/users?saved=someone%40example.com", follow_redirects=False
+        )
+        assert moved.status_code == 303
+        assert "saved=someone%40example.com" in moved.headers["location"]
+        assert "section=users" in moved.headers["location"]
+
+    async def test_an_organisation_admin_sees_users_but_not_organisations(
+        self, app_client, scenario, db
+    ):
+        """`brands.manage` is the platform administrator's alone.
+
+        An organisation admin has every other permission, so this is the one
+        section the rail must leave out for them -- and asking for it directly
+        must not render it either.
+        """
+        email = f"orgadmin-{uuid.uuid4().hex[:8]}@example.com"
+        async with db() as s:
+            s.add(
+                User(
+                    brand_id=scenario["brand_id"],
+                    email=email,
+                    display_name="Org admin",
+                    role=Role.ADMIN,
+                    auth_source=AuthSource.LOCAL,
+                    password_hash=hash_password("a-long-enough-password"),
+                )
+            )
+            await s.commit()
+
+        await _login(app_client, email, "a-long-enough-password")
+        rail = await app_client.get("/admin/settings")
+        assert "/admin/settings?section=users" in rail.text
+        assert "/admin/settings?section=organisations" not in rail.text
+
+        # Asked for by name, it falls back to the checklist rather than
+        # rendering a pane this role may not see.
+        direct = await app_client.get("/admin/settings?section=organisations")
+        assert direct.status_code == 200
+        assert 'action="/admin/organisations"' not in direct.text
+        assert 'class="steps"' in direct.text
+
+    async def test_neither_is_in_the_top_menu_any_more(self, app_client, scenario):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/admin/settings")
+        nav = page.text.split('<nav class="top">', 1)[1].split("</nav>", 1)[0]
+        assert "/admin/organisations" not in nav
+        assert "/admin/users" not in nav
