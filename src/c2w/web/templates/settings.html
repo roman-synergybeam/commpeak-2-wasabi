@@ -116,7 +116,7 @@
                      placeholder="{{ secret_tails.get(spec.key) or 'not set' }}">
             {% elif spec.type == 'json' %}
               <input id="f-{{ spec.key }}" name="set:{{ spec.key }}" class="mono"
-                     value="{{ values[spec.key] | tojson }}">
+                     value="{{ values[spec.key] | json_attr }}">
             {% else %}
               <input id="f-{{ spec.key }}" name="set:{{ spec.key }}"
                      value="{{ values[spec.key] }}"

@@ -144,3 +144,53 @@
   .account{position:absolute;top:8px;right:14px}
   .account-panel{width:min(290px,calc(100vw - 28px));right:0}
 }
+
+/* Range input ------------------------------------------------------------
+   Styled rather than left native because the browser default paints its fill
+   up to the *centre* of the thumb, so a slider sitting at its maximum still
+   showed a sliver of empty track and read as "not quite all the way". The
+   fill is a gradient driven by --fill, which player.js sets from the value,
+   so maximum means a full track. */
+input[type="range"]{-webkit-appearance:none;appearance:none;width:100%;height:20px;
+  margin:2px 0;background:transparent;cursor:pointer}
+input[type="range"]::-webkit-slider-runnable-track{height:6px;border-radius:999px;
+  background:linear-gradient(to right,var(--accent) 0 var(--fill,100%),
+                             var(--rule) var(--fill,100%) 100%)}
+input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
+  width:16px;height:16px;margin-top:-5px;border-radius:50%;background:var(--accent);
+  border:2px solid var(--surface);box-shadow:0 0 0 1px var(--rule)}
+input[type="range"]::-moz-range-track{height:6px;border-radius:999px;background:var(--rule)}
+input[type="range"]::-moz-range-progress{height:6px;border-radius:999px;background:var(--accent)}
+input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;
+  background:var(--accent);border:2px solid var(--surface)}
+input[type="range"]:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+
+/* The scale under a slider: where the ends are, and where "unchanged" sits. */
+.scale{display:flex;justify-content:space-between;margin-top:2px;
+  font:600 10px var(--mono);letter-spacing:.06em;color:var(--ink-3)}
+.scale .mid{color:var(--accent)}
+
+/* A row's own actions -----------------------------------------------------
+   Several small forms in one cell: each is a POST, because a link that
+   changes state is a link a crawler or a prefetch can fire. */
+.rowacts{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}
+.rowacts form{margin:0}
+
+/* Authenticator enrolment -------------------------------------------------
+   The QR is drawn in currentColor so it inverts with the theme; the box round
+   it is what keeps the quiet zone intact against a tinted surface. */
+.qr{display:inline-block;padding:12px;border:1px solid var(--rule);
+  border-radius:8px;background:var(--surface);color:var(--ink);line-height:0}
+.qr svg{width:200px;height:200px;display:block}
+.enrol{display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start}
+.enrol>div{min-width:0}
+.secret{font:600 15px var(--mono);letter-spacing:.06em;word-break:break-all;
+  padding:10px 12px;border:1px solid var(--rule);border-radius:6px;
+  background:var(--surface-2)}
+.codes{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
+  gap:8px;margin:14px 0}
+.codes li{list-style:none;font:600 14px var(--mono);letter-spacing:.04em;
+  padding:8px 10px;border:1px solid var(--rule);border-radius:6px;
+  background:var(--surface-2);text-align:center}
+.code-input{font:600 20px var(--mono);letter-spacing:.35em;text-align:center;
+  max-width:200px}

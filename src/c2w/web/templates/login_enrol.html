@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Set up two-factor — c2w</title>
+  <link rel="stylesheet" href="/static/ui-kit/kit.css">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<main class="measured" style="padding-top:48px">
+  <div class="login-card">
+    <h1>Set up an authenticator</h1>
+    <p class="sub">
+      Required for {{ email }} before you can sign in. Your password was
+      accepted; this is the second step.
+    </p>
+
+    {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+
+    {% include "_enrol_fields.html" %}
+
+    <form method="post" action="/login/enrol" style="margin-top:20px">
+      <label for="code">Enter the code it shows now</label>
+      <input id="code" name="code" class="code-input" inputmode="numeric"
+             autocomplete="one-time-code" pattern="[0-9 ]*" maxlength="9"
+             required autofocus>
+      <button type="submit">Confirm and sign in</button>
+    </form>
+    <p class="hint" style="margin-top:16px"><a href="/login">Start again</a></p>
+  </div>
+</main>
+</body>
+</html>

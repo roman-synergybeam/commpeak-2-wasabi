@@ -44,14 +44,21 @@
       <p class="hint">Scales the whole console, tables included.</p>
     </div>
     <div>
-      <label for="volume">Playback volume ({{ prefs.volume or 100 }}%)</label>
-      <input id="volume" name="volume" type="range" min="0" max="100" step="5"
+      <label for="volume">Playback volume
+        &mdash; <span id="vol-now">{{ prefs.volume or 100 }}%</span></label>
+      {# Up to 200%, because 100% is the recording's own level and these
+         recordings are quiet: narrowband, and often a speakerphone across a
+         room. Anything above 100% is amplified in the browser. #}
+      <input id="volume" name="volume" type="range" min="0" max="200" step="5"
              value="{{ prefs.volume or 100 }}"
              oninput="document.getElementById('vol-now').textContent = this.value + '%'">
+      <div class="scale" aria-hidden="true">
+        <span>silent</span><span class="mid">100% as recorded</span><span>200%</span>
+      </div>
       <p class="hint">
-        Where every recording starts. <span id="vol-now">{{ prefs.volume or 100 }}%</span>
-        &mdash; phone recordings are often quiet, so a higher default saves
-        reaching for the slider on every call.
+        Where every recording starts, applied as you drag. Above 100% the
+        browser amplifies, which is what quiet calls usually need &mdash; loud
+        ones will clip, so turn it down for those.
       </p>
     </div>
   </div>
@@ -88,20 +95,73 @@
   </form>
 
   <h2 id="twofactor">Two-factor</h2>
-  <div class="card">
-    <div class="note caution">
-      <h3>Not built yet</h3>
-      <p>There is no authenticator enrolment here, and none can be faked: the
-         secret belongs to whoever will hold it. Until it is built, the way to
-         require a second factor is to sign in through Microsoft, Google or your
-         directory, which already enforces whatever your organisation has set.</p>
+  {% if user.totp_active %}
+    <div class="card">
+      <p><span class="pill ok">on</span>
+         An authenticator code is asked for every time you sign in.</p>
+      <p class="hint">
+        {{ recovery_left }} recovery code{{ '' if recovery_left == 1 else 's' }}
+        left. Each works once, and only if your authenticator is unavailable.
+        {% if recovery_left == 0 %}
+          There are none left &mdash; issue a new set before you need one.
+        {% endif %}
+      </p>
+      <div class="actions">
+        <form method="post" action="/me/2fa/recovery">
+          <button type="submit" class="btn ghost">Issue new recovery codes</button>
+        </form>
+      </div>
     </div>
-    <p class="hint" style="margin-top:14px">
-      Configure single sign-on under Settings. Once staff use it, turn off
-      <em>Allow email and password sign-in</em> &mdash; the platform administrator
-      keeps it either way, as a way back in if single sign-on breaks.
-    </p>
-  </div>
+
+    <div class="card">
+      <h3>Turn it off</h3>
+      <p class="hint">
+        Your password is needed, so a session left open on an unlocked machine
+        cannot remove the thing protecting it.
+      </p>
+      <form method="post" action="/me/2fa/disable">
+        <div class="row">
+          <div>
+            <label for="off-password">Your password</label>
+            <input id="off-password" name="password" type="password" required
+                   class="mono" autocomplete="current-password">
+          </div>
+        </div>
+        <div class="actions"><button type="submit" class="btn danger">Turn off two-factor</button></div>
+      </form>
+    </div>
+  {% elif user.totp_secret_sealed %}
+    <div class="card">
+      <p><span class="pill warn">half set up</span>
+         A secret has been generated but never confirmed with a working code, so
+         it is not being asked for. Finish it, or throw it away.</p>
+      <div class="actions">
+        <a class="btn" href="/me/2fa">Finish setting up</a>
+        <form method="post" action="/me/2fa/cancel">
+          <button type="submit" class="btn ghost">Throw it away</button>
+        </form>
+      </div>
+    </div>
+  {% else %}
+    <div class="card">
+      <p><span class="pill idle">off</span>
+         Sign-in asks only for your password.
+         {% if mfa_required %}
+           Your organisation requires an authenticator, so this will be asked
+           for the next time you sign in.
+         {% endif %}
+      </p>
+      <p class="hint">
+        You will need an authenticator app &mdash; Microsoft Authenticator, Google
+        Authenticator, 1Password, Bitwarden or any other that reads a QR code.
+      </p>
+      <div class="actions">
+        <form method="post" action="/me/2fa/start">
+          <button type="submit">Set up an authenticator</button>
+        </form>
+      </div>
+    </div>
+  {% endif %}
 {% else %}
   <h2 id="password">Password and two-factor</h2>
   <div class="card">

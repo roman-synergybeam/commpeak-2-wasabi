@@ -29,9 +29,13 @@ from c2w.db.session import get_sessionmaker
 
 SESSION_COOKIE = "c2w_session"
 BRAND_COOKIE = "c2w_brand"
+#: The half-login held between the password step and the code step. Short
+#: lived, and never a substitute for SESSION_COOKIE.
+MFA_COOKIE = "c2w_mfa"
 
 __all__ = [
     "BRAND_COOKIE",
+    "MFA_COOKIE",
     "SESSION_COOKIE",
     "CurrentUser",
     "ScopedSession",

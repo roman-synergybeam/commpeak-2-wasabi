@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Enter your code — c2w</title>
+  <link rel="stylesheet" href="/static/ui-kit/kit.css">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<main class="narrow">
+  <form class="login-card" method="post" action="/login/code">
+    <h1>Enter your code</h1>
+    <p class="sub">Signing in as {{ email }}.</p>
+
+    {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+
+    <label for="code">Six-digit code</label>
+    <input id="code" name="code" class="code-input" inputmode="numeric"
+           autocomplete="one-time-code" pattern="[0-9 ]*" maxlength="9"
+           required autofocus>
+    <p class="hint" style="margin-top:10px">
+      From your authenticator app. A recovery code works here too, once each
+      &mdash; using one signs you out everywhere else.
+    </p>
+
+    <button type="submit">Continue</button>
+    <p class="hint" style="margin-top:16px">
+      <a href="/login">Start again</a>
+    </p>
+  </form>
+</main>
+</body>
+</html>

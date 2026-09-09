@@ -111,9 +111,29 @@ class User(Base, IdMixin, TimestampMixin):
     failed_logins: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    #: Authenticator-app second factor. The secret is sealed under the master
+    #: key rather than a brand data key, because the platform administrator
+    #: belongs to no brand. See :mod:`c2w.auth.totp`.
+    totp_secret_sealed: Mapped[str | None] = mapped_column(Text)
+    #: NULL means a secret has been generated but never confirmed with a
+    #: working code. An unconfirmed secret must never be demanded at login, or
+    #: an abandoned enrolment locks the account out.
+    totp_enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Newest time step already accepted, so one code cannot be used twice.
+    totp_last_counter: Mapped[int | None] = mapped_column(BigInteger)
+    #: Argon2 hashes of single-use recovery codes, consumed as they are used.
+    totp_recovery_hashes: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+
     @property
     def is_super_admin(self) -> bool:
         return self.role == Role.SUPER_ADMIN
+
+    @property
+    def totp_active(self) -> bool:
+        """Enrolled *and* confirmed -- the only state that may be enforced."""
+        return bool(self.totp_secret_sealed) and self.totp_enrolled_at is not None
 
 
 class UserBrand(Base):

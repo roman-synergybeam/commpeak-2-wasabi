@@ -1,0 +1,18 @@
+{# The enrolment pair, shared by the account page and the forced-enrolment
+   page at sign-in so the two cannot drift apart. #}
+<div class="enrol">
+  <div>
+    <div class="qr">{{ enrolment.qr_svg | safe }}</div>
+  </div>
+  <div style="flex:1 1 260px">
+    <p><strong>1.</strong> Scan this with your authenticator app.</p>
+    <p><strong>2.</strong> Or, if you cannot point a camera at this screen,
+       type this key in by hand:</p>
+    <p class="secret">{{ enrolment.typed_secret }}</p>
+    <p class="hint">
+      Time-based, six digits, thirty seconds &mdash; the defaults in every app.
+      If codes are rejected, check the clock on your phone: a phone more than a
+      minute out will produce codes this will not accept.
+    </p>
+  </div>
+</div>

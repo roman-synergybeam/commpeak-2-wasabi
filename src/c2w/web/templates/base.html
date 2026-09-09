@@ -1,5 +1,8 @@
 <!doctype html>
-<html lang="en">
+{# data-volume carries the account's playback preference to player.js, which
+   applies it to every <audio> on the page. It sat unused in the database until
+   that module existed. #}
+<html lang="en" data-volume="{{ prefs.volume | default(100) }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -30,6 +33,7 @@
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/vendor/htmx.min.js" defer></script>
   <script src="/static/vendor/alpine.min.js" defer></script>
+  <script src="/static/player.js" defer></script>
 </head>
 <body>
 

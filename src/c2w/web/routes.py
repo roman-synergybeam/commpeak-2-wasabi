@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from c2w.api.deps import (
     BRAND_COOKIE,
+    MFA_COOKIE,
     SESSION_COOKIE,
     CurrentUser,
     ScopedSession,
@@ -50,10 +51,18 @@ from c2w.api.v1.cdrs import (
     get_recording,
     search_cdrs,
 )
-from c2w.auth.local import AuthError, authenticate, create_session, revoke_session
+from c2w.auth import mfa
+from c2w.auth.local import (
+    AuthError,
+    authenticate,
+    create_session,
+    hash_password,
+    revoke_all_sessions,
+    revoke_session,
+)
 from c2w.auth.rbac import Permission, permissions_for
 from c2w.crypto import CryptoError
-from c2w.db.models.auth import AuthSource, User
+from c2w.db.models.auth import AuthSource, Role, User, UserBrand
 from c2w.db.models.core import Brand, CommPeakConnection, StorageDestination, Tenant
 from c2w.logging import get_logger
 from c2w.settings import SettingsError, settings_service
@@ -150,28 +159,22 @@ async def login_form(
     )
 
 
-@router.post("/login")
-async def login_submit(
+async def _sign_in(
     request: Request,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    email: Annotated[str, Form()],
-    password: Annotated[str, Form()],
+    session: AsyncSession,
+    user: User,
+    response: Response,
 ) -> Response:
-    try:
-        user = await authenticate(session, email, password)
-    except AuthError as exc:
-        log.info("login.failed", email=email[:64], reason=str(exc))
-        return templates.TemplateResponse(
-            request,
-            "login.html",
-            {"request": request, "error": str(exc)},
-            status_code=status.HTTP_401_UNAUTHORIZED,
-        )
+    """Attach a real session to ``response``.
 
+    Split out because sign-in now finishes in three places -- straight from the
+    password, after a code, and after a forced enrolment -- and a cookie that
+    is set with different flags depending on which path you came in by is a
+    security bug waiting to happen.
+    """
     token, _ = await create_session(
         session, user, ip=client_ip(request), user_agent=request.headers.get("user-agent")
     )
-    response = RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
     # httponly so JavaScript cannot read it; samesite=lax so it survives a
     # normal navigation but not a cross-site POST.
     response.set_cookie(
@@ -190,8 +193,158 @@ async def login_submit(
         initial_brand = brands[0].id if brands else None
     if initial_brand:
         response.set_cookie(BRAND_COOKIE, str(initial_brand), samesite="lax")
+    response.delete_cookie(MFA_COOKIE)
     log.info("login.ok", user_id=user.id, role=str(user.role))
     return response
+
+
+def _set_ticket(response: Response, request: Request, user: User) -> Response:
+    """Hand the browser a half-login while the second factor is collected.
+
+    A ticket rather than a session: a session that exists before the code has
+    been checked is a session that works, which would make the second step
+    decorative.
+    """
+    response.set_cookie(
+        MFA_COOKIE,
+        mfa.issue_ticket(user),
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+        max_age=mfa.TICKET_MAX_AGE_SECONDS,
+    )
+    return response
+
+
+async def _ticket_user(request: Request, session: AsyncSession) -> User | None:
+    """The half-logged-in user, or None if the ticket is missing or stale."""
+    user_id = mfa.read_ticket(request.cookies.get(MFA_COOKIE) or "")
+    if user_id is None:
+        return None
+    user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if user is None or not user.is_active:
+        return None
+    return user
+
+
+@router.post("/login")
+async def login_submit(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    email: Annotated[str, Form()],
+    password: Annotated[str, Form()],
+) -> Response:
+    try:
+        user = await authenticate(session, email, password)
+    except AuthError as exc:
+        log.info("login.failed", email=email[:64], reason=str(exc))
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"request": request, "error": str(exc)},
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    # The password was right, which is not the same as being signed in.
+    if await mfa.second_factor_required(session, user):
+        where = "/login/code" if user.totp_active else "/login/enrol"
+        log.info("login.second_factor", user_id=user.id, step=where)
+        return _set_ticket(
+            RedirectResponse(where, status_code=status.HTTP_303_SEE_OTHER), request, user
+        )
+
+    return await _sign_in(
+        request, session, user, RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+    )
+
+
+@router.get("/login/code", response_class=HTMLResponse)
+async def login_code_form(
+    request: Request, session: Annotated[AsyncSession, Depends(get_session)]
+) -> Response:
+    user = await _ticket_user(request, session)
+    if user is None:
+        return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    return templates.TemplateResponse(
+        request, "login_code.html", {"request": request, "email": user.email}
+    )
+
+
+@router.post("/login/code")
+async def login_code_submit(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    code: Annotated[str, Form()],
+) -> Response:
+    user = await _ticket_user(request, session)
+    if user is None:
+        return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    try:
+        await mfa.check_second_factor(session, user, code)
+    except AuthError as exc:
+        log.info("login.code_failed", user_id=user.id, reason=str(exc))
+        return templates.TemplateResponse(
+            request,
+            "login_code.html",
+            {"request": request, "email": user.email, "error": str(exc)},
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+    return await _sign_in(
+        request, session, user, RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+    )
+
+
+@router.get("/login/enrol", response_class=HTMLResponse)
+async def login_enrol_form(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    error: str | None = None,
+) -> Response:
+    """Forced enrolment: an authenticator is required and this account has none.
+
+    Reached only with a valid ticket, so the password has already been checked
+    and no session exists yet -- the account cannot be used until the factor it
+    is required to have actually works.
+    """
+    user = await _ticket_user(request, session)
+    if user is None:
+        return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    try:
+        enrolment = await mfa.begin_enrolment(session, user)
+    except AuthError as exc:
+        return templates.TemplateResponse(
+            request, "login.html", {"request": request, "error": str(exc)},
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    return templates.TemplateResponse(
+        request,
+        "login_enrol.html",
+        {"request": request, "email": user.email, "enrolment": enrolment, "error": error},
+    )
+
+
+@router.post("/login/enrol")
+async def login_enrol_submit(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    code: Annotated[str, Form()],
+) -> Response:
+    user = await _ticket_user(request, session)
+    if user is None:
+        return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    try:
+        codes = await mfa.confirm_enrolment(session, user, code)
+    except AuthError as exc:
+        return RedirectResponse(
+            f"/login/enrol?error={quote_plus(str(exc))}", status_code=status.HTTP_303_SEE_OTHER
+        )
+    # Signed in and shown the recovery codes on the same response: they exist
+    # exactly once, and bouncing through a redirect would lose them.
+    page = templates.TemplateResponse(
+        request, "recovery_codes.html",
+        {"request": request, "codes": codes, "next_url": "/", "standalone": True},
+    )
+    return await _sign_in(request, session, user, page)
 
 
 @router.get("/logout")
@@ -816,6 +969,9 @@ _CATEGORY_NOTES = {
     "it has PBXes and dialers -- each with its own bucket and its own "
     "credentials, added on the CommPeak page. What follows is shared by all of "
     "them.",
+    "CommPeak SMS": "Text messages sent and received through CommPeak TextPeak, "
+    "listed beside the calls. This is a separate API and a separate key from "
+    "call records -- one does not imply the other.",
     "Wasabi (archive)": "An organisation can have as many Wasabi accounts and "
     "buckets as it needs; they are added on the Archive page, each with its own "
     "keys. What follows applies to all of them.",
@@ -844,6 +1000,8 @@ _WIDE_FIELDS = frozenset(
         "org.data_region_note",
         "commpeak.s3_endpoint",
         "commpeak.cdr_api_base",
+        "sms.api_base",
+        "sms.api_path",
         "auth.entra_redirect_note",
         "auth.entra_allowed_domains",
         "auth.google_allowed_domains",
@@ -1132,17 +1290,293 @@ async def admin_users(
     user: CurrentUser,
     session: Annotated[AsyncSession, Depends(get_session)],
     _guard: Annotated[User, Depends(current_user)],
+    error: str | None = None,
+    saved: str | None = None,
 ) -> Response:
     if Permission.USERS_MANAGE not in permissions_for(user.role):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not manage users")
+    return templates.TemplateResponse(
+        request,
+        "users.html",
+        await _users_context(request, session, user, error=error, saved=saved),
+    )
+
+
+async def _users_context(
+    request: Request,
+    session: AsyncSession,
+    user: User,
+    *,
+    error: str | None = None,
+    saved: str | None = None,
+) -> dict[str, Any]:
+    """The people page: the list, plus everything the add form has to offer."""
     stmt = select(User).order_by(User.email)
     if not user.is_super_admin:
         stmt = stmt.where(User.brand_id == user.brand_id)
-    users = (await session.execute(stmt)).scalars().all()
-    return templates.TemplateResponse(
-        request, "users.html", await _shell(request, session, user, "users", users=users)
+    users = list((await session.execute(stmt)).scalars().all())
+
+    # Which organisations this administrator may place someone into. A platform
+    # admin sees all of them; an organisation admin can only ever add people to
+    # their own, which is the isolation rule showing up in the UI.
+    brands = await selectable_brands(session, user)
+
+    # Roles this administrator may hand out. Only a platform admin can create
+    # another platform admin -- otherwise an organisation admin could promote
+    # themselves out of their own organisation, and the boundary would be
+    # advisory.
+    assignable = [Role.ADMIN, Role.OPERATOR]
+    if user.is_super_admin:
+        assignable = [Role.SUPER_ADMIN, *assignable]
+
+    directory = {
+        "entra": await settings_service.get_bool(session, "auth.oidc_entra_enabled"),
+        "google": await settings_service.get_bool(session, "auth.oidc_google_enabled"),
+        "ldap": await settings_service.get_bool(session, "ldap.enabled"),
+    }
+    directory["any"] = any(directory.values())
+
+    memberships: dict[int, list[Any]] = {}
+    if users:
+        rows = (
+            await session.execute(
+                select(UserBrand.user_id, UserBrand.role, Brand.name)
+                .join(Brand, Brand.id == UserBrand.brand_id)
+                .where(UserBrand.user_id.in_([u.id for u in users]))
+                .order_by(Brand.name)
+            )
+        ).all()
+        for uid, role, brand_name in rows:
+            memberships.setdefault(uid, []).append({"brand": brand_name, "role": Role(role)})
+
+    return await _shell(
+        request,
+        session,
+        user,
+        "users",
+        users=users,
+        user_brands=brands,
+        assignable_roles=assignable,
+        memberships=memberships,
+        directory=directory,
+        min_password_length=await settings_service.get_int(session, "auth.password_min_length"),
+        users_error=error,
+        users_saved=saved,
     )
 
+
+def _assert_may_manage(actor: User) -> None:
+    if Permission.USERS_MANAGE not in permissions_for(actor.role):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not manage users")
+
+
+def _assert_may_assign(actor: User, role: Role, brand_id: int | None) -> None:
+    """Guard the two escalations this form could otherwise allow.
+
+    Both are the same mistake -- trusting a value that arrived in a POST body
+    because the page that renders the form only offered safe ones. The form is
+    not the control.
+    """
+    if role == Role.SUPER_ADMIN and not actor.is_super_admin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "only a platform administrator can create another platform administrator",
+        )
+    if not actor.is_super_admin and brand_id != actor.brand_id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "you can only add people to your own organisation"
+        )
+
+
+@router.post("/admin/users")
+async def add_user(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    """Create an account.
+
+    There was no way to do this from the console at all -- the page listed
+    people and offered nothing else, so the only route in was the CLI.
+    """
+    _assert_may_manage(user)
+    form = await request.form()
+
+    email = str(form.get("email") or "").strip().lower()
+    display_name = str(form.get("display_name") or "").strip() or None
+    role_raw = str(form.get("role") or "")
+    source_raw = str(form.get("auth_source") or "LOCAL")
+    brand_raw = str(form.get("brand_id") or "")
+    password = str(form.get("password") or "")
+    again = str(form.get("password_again") or "")
+
+    def back(message: str) -> Response:
+        return RedirectResponse(
+            f"/admin/users?error={quote_plus(message)}", status_code=status.HTTP_303_SEE_OTHER
+        )
+
+    if "@" not in email or len(email) < 3:
+        return back("That does not look like an email address")
+    try:
+        role = Role(role_raw)
+    except ValueError:
+        return back("Choose a role")
+    try:
+        source = AuthSource(source_raw)
+    except ValueError:
+        return back("Choose how this person signs in")
+
+    # A platform admin spans every organisation and so belongs to none; any
+    # other role must land somewhere.
+    brand_id: int | None = None
+    if role != Role.SUPER_ADMIN:
+        if not brand_raw:
+            return back("Choose an organisation")
+        brand_id = int(brand_raw)
+        allowed = {b.id for b in await selectable_brands(session, user)}
+        if brand_id not in allowed:
+            return back("That is not an organisation you can add people to")
+
+    _assert_may_assign(user, role, brand_id)
+
+    existing = (
+        await session.execute(select(User).where(User.email == email))
+    ).scalar_one_or_none()
+    if existing is not None:
+        return back(f"{email} already has an account")
+
+    password_hash = None
+    if source == AuthSource.LOCAL:
+        if password != again:
+            return back("The two passwords do not match")
+        try:
+            password_hash = hash_password(password)
+        except AuthError as exc:
+            return back(str(exc))
+
+    row = User(
+        brand_id=brand_id,
+        email=email,
+        display_name=display_name or email,
+        role=role,
+        auth_source=source,
+        password_hash=password_hash,
+        # A password an administrator typed is a password an administrator
+        # knows, so it is a one-time value and must be replaced on first use.
+        must_change_password=source == AuthSource.LOCAL,
+        is_active=True,
+    )
+    session.add(row)
+    await session.flush()
+    if brand_id is not None:
+        session.add(UserBrand(user_id=row.id, brand_id=brand_id, role=role))
+        await session.flush()
+
+    log.info(
+        "users.created", actor_id=user.id, user_id=row.id, role=str(role), source=str(source)
+    )
+    return RedirectResponse(
+        f"/admin/users?saved={quote_plus(email)}", status_code=status.HTTP_303_SEE_OTHER
+    )
+
+
+@router.post("/admin/users/{user_id}/active")
+async def set_user_active(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user_id: int,
+) -> Response:
+    """Enable or disable an account.
+
+    Disabling revokes every session, so it takes effect on the next request
+    rather than whenever a cookie would have expired -- the reason sessions are
+    rows here in the first place.
+    """
+    _assert_may_manage(user)
+    form = await request.form()
+    active = str(form.get("active") or "") == "1"
+
+    row = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such person")
+    if not user.is_super_admin and row.brand_id != user.brand_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not someone in your organisation")
+    if row.id == user.id:
+        return RedirectResponse(
+            "/admin/users?error=You+cannot+disable+your+own+account",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    if row.is_super_admin and not user.is_super_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "only a platform administrator can")
+
+    # The last platform admin standing must not be switched off: there would be
+    # nobody left who can switch anyone back on.
+    if row.is_super_admin and not active:
+        remaining = (
+            await session.execute(
+                select(func.count())
+                .select_from(User)
+                .where(
+                    User.role == Role.SUPER_ADMIN,
+                    User.is_active.is_(True),
+                    User.id != row.id,
+                )
+            )
+        ).scalar_one()
+        if remaining == 0:
+            return RedirectResponse(
+                "/admin/users?error=" + quote_plus(
+                    "That is the only active platform administrator -- add another first"
+                ),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+    row.is_active = active
+    if not active:
+        await revoke_all_sessions(session, row.id)
+    await session.flush()
+    log.info("users.active", actor_id=user.id, user_id=row.id, active=active)
+    return RedirectResponse("/admin/users", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/admin/users/{user_id}/2fa/reset")
+async def reset_user_2fa(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user_id: int,
+) -> Response:
+    """Clear someone's second factor after a lost phone.
+
+    Platform administrators only, and never on yourself -- clearing your own
+    from a live session would make the factor optional for the one account that
+    most needs it.
+    """
+    _assert_may_manage(user)
+    row = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such person")
+    if not mfa.can_reset_for(user, row):
+        return RedirectResponse(
+            "/admin/users?error=" + quote_plus(
+                "Only a platform administrator can clear someone else's second factor, "
+                "and not their own"
+            ),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    row.totp_secret_sealed = None
+    row.totp_enrolled_at = None
+    row.totp_last_counter = None
+    row.totp_recovery_hashes = []
+    await revoke_all_sessions(session, row.id)
+    await session.flush()
+    log.info("mfa.reset_by_admin", actor_id=user.id, user_id=row.id)
+    return RedirectResponse(
+        "/admin/users?saved=" + quote_plus(f"second factor cleared for {row.email}"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 # ------------------------------------------------------------------ my account
@@ -1173,6 +1607,8 @@ async def my_account(
             font_choices=(("90", "Smaller"), ("100", "Default"), ("110", "Larger"),
                           ("125", "Largest")),
             theme_choices=(("auto", "Match the system"), ("light", "Light"), ("dark", "Dark")),
+            recovery_left=len(user.totp_recovery_hashes or []),
+            mfa_required=await settings_service.get_bool(session, "mfa.require_totp"),
             saved=saved,
             error=error,
         ),
@@ -1206,7 +1642,9 @@ async def save_appearance(
         volume = int(str(form.get("volume") or 100))
     except ValueError:
         volume = 100
-    prefs["volume"] = min(max(volume, 0), 100)
+    # 200 rather than 100: above the recording's own level player.js amplifies
+    # through a gain node, which is what quiet call audio needs.
+    prefs["volume"] = min(max(volume, 0), 200)
 
     row = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
     row.preferences = prefs
@@ -1227,12 +1665,7 @@ async def change_my_password(
     because a stolen cookie must not outlive the credential it was issued
     against.
     """
-    from c2w.auth.local import (
-        AuthError,
-        hash_password,
-        revoke_all_sessions,
-        verify_password,
-    )
+    from c2w.auth.local import verify_password
 
     if user.auth_source != AuthSource.LOCAL:
         return RedirectResponse(
@@ -1268,6 +1701,142 @@ async def change_my_password(
     response = RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
     response.delete_cookie(SESSION_COOKIE)
     return response
+
+
+# ------------------------------------------------------- my second factor
+
+
+@router.post("/me/2fa/start")
+async def start_my_2fa(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    row = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+    try:
+        await mfa.begin_enrolment(session, row)
+    except AuthError as exc:
+        return RedirectResponse(
+            f"/me?error={quote_plus(str(exc))}", status_code=status.HTTP_303_SEE_OTHER
+        )
+    return RedirectResponse("/me/2fa", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.get("/me/2fa", response_class=HTMLResponse)
+async def my_2fa_setup(
+    request: Request,
+    user: CurrentUser,
+    session: ScopedSession,
+    error: str | None = None,
+) -> Response:
+    """Show the QR code for a pending enrolment.
+
+    The secret is read back out of the row rather than kept in memory between
+    requests, so reloading this page shows the same code instead of quietly
+    invalidating the one already scanned.
+    """
+    row = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+    if row.totp_active:
+        return RedirectResponse("/me#twofactor", status_code=status.HTTP_303_SEE_OTHER)
+    if not row.totp_secret_sealed:
+        return RedirectResponse("/me#twofactor", status_code=status.HTTP_303_SEE_OTHER)
+
+    from c2w.auth import totp as _totp
+    from c2w.crypto import open_global
+
+    secret = open_global(row.totp_secret_sealed, aad=f"totp:{row.id}")
+    issuer = str(await settings_service.get(session, "mfa.issuer_name") or "c2w")
+    uri = _totp.provisioning_uri(secret, account=row.email, issuer=issuer)
+    enrolment = mfa.Enrolment(
+        secret=secret,
+        typed_secret=_totp.format_secret(secret),
+        uri=uri,
+        qr_svg=_totp.qr_svg(uri),
+    )
+    return templates.TemplateResponse(
+        request,
+        "me_2fa.html",
+        await _shell(request, session, user, "me", enrolment=enrolment, error=error),
+    )
+
+
+@router.post("/me/2fa/confirm")
+async def confirm_my_2fa(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    code: Annotated[str, Form()],
+) -> Response:
+    row = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+    try:
+        codes = await mfa.confirm_enrolment(session, row, code)
+    except AuthError as exc:
+        return RedirectResponse(
+            f"/me/2fa?error={quote_plus(str(exc))}", status_code=status.HTTP_303_SEE_OTHER
+        )
+    # Rendered rather than redirected: these exist once and a redirect drops them.
+    return templates.TemplateResponse(
+        request, "recovery_codes.html",
+        {"request": request, "codes": codes, "next_url": "/me#twofactor", "standalone": True},
+    )
+
+
+@router.post("/me/2fa/cancel")
+async def cancel_my_2fa(
+    user: CurrentUser, session: Annotated[AsyncSession, Depends(get_session)]
+) -> Response:
+    row = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+    try:
+        await mfa.cancel_enrolment(session, row)
+    except AuthError as exc:
+        return RedirectResponse(
+            f"/me?error={quote_plus(str(exc))}", status_code=status.HTTP_303_SEE_OTHER
+        )
+    return RedirectResponse("/me#twofactor", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/me/2fa/disable")
+async def disable_my_2fa(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    password: Annotated[str, Form()],
+) -> Response:
+    row = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+    try:
+        await mfa.disable(session, row, password)
+    except AuthError as exc:
+        return RedirectResponse(
+            f"/me?error={quote_plus(str(exc))}", status_code=status.HTTP_303_SEE_OTHER
+        )
+    log.info("mfa.disabled", user_id=row.id)
+    return RedirectResponse("/me?saved=2fa-off#twofactor", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/me/2fa/recovery")
+async def regenerate_my_recovery(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    """Replace the recovery codes.
+
+    Only ever replaces the whole set: the old list cannot be shown again
+    (only hashes are kept), so "how many are left" is the one question this
+    page can answer, and "issue me a fresh set" the one action.
+    """
+    from c2w.auth import totp as _totp
+
+    row = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+    if not row.totp_active:
+        return RedirectResponse("/me#twofactor", status_code=status.HTTP_303_SEE_OTHER)
+    codes = _totp.new_recovery_codes()
+    row.totp_recovery_hashes = [_totp.hash_recovery_code(c) for c in codes]
+    await session.flush()
+    return templates.TemplateResponse(
+        request, "recovery_codes.html",
+        {"request": request, "codes": codes, "next_url": "/me#twofactor", "standalone": True},
+    )
 
 
 # ----------------------------------------------------------------------- media

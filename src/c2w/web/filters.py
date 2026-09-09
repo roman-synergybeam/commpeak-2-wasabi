@@ -23,6 +23,7 @@ import json
 from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, urlencode
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from markupsafe import Markup
 
@@ -314,14 +315,72 @@ def _initials(user: Any) -> str:
 
 
 def _zone_label(zone: Any) -> str:
-    """A short label for the clock: the city, not the whole path.
+    """The clock's offset from UTC, as an operator would say it.
 
-    "Puerto_Rico" beside a clock is noise; "PUERTO RICO" is a place. The full
-    name stays in the element's title for anyone who needs to check it.
+    This used to print the last path segment, so the header read "PUERTO RICO"
+    beside the time -- which tells you the database row but not the thing you
+    actually want from a clock, and reads as a place nobody here is in. The
+    zone is configured as "GMT-4" in everyone's head, so the label says
+    "GMT-4"; the IANA name stays in the element's title for anyone checking.
+
+    Computed rather than hardcoded, because a zone that observes DST is a
+    different offset in July than in January.
     """
-    text_ = str(zone or "UTC")
-    tail = text_.rsplit("/", 1)[-1]
-    return tail.replace("_", " ").upper()
+    name = str(zone or "UTC")
+    try:
+        offset = datetime.now(ZoneInfo(name)).utcoffset()
+    except (ZoneInfoNotFoundError, ValueError):
+        return name.rsplit("/", 1)[-1].replace("_", " ")
+    if offset is None:
+        return "UTC"
+
+    total = int(offset.total_seconds())
+    if total == 0:
+        return "UTC"
+    sign = "+" if total > 0 else "-"
+    hours, minutes = divmod(abs(total) // 60, 60)
+    return f"GMT{sign}{hours}" if minutes == 0 else f"GMT{sign}{hours}:{minutes:02d}"
+
+
+#: The kit's rule is that a machine value gets a human label. These are the
+#: two enums the people page renders, and "SUPER_ADMIN" is not a job title.
+_ROLE_LABEL = {
+    "SUPER_ADMIN": "platform admin",
+    "ADMIN": "admin",
+    "OPERATOR": "operator",
+}
+_AUTH_LABEL = {
+    "LOCAL": "password kept here",
+    "ENTRA": "Microsoft Entra ID",
+    "GOOGLE": "Google Workspace",
+}
+
+
+def _role_label(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return _ROLE_LABEL.get(str(raw), str(raw).replace("_", " ").lower())
+
+
+def _auth_label(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return _AUTH_LABEL.get(str(raw), str(raw).replace("_", " ").lower())
+
+
+def _json_attr(value: Any) -> str:
+    """JSON for an HTML *attribute*, left as plain text so Jinja escapes it.
+
+    Deliberately not :func:`markupsafe`-marked. Jinja's own ``tojson`` escapes
+    ``<``, ``>``, ``&`` and ``'`` but not ``"``, which is right inside a
+    ``<script>`` and broken inside ``value="..."`` -- the first quote of the
+    JSON would close the attribute. Here autoescaping does the quoting.
+
+    ``tojson`` itself is left alone: it used to be overridden with a bare
+    ``json.dumps``, whose output autoescaping then turned into ``&#34;`` inside
+    a ``<script>``. That is a JavaScript syntax error, and it took the whole
+    block with it -- the header clock stopped at ``--:--:--`` and the account
+    menu stopped closing, from one filter registration.
+    """
+    return json.dumps(value)
 
 
 def register(env: Any) -> None:
@@ -352,8 +411,10 @@ def register(env: Any) -> None:
             "chiplink": _chiplink,
             "initials": _initials,
             "zone_label": _zone_label,
+            "json_attr": _json_attr,
+            "role_label": _role_label,
+            "auth_label": _auth_label,
             "audit_state": _audit_state,
             "audit_search": _audit_search,
-            "tojson": json.dumps,
         }
     )

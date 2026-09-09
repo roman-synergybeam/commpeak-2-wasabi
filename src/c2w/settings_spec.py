@@ -653,32 +653,38 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         default="",
         category="CommPeak (source)",
         label="Call records address",
-        description="Where the list of calls is fetched from, usually this "
-        "organisation's CommPeak domain. Without it recordings are still "
-        "archived, but with no call details attached. If its accounts sit on "
-        "different domains, set this on each account instead.",
+        validator=_http_url,
+        description="Your PBX Stats instance, which is where the list of calls "
+        "comes from. It is per-account, not one shared address, and looks like "
+        "https://yourname.stats.pbx.commpeak.com \u2014 the name is the one in "
+        "your CommPeak console. Without it recordings are still archived, just "
+        "with no call details attached.",
+        help_url="https://docs.commpeak.com/reference/pbx-stats-api",
+        help_label="CommPeak: the PBX Stats API",
         brand_overridable=True,
     ),
     SettingSpec(
         key="commpeak.cdr_api_path",
-        choices=('/api/v1/cdrs', '/api/cdrs', '/rest/cdrs'),
+        choices=('/api/cdrs',),
         type=SettingType.STRING,
-        default="/api/v1/cdrs",
+        default="/api/cdrs",
         category="CommPeak (source)",
         label="Call records path",
-        description="The part of the address that returns the list of calls. Ask "
-        "CommPeak support if you are unsure.",
+        description="The part of the address that returns calls. There is only "
+        "one, and it is filled in already; it is here so a change at CommPeak's "
+        "end does not need a new release.",
         brand_overridable=True,
     ),
     SettingSpec(
         key="commpeak.cdr_auth_scheme",
         type=SettingType.STRING,
-        default="bearer",
+        default="header",
         category="CommPeak (source)",
         label="How to authenticate",
-        description="How the token below is presented. Bearer is the most common. "
-        "Basic uses the user name as well.",
-        choices=("bearer", "header", "basic", "query", "none"),
+        description="PBX Stats wants the key on its own in an Authorization "
+        "header, which is the first option and the right one. The others exist "
+        "only for an account that has been set up differently.",
+        choices=("header", "bearer", "basic", "query", "none"),
         brand_overridable=True,
     ),
     SettingSpec(
@@ -687,7 +693,8 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         default="",
         category="CommPeak (source)",
         label="Call records user name",
-        description="Only needed when authentication is set to Basic.",
+        description="Only needed when authentication is set to Basic. Leave "
+        "empty otherwise.",
         brand_overridable=True,
     ),
     SettingSpec(
@@ -695,10 +702,152 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         type=SettingType.SECRET,
         default="",
         category="CommPeak (source)",
-        label="Call records token",
-        description="The API key or password for the call records address. "
-        "Encrypted before it is stored and never shown again.",
+        label="Call records API key",
+        description="The API key from your CommPeak console. Encrypted before "
+        "it is stored and never shown again.",
+        help_url="https://docs.commpeak.com/reference/pbx-stats-api",
+        help_label="Where to find it",
         sensitive=True,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="commpeak.cdr_page_size",
+        choices=('100', '250', '500', '1000'),
+        type=SettingType.INT,
+        default=500,
+        category="CommPeak (source)",
+        label="Calls fetched per request",
+        description="How many calls to ask for at a time. Larger is fewer "
+        "requests but a longer wait for each one.",
+        unit="calls",
+        validator=_positive,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="commpeak.cdr_poll_minutes",
+        choices=('1', '5', '10', '15', '30', '60'),
+        type=SettingType.INT,
+        default=15,
+        category="CommPeak (source)",
+        label="Check for new calls every",
+        description="How often to ask for calls that have finished since the "
+        "last check.",
+        unit="minutes",
+        validator=_positive,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="commpeak.cdr_overlap_minutes",
+        choices=('0', '5', '15', '30', '60', '180'),
+        type=SettingType.INT,
+        default=30,
+        category="CommPeak (source)",
+        label="Re-check the last",
+        description="Each check goes back this far beyond where the last one "
+        "ended. A call is written to CommPeak's records when it finishes, not "
+        "when it started, so a long call can appear behind one already seen \u2014 "
+        "without this overlap those are missed for good.",
+        unit="minutes",
+        validator=_non_negative,
+        brand_overridable=True,
+    ),
+    # -- CommPeak SMS (TextPeak) -------------------------------------------
+    SettingSpec(
+        key="sms.enabled",
+        type=SettingType.BOOL,
+        default=False,
+        category="CommPeak SMS",
+        label="Collect text messages",
+        description="Fetch sent and received messages from CommPeak TextPeak "
+        "and list them alongside calls. Off until an API key is set below.",
+        help_url="https://docs.commpeak.com/reference/textpeak-api",
+        help_label="CommPeak: the TextPeak API",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="sms.api_base",
+        choices=('https://gw.commpeak.com',),
+        type=SettingType.STRING,
+        default="https://gw.commpeak.com",
+        category="CommPeak SMS",
+        label="Messages address",
+        validator=_http_url,
+        description="Where messages are read from. Unlike call records this is "
+        "one shared address for every account, so it is filled in already.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="sms.api_path",
+        choices=('/textpeak/streams/messages',),
+        type=SettingType.STRING,
+        default="/textpeak/streams/messages",
+        category="CommPeak SMS",
+        label="Messages path",
+        description="The part of the address that returns messages.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="sms.api_token",
+        type=SettingType.SECRET,
+        default="",
+        category="CommPeak SMS",
+        label="Messages API key",
+        description="Your TextPeak API key, sent in an Authorization header. "
+        "Encrypted before it is stored and never shown again. This is a "
+        "different key from the one for call records.",
+        sensitive=True,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="sms.stream_id",
+        type=SettingType.STRING,
+        default="",
+        category="CommPeak SMS",
+        label="Only this stream",
+        description="A TextPeak stream id, if this organisation should see one "
+        "stream rather than every message on the account. Leave empty for all "
+        "of them.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="sms.page_size",
+        choices=('50', '100', '250', '500'),
+        type=SettingType.INT,
+        default=100,
+        category="CommPeak SMS",
+        label="Messages fetched per request",
+        description="How many messages to ask for at a time. Larger is fewer "
+        "requests; TextPeak refuses very large pages, so 100 is a safe middle.",
+        unit="messages",
+        validator=_positive,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="sms.poll_minutes",
+        choices=('5', '10', '15', '30', '60'),
+        type=SettingType.INT,
+        default=15,
+        category="CommPeak SMS",
+        label="Check for new messages every",
+        description="How often to ask for messages that have arrived or changed "
+        "since the last check.",
+        unit="minutes",
+        validator=_positive,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="sms.overlap_hours",
+        choices=('1', '6', '12', '24', '72'),
+        type=SettingType.INT,
+        default=24,
+        category="CommPeak SMS",
+        label="Re-check the last",
+        description="Each check re-reads this far back, because delivery "
+        "receipts arrive long after the message was sent \u2014 a message seen as "
+        "\u201csent\u201d becomes \u201cdelivered\u201d hours later, and without this it would "
+        "stay wrong for ever.",
+        unit="hours",
+        validator=_positive,
         brand_overridable=True,
     ),
     SettingSpec(
@@ -1040,9 +1189,14 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         default=False,
         category="Two-factor and passwords",
         label="Require an authenticator app",
-        description="Not yet enforced -- the enrolment flow is still to be built, "
-        "so switching this on does nothing today. Single sign-on already carries "
-        "whatever second factor your directory requires.",
+        description="Everyone signing in with a password kept here must set up "
+        "an authenticator, and is walked through it at their next sign-in "
+        "before they can go any further. People who sign in through Microsoft, "
+        "Google or your directory are unaffected -- that system already carries "
+        "whatever second factor you have set there. Anyone who has turned it on "
+        "for themselves keeps being asked either way.",
+        help_url="https://datatracker.ietf.org/doc/html/rfc6238",
+        help_label="How time-based codes work (RFC 6238)",
     ),
     SettingSpec(
         key="mfa.issuer_name",

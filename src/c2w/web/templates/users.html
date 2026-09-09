@@ -6,35 +6,198 @@
 <h1>People</h1>
 <p class="sub">Who can sign in, and what each role may do.</p>
 
-<div class="note">
-  <h3>Signing in</h3>
-  <p>Email and password accounts are in use now. Once Microsoft Entra ID or Google
-     Workspace is configured, switch off <em>Allow email and password sign-in</em>
-     in Settings &mdash; the main administrator keeps it either way, as a way back
-     in if single sign-on breaks.</p>
-</div>
+{% if users_error %}<div class="flash err">{{ users_error }}</div>{% endif %}
+{% if users_saved %}<div class="flash ok">{{ users_saved }}</div>{% endif %}
 
+<h2>Add someone</h2>
+
+{% if directory.any %}
+  <div class="note">
+    <h3>A directory is connected</h3>
+    <p>People can sign in with
+      {% if directory.entra %}Microsoft Entra ID{% endif %}
+      {%- if directory.entra and directory.google %}, {% endif %}
+      {%- if directory.google %}Google Workspace{% endif %}
+      {%- if (directory.entra or directory.google) and directory.ldap %}, {% endif %}
+      {%- if directory.ldap %}Active Directory{% endif %}.
+      Choose that below and they will be matched on their email address the first
+      time they sign in &mdash; there is no password to set or to leak here.
+      Group membership decides their role from then on, so a role set here is
+      only what they get until their first sign-in.</p>
+  </div>
+{% else %}
+  <div class="note">
+    <h3>No directory yet</h3>
+    <p>Everyone signs in with an email address and a password kept here. Once
+       Microsoft Entra ID, Google Workspace or Active Directory is configured
+       under <a href="/admin/settings">Settings</a>, add people by choosing that
+       instead and let group membership decide their role.</p>
+  </div>
+{% endif %}
+
+<form class="card" method="post" action="/admin/users">
+  <div class="row">
+    <div>
+      <label for="email">Email address</label>
+      <input id="email" name="email" type="email" required autocomplete="off"
+             placeholder="name@company.com">
+      <p class="hint">Also how they are matched to a directory account.</p>
+    </div>
+    <div>
+      <label for="display_name">Full name</label>
+      <input id="display_name" name="display_name" autocomplete="off"
+             placeholder="optional">
+      <p class="hint">Shown in the console and against anything they do.</p>
+    </div>
+  </div>
+
+  <div class="row">
+    <div>
+      <label for="auth_source">Signs in with</label>
+      <select id="auth_source" name="auth_source">
+        <option value="LOCAL">An email address and password kept here</option>
+        <option value="ENTRA" {{ '' if directory.entra else 'disabled' }}>
+          Microsoft Entra ID{{ '' if directory.entra else ' — not configured' }}
+        </option>
+        <option value="GOOGLE" {{ '' if directory.google else 'disabled' }}>
+          Google Workspace{{ '' if directory.google else ' — not configured' }}
+        </option>
+      </select>
+      <p class="hint">A directory account has no password here at all.</p>
+    </div>
+    <div>
+      <label for="role">Role</label>
+      <select id="role" name="role" required>
+        {% for r in assignable_roles %}
+          <option value="{{ r.value }}" {{ 'selected' if r.value == 'OPERATOR' }}>
+            {{ r.label }}
+          </option>
+        {% endfor %}
+      </select>
+      <p class="hint">
+        An operator searches calls, listens and exports. An admin also deletes
+        recordings and manages their organisation.
+        {% if 'SUPER_ADMIN' in assignable_roles | map(attribute='value') | list %}
+          A platform admin spans every organisation &mdash; only another platform
+          admin can create one.
+        {% endif %}
+      </p>
+    </div>
+    <div>
+      <label for="brand_id">Organisation</label>
+      <select id="brand_id" name="brand_id">
+        {% for b in user_brands %}
+          <option value="{{ b.id }}">{{ b.name }}</option>
+        {% endfor %}
+      </select>
+      <p class="hint">Leave alone for a platform admin, who belongs to none.</p>
+    </div>
+  </div>
+
+  {# Only meaningful for a local account; the directory options have no
+     password of their own. Hidden by the small script below rather than by a
+     framework, and the server ignores these fields for a directory account
+     regardless. #}
+  <div class="row" id="password-fields">
+    <div>
+      <label for="password">First password</label>
+      <input id="password" name="password" type="password" class="mono"
+             autocomplete="new-password" minlength="{{ min_password_length }}">
+      <p class="hint">
+        At least {{ min_password_length }} characters. They must change it when
+        they first sign in &mdash; a password you typed is a password you know.
+      </p>
+    </div>
+    <div>
+      <label for="password_again">Again</label>
+      <input id="password_again" name="password_again" type="password" class="mono"
+             autocomplete="new-password" minlength="{{ min_password_length }}">
+    </div>
+  </div>
+
+  <div class="actions"><button type="submit">Add person</button></div>
+</form>
+
+<h2>Everyone</h2>
 <div class="tw stack">
   <table>
     <thead>
       <tr><th>Email</th><th>Name</th><th>Role</th><th>Signs in with</th>
-          <th>Active</th><th>Last sign-in</th></tr>
+          <th>Two-factor</th><th>Also works in</th>
+          <th>Active</th><th>Last sign-in</th><th>Actions</th></tr>
     </thead>
     <tbody>
     {% for u in users %}
       <tr>
         <td data-label="Email">{{ u.email }}</td>
         <td data-label="Name">{{ u.display_name or '—' }}</td>
-        <td data-label="Role"><span class="pill idle">{{ u.role | lower | replace('_', ' ') }}</span></td>
-        <td data-label="Signs in with">{{ u.auth_source | lower }}</td>
+        <td data-label="Role"><span class="pill idle">{{ u.role | role_label }}</span></td>
+        <td data-label="Signs in with">{{ u.auth_source | auth_label }}</td>
+        <td data-label="Two-factor">
+          {% if u.totp_active %}<span class="pill ok">on</span>
+          {% elif u.auth_source != 'LOCAL' %}<span class="pill idle">directory</span>
+          {% elif u.totp_secret_sealed %}<span class="pill warn">half set up</span>
+          {% else %}<span class="pill idle">off</span>{% endif %}
+        </td>
+        <td data-label="Also works in">
+          {% for m in memberships.get(u.id, []) %}
+            <span class="pill idle">{{ m.brand }} · {{ m.role | role_label }}</span>
+          {% else %}
+            {{ 'every organisation' if u.is_super_admin else '—' }}
+          {% endfor %}
+        </td>
         <td data-label="Active">
           {% if u.is_active %}<span class="pill ok">yes</span>
           {% else %}<span class="pill err">no</span>{% endif %}
         </td>
         <td class="mono" data-label="Last sign-in">{{ u.last_login_at | dt }}</td>
+        <td data-label="Actions" class="rowacts">
+          {% if u.id != user.id %}
+            <form method="post" action="/admin/users/{{ u.id }}/active">
+              <input type="hidden" name="active" value="{{ '0' if u.is_active else '1' }}">
+              <button type="submit" class="btn ghost small">
+                {{ 'Disable' if u.is_active else 'Enable' }}
+              </button>
+            </form>
+            {% if role_here.value == 'SUPER_ADMIN' and u.totp_active %}
+              <form method="post" action="/admin/users/{{ u.id }}/2fa/reset">
+                <button type="submit" class="btn ghost small">Clear two-factor</button>
+              </form>
+            {% endif %}
+          {% else %}
+            <span class="det">that's you</span>
+          {% endif %}
+        </td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
+
+<script>
+  // The password pair is meaningless for a directory account. Hidden rather
+  // than removed, so switching back does not lose what was typed.
+  (function () {
+    var src = document.getElementById("auth_source");
+    var fields = document.getElementById("password-fields");
+    var role = document.getElementById("role");
+    var brand = document.getElementById("brand_id");
+    if (!src || !fields) return;
+    function sync() {
+      var local = src.value === "LOCAL";
+      fields.hidden = !local;
+      var inputs = fields.querySelectorAll("input");
+      for (var i = 0; i < inputs.length; i++) inputs[i].required = local;
+      // A platform admin belongs to no organisation, so the choice is moot.
+      if (role && brand) {
+        var superAdmin = role.value === "SUPER_ADMIN";
+        brand.disabled = superAdmin;
+        brand.closest("div").style.opacity = superAdmin ? ".45" : "";
+      }
+    }
+    src.addEventListener("change", sync);
+    role && role.addEventListener("change", sync);
+    sync();
+  })();
+</script>
 {% endblock %}

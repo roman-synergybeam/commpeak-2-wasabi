@@ -34,6 +34,7 @@ __all__ = [
     "create_session",
     "create_super_admin",
     "hash_password",
+    "hash_recovery_secret",
     "resolve_session",
     "revoke_all_sessions",
     "revoke_session",
@@ -59,6 +60,19 @@ def hash_password(password: str) -> str:
     if len(password) < MIN_PASSWORD_LENGTH:
         raise AuthError(f"password must be at least {MIN_PASSWORD_LENGTH} characters")
     return _hasher.hash(password)
+
+
+def hash_recovery_secret(secret: str) -> str:
+    """Hash a two-factor recovery code.
+
+    Separate from :func:`hash_password` because that enforces a minimum length
+    written for something a person invented. A recovery code is generated, its
+    entropy is known, and it is shorter than that policy allows -- running it
+    through the password rule would reject the platform's own codes.
+    """
+    if not secret:
+        raise AuthError("empty recovery code")
+    return _hasher.hash(secret)
 
 
 def verify_password(password_hash: str, password: str) -> bool:

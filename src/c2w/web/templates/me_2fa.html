@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block frame %}measured{% endblock %}
+{% block title %}Set up two-factor — c2w{% endblock %}
+{% block body %}
+
+<h1>Set up an authenticator</h1>
+<p class="sub">One more step after your password, every time you sign in.</p>
+
+{% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+
+<div class="card">
+  {% include "_enrol_fields.html" %}
+
+  <form method="post" action="/me/2fa/confirm" style="margin-top:20px">
+    <label for="code"><strong>3.</strong> Enter the code it shows now</label>
+    <input id="code" name="code" class="code-input" inputmode="numeric"
+           autocomplete="one-time-code" pattern="[0-9 ]*" maxlength="9"
+           required autofocus>
+    <p class="hint">
+      Nothing changes until a code from this key is accepted &mdash; so an
+      abandoned setup cannot lock you out.
+    </p>
+    <div class="actions">
+      <button type="submit">Confirm and turn on</button>
+      <span></span>
+    </div>
+  </form>
+</div>
+
+<form method="post" action="/me/2fa/cancel">
+  <button type="submit" class="btn ghost">Cancel and throw this key away</button>
+</form>
+{% endblock %}

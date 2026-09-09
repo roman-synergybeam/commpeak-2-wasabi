@@ -1,0 +1,46 @@
+{% if standalone %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Your recovery codes — c2w</title>
+  <link rel="stylesheet" href="/static/ui-kit/kit.css">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<main class="measured" style="padding-top:48px">
+  <div class="login-card">
+{% endif %}
+
+    <h1>Two-factor is on</h1>
+    <p class="sub">Save these recovery codes somewhere other than your phone.</p>
+
+    <div class="note caution">
+      <h3>Shown once</h3>
+      <p>Only hashes of these are stored, so this page cannot be shown again.
+         If you lose them, issue a new set from your account page &mdash; there
+         is no way to read these back.</p>
+    </div>
+
+    <ul class="codes">
+      {% for c in codes %}<li>{{ c }}</li>{% endfor %}
+    </ul>
+
+    <p class="hint">
+      Each works once, in place of a code from your app, and using one signs you
+      out everywhere else. They are what gets you back in when the phone is
+      lost, wiped or flat.
+    </p>
+
+    <div class="actions">
+      <a class="btn" href="{{ next_url }}">I have saved them</a>
+    </div>
+
+{% if standalone %}
+  </div>
+</main>
+</body>
+</html>
+{% endif %}

@@ -469,6 +469,78 @@ wheels = [
 ]
 
 [[package]]
+name = "c2w"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "aioboto3" },
+    { name = "alembic" },
+    { name = "argon2-cffi" },
+    { name = "asyncpg" },
+    { name = "authlib" },
+    { name = "botocore" },
+    { name = "cryptography" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "itsdangerous" },
+    { name = "jinja2" },
+    { name = "openpyxl" },
+    { name = "prometheus-client" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "python-multipart" },
+    { name = "segno" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "structlog" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "esprima" },
+    { name = "moto", extra = ["s3", "server"] },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "respx" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aioboto3", specifier = ">=13.2" },
+    { name = "alembic", specifier = ">=1.14" },
+    { name = "argon2-cffi", specifier = ">=23.1" },
+    { name = "asyncpg", specifier = ">=0.30" },
+    { name = "authlib", specifier = ">=1.3" },
+    { name = "botocore", specifier = ">=1.35" },
+    { name = "cryptography", specifier = ">=43.0" },
+    { name = "esprima", marker = "extra == 'dev'", specifier = ">=4.0.1" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "itsdangerous", specifier = ">=2.2" },
+    { name = "jinja2", specifier = ">=3.1" },
+    { name = "moto", extras = ["s3", "server"], marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
+    { name = "openpyxl", specifier = ">=3.1" },
+    { name = "prometheus-client", specifier = ">=0.21" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "pydantic-settings", specifier = ">=2.6" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
+    { name = "python-multipart", specifier = ">=0.0.17" },
+    { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7" },
+    { name = "segno", specifier = ">=1.6.6" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
+    { name = "structlog", specifier = ">=24.4" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "certifi"
 version = "2026.7.22"
 source = { registry = "https://pypi.org/simple" }
@@ -729,74 +801,6 @@ wheels = [
 ]
 
 [[package]]
-name = "c2w"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "aioboto3" },
-    { name = "alembic" },
-    { name = "argon2-cffi" },
-    { name = "asyncpg" },
-    { name = "authlib" },
-    { name = "botocore" },
-    { name = "cryptography" },
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "itsdangerous" },
-    { name = "jinja2" },
-    { name = "openpyxl" },
-    { name = "prometheus-client" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "python-multipart" },
-    { name = "sqlalchemy", extra = ["asyncio"] },
-    { name = "structlog" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "moto", extra = ["s3", "server"] },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "respx" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aioboto3", specifier = ">=13.2" },
-    { name = "alembic", specifier = ">=1.14" },
-    { name = "argon2-cffi", specifier = ">=23.1" },
-    { name = "asyncpg", specifier = ">=0.30" },
-    { name = "authlib", specifier = ">=1.3" },
-    { name = "botocore", specifier = ">=1.35" },
-    { name = "cryptography", specifier = ">=43.0" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "itsdangerous", specifier = ">=2.2" },
-    { name = "jinja2", specifier = ">=3.1" },
-    { name = "moto", extras = ["s3", "server"], marker = "extra == 'dev'", specifier = ">=5.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
-    { name = "openpyxl", specifier = ">=3.1" },
-    { name = "prometheus-client", specifier = ">=0.21" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
-    { name = "pydantic", specifier = ">=2.9" },
-    { name = "pydantic-settings", specifier = ">=2.6" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
-    { name = "python-multipart", specifier = ">=0.0.17" },
-    { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
-    { name = "structlog", specifier = ">=24.4" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "cryptography"
 version = "50.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -859,6 +863,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/88/7f/731ff914b0255d3d0
 wheels = [
     { url = "https://files.pythonhosted.org/packages/75/23/529140fe1aab80fc6992f93a706deec709140a6397439139a054e1515c45/docker-7.2.0-py3-none-any.whl", hash = "sha256:a3f45fdeb9165e2d25d9a1d02ddf3bc70fb572cf5ebbf9b58558c22caf29b71f", size = 148775, upload-time = "2026-07-09T14:53:45.224Z" },
 ]
+
+[[package]]
+name = "esprima"
+version = "4.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/a1/50fccd68a12bcfc27adfc9969c090286670a9109a0259f3f70943390b721/esprima-4.0.1.tar.gz", hash = "sha256:08db1a876d3c2910db9cfaeb83108193af5411fc3a3a66ebefacd390d21323ee", size = 47021, upload-time = "2018-08-24T13:59:11.374Z" }
 
 [[package]]
 name = "et-xmlfile"
@@ -2522,6 +2532,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/62/74/8d69dcb7a9efe8baa2046891735e5dfe433ad558ae23d9e3c14c633d1d58/s3transfer-0.14.0.tar.gz", hash = "sha256:eff12264e7c8b4985074ccce27a3b38a485bb7f7422cc8046fee9be4983e4125", size = 151547, upload-time = "2025-09-09T19:23:31.089Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/48/f0/ae7ca09223a81a1d890b2557186ea015f6e0502e9b8cb8e1813f1d8cfa4e/s3transfer-0.14.0-py3-none-any.whl", hash = "sha256:ea3b790c7077558ed1f02a3072fb3cb992bbbd253392f4b6e9e8976941c7d456", size = 85712, upload-time = "2025-09-09T19:23:30.041Z" },
+]
+
+[[package]]
+name = "segno"
+version = "1.6.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1c/2e/b396f750c53f570055bf5a9fc1ace09bed2dff013c73b7afec5702a581ba/segno-1.6.6.tar.gz", hash = "sha256:e60933afc4b52137d323a4434c8340e0ce1e58cec71439e46680d4db188f11b3", size = 1628586, upload-time = "2025-03-12T22:12:53.324Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d6/02/12c73fd423eb9577b97fc1924966b929eff7074ae6b2e15dd3d30cb9e4ae/segno-1.6.6-py3-none-any.whl", hash = "sha256:28c7d081ed0cf935e0411293a465efd4d500704072cdb039778a2ab8736190c7", size = 76503, upload-time = "2025-03-12T22:12:48.106Z" },
 ]
 
 [[package]]
