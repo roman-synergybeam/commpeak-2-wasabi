@@ -76,7 +76,8 @@ class User(Base, IdMixin, TimestampMixin):
         Index("ix_users_oidc", "oidc_issuer", "oidc_subject", unique=True),
     )
 
-    #: NULL only for SUPER_ADMIN, who spans every brand.
+    #: The organisation this person lands in. Their full access is the
+    #: user_brands list; NULL only for SUPER_ADMIN, who spans every one.
     brand_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("brands.id", ondelete="CASCADE")
     )
@@ -101,12 +102,43 @@ class User(Base, IdMixin, TimestampMixin):
 
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    #: What this person chose for themselves -- theme, text size, playback
+    #: volume. Kept on the account so it follows them to another machine.
+    preferences: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'")
+    )
     failed_logins: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     @property
     def is_super_admin(self) -> bool:
         return self.role == Role.SUPER_ADMIN
+
+
+class UserBrand(Base):
+    """Which organisations a person works in, and as what.
+
+    The role sits on the pairing rather than on the person: the same operator
+    may be an admin for one of these companies and an operator for another, and
+    a single ``users.role`` cannot say that.
+
+    A platform admin has no rows here and needs none -- they reach every
+    organisation by role.
+    """
+
+    __tablename__ = "user_brands"
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    brand_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("brands.id", ondelete="CASCADE"), primary_key=True
+    )
+    role: Mapped[Role] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
 
 
 class UserSession(Base, IdMixin):

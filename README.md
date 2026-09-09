@@ -53,7 +53,7 @@ All credential settings ship empty, to be filled in by an operator.
 | Transfer + verification | done — stream, verify, sidecar metadata, re-queue on archive loss |
 | Workers | done — worker pool, scheduler, nightly reconciler (both singleton-locked) |
 | Media delivery | done — presigned URLs, separate play/download permissions, full audit |
-| CDR API client | done — field mapping pinned to the real payload; transport configurable |
+| CDR API client | done — against the documented PBX Stats API: form-encoded POST, `page`/`cdrs_per_page`, `from`/`till`. Accepts both CDR shapes CommPeak returns |
 | Web UI | done — built on the Console UI Kit design system; dashboard, call search, detail + player, sync status, settings, audit, people |
 | Alerts | done — Telegram + Slack, per-brand, severity routing, deduplication |
 | Deployment | done — systemd units, nginx, idempotent installer |

@@ -294,6 +294,36 @@ def _audit_search(event: dict[str, Any]) -> str:
     return " ".join(str(p).lower() for p in parts if p)
 
 
+def _initials(user: Any) -> str:
+    """One or two letters for the account button.
+
+    From the display name where there is one, otherwise the email, because
+    "RS" identifies a person at a glance and "roman@synergybeam.com" does not
+    fit in 32 pixels.
+    """
+    name = str(getattr(user, "display_name", "") or "").strip()
+    if name:
+        parts = [p for p in name.split() if p]
+        if len(parts) >= 2:
+            return (parts[0][0] + parts[-1][0]).upper()
+        if parts:
+            return parts[0][:2].upper()
+    email = str(getattr(user, "email", "") or "")
+    local = email.split("@", 1)[0]
+    return (local[:2] or "?").upper()
+
+
+def _zone_label(zone: Any) -> str:
+    """A short label for the clock: the city, not the whole path.
+
+    "Puerto_Rico" beside a clock is noise; "PUERTO RICO" is a place. The full
+    name stays in the element's title for anyone who needs to check it.
+    """
+    text_ = str(zone or "UTC")
+    tail = text_.rsplit("/", 1)[-1]
+    return tail.replace("_", " ").upper()
+
+
 def register(env: Any) -> None:
     env.filters.update(
         {
@@ -320,6 +350,8 @@ def register(env: Any) -> None:
             "sortlink": _sortlink,
             "offsetlink": _offsetlink,
             "chiplink": _chiplink,
+            "initials": _initials,
+            "zone_label": _zone_label,
             "audit_state": _audit_state,
             "audit_search": _audit_search,
             "tojson": json.dumps,

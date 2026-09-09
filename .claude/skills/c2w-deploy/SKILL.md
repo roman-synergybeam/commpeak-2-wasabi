@@ -57,10 +57,11 @@ SELECT state, count(*) FROM transfer_jobs GROUP BY state;
 
 ## Configuration and secrets
 
-There are no application config files. Every setting lives in the database and
-is changed in the UI under Settings, or with `c2w-admin settings set` — it
-applies across every process within seconds, no restart needed (except the few
-marked `restart required`).
+There are no application config files. Everything is configured in the console:
+97 settings under **Settings**, and the CommPeak accounts and archive buckets on
+their own pages, credentials included. `c2w-admin settings set` does the same
+for scripting. A change applies across every process within seconds without a
+restart, except the few marked `restart required`.
 
 Only two values come from the environment, because they are what a process needs
 before it can read settings: `C2W_DATABASE_URL` (in the unit, with the

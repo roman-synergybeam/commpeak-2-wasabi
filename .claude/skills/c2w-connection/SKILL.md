@@ -1,75 +1,84 @@
 ---
 name: c2w-connection
-description: Onboard a CommPeak S3 connection or Wasabi destination and run the connection self-test. Use when adding a new bucket, tenant or brand, when a connection shows ERROR/DEGRADED status, or when diagnosing "AccessDenied"/"InvalidAccessKeyId" from CommPeak or Wasabi.
+description: Add or fix a CommPeak account or archive storage in c2w. Use when onboarding a bucket, tenant or organisation, when an account shows an error, or when diagnosing AccessDenied / InvalidAccessKeyId from CommPeak or Wasabi.
 ---
 
-# Onboarding a storage connection
+# Adding an account
 
-## Before you start
+Everything here is done **in the console**, not on the command line. An
+organisation has as many CommPeak accounts as it has PBXes and dialers, and as
+many archive buckets as it needs; each has its own credentials.
 
-Enter credentials only through `c2w-admin`, which prompts without echo and
-seals them immediately under the brand's data key. Never put them in a file, a
-commit, or a shell command's arguments.
+Credentials are sealed under the organisation's data key before the row is
+written, and are never sent back to a browser. A stored credential can be
+tested but not read — which is also why the fix for a wrong one is to type a
+new one, not to go and look at the old one.
 
-Adding a connection performs **no** operation against CommPeak. The platform is
-read-only there, and even the self-test only lists and reads.
+## A CommPeak account
 
-## CommPeak source
+**CommPeak → Add a CommPeak account.** It asks for:
 
-Required fields, all from the customer's CommPeak account page:
-
-| Field | Value |
+| Field | Where it comes from |
 |---|---|
-| endpoint | `https://recordings.commpeak.com` (default; don't change without reason) |
-| bucket | the account UUID from the CommPeak account page (a UUID, e.g. `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) |
-| access key | the S3 account **Token** |
-| secret key | the S3 account **Secret** (shown once, unrecoverable) |
-| addressing | path-style, always |
+| Name | Yours to choose — how it reads on these pages |
+| CommPeak domain | The PBX or dialer this bucket belongs to |
+| Bucket | The account UUID on the CommPeak account page |
+| S3 token / secret | Same page. The secret is shown once and cannot be recovered from CommPeak |
+| Call records address | Usually the same domain. Without it, recordings are archived with no call details |
+| Copies go to | Which archive storage this account's recordings go to |
+
+The tenant is derived from the domain rather than asked for: a tenant is only
+ever the domain a bucket belongs to, so asking separately asks the same
+question twice.
+
+Adding an account performs **no** operation against CommPeak. The platform is
+read-only there, and even the test only lists and reads.
+
+## Then press Test
+
+Each check is reported separately, because telling these apart is most of the
+work of getting a new account going:
+
+| Failing check | What it means |
+|---|---|
+| `s3 authentication` — wrong credentials | The token or secret is wrong, or has been rotated |
+| `s3 authentication` — address not allowed | **This server's public address is not on the CommPeak account's access list.** The most common cause by a distance |
+| `s3 authentication` — misconfigured | Wrong bucket UUID, or the wrong address |
+| `bucket discovery` empty | Credentials fine; the bucket genuinely has no recordings yet |
+| `list operation` passes but `download test` fails | Listing is permitted, reading is not — ask CommPeak to widen the account |
+
+Get the address to give CommPeak with `curl -s https://api.ipify.org`.
+
+## Archive storage
+
+**Archive → Add archive storage.** The region is a menu, so a mistyped region
+cannot leave a bucket unreachable, and the address is worked out from it. The
+bucket must already exist — the console does not create buckets.
+
+Press **Test**. It writes a small object, reads it back and deletes it, because
+listing a bucket succeeds with read-only keys and would then fail on the first
+real copy.
+
+## After it tests clean
+
+1. Point the CommPeak account at the storage, if you did not when adding it.
+2. Check the retention window under **Settings → Retention** — 90 days by
+   default, and per-organisation.
+3. Turn on **Settings → Archiving → Copy recordings to the archive**.
+4. Read the `c2w-backfill` skill before enabling a bucket with years of
+   history. Do not simply switch it on and let it walk millions of objects
+   unprioritised.
+
+## For scripting
+
+`c2w-admin` does the same things without a browser, and prompts for
+credentials without echo:
 
 ```bash
-c2w-admin brand add   --name "Go4Rex" --slug go4rex
-c2w-admin tenant add  --brand go4rex --name "go4rex.td.commpeak.com" --slug go4rex-td
-c2w-admin connection add --brand go4rex --tenant go4rex-td \
-  --name "Go4Rex TD" --bucket <account-uuid>     # prompts for token and secret
+c2w-admin brand add --name "Go4Rex" --slug go4rex
 c2w-admin connection list
-```
-
-## Read the self-test output
-
-`run_source_probes` reports each check independently so you can tell the failure
-modes apart:
-
-| Check | Failing means |
-|---|---|
-| `s3_authentication` + `AUTH_ERROR` | wrong token/secret, or it has been rotated |
-| `s3_authentication` + `ACL_ERROR` | **this server's public IP is not whitelisted** in the CommPeak Access Control List — the single most common onboarding failure |
-| `s3_authentication` + `CONFIG_ERROR` | wrong bucket UUID, or virtual-host addressing leaked in |
-| `bucket_discovery` empty | credentials fine, bucket genuinely has no year prefixes yet |
-| `list_operation` ok but `download_test` fails | LIST granted, GET not — ask CommPeak to widen the account's permissions |
-
-Get the server's public IP to hand to CommPeak with `curl -s https://api.ipify.org`.
-
-## Wasabi destination
-
-Pick the region closest to the brand's data-residency requirement; the endpoint
-resolves from it via `WASABI_REGIONS`. One destination per brand minimum —
-never point two brands at the same bucket prefix.
-
-```bash
-c2w-admin destination add --brand go4rex --provider wasabi \
-  --region eu-central-1 --bucket go4rex-recordings --path-prefix archive
 c2w-admin destination list
+c2w-admin doctor            # schema revision, counts, whether copying is on
 ```
 
-Until a destination exists, recordings accumulate as `DISCOVERED` and the
-dashboard says so plainly. Nothing is lost — the scheduler queues them once
-storage appears, with no re-scan.
-
-## After a connection tests OK
-
-1. Check `c2w-admin doctor` — it reports schema revision, brands, users,
-   connections, destinations and whether transfers are on.
-2. Adjust `retention.offload_after_days` if the brand differs from the 90-day
-   default (`--brand <id>` sets a per-brand override).
-3. Use the `c2w-backfill` skill before enabling transfers on a bucket with
-   years of history.
+Never put a credential in a file, a commit, or a shell command's arguments.

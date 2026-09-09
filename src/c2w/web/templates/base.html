@@ -9,11 +9,20 @@
      flash on navigation. Wrapped because storage access throws outright in
      some contexts (private windows, blocked site data). #}
   <script>
+    // Applied before the stylesheet so a dark-mode viewer never sees a white
+    // flash. The value comes from the account below; this is only the cached
+    // copy that avoids the flash. Wrapped because storage access throws
+    // outright in some contexts.
     try {
       var t = localStorage.getItem("c2w-theme");
       if (t) document.documentElement.dataset.theme = t;
     } catch (e) {}
   </script>
+  <style>
+    /* Text size, as chosen on the account page. Every size in the kit is
+       relative to the root, so one number scales the whole console. */
+    :root { font-size: {{ (prefs.font_scale | default(100)) }}%; }
+  </style>
   {# The kit, then the handful of rules it leaves to the application. kit.css
      is @imports in dependency order: tokens define what everything else
      resolves to, and narrow.css is all overrides so it goes last. #}
@@ -51,26 +60,70 @@
     {% endif %}
   </nav>
 
-  <div class="who">
-    {% if brands|length > 1 %}
-      <form method="post" action="/switch-brand">
-        <select name="brand_id" onchange="this.form.submit()"
-                aria-label="Organisation">
-          {% for b in brands %}
-            <option value="{{ b.id }}" {{ 'selected' if active_brand and b.id == active_brand.id }}>
-              {{ b.name }}
-            </option>
-          {% endfor %}
-        </select>
-      </form>
-    {% elif active_brand %}
-      <span class="whoami">{{ active_brand.name }}</span>
-    {% endif %}
-    <span class="whoami">{{ user.display_name or user.email }}</span>
-    <button type="button" class="ghost small" title="Switch between light and dark"
-            onclick="c2wToggleTheme()">&#9680;</button>
-    <a class="btn ghost small" href="/logout">Sign out</a>
+  {# The organisation's own time, not the server's. On a console watching jobs
+     that run to a schedule, "is it 02:00 there yet" is a question worth being
+     able to answer without arithmetic. #}
+  <div class="clock" title="{{ org_timezone }}">
+    <span id="clock-time" class="mono">--:--:--</span>
+    <span class="clock-zone">{{ org_timezone | zone_label }}</span>
   </div>
+
+  {# Google-style: one button showing who you are, everything about you behind
+     it. The organisation switcher lives here too rather than in the header --
+     most people have one organisation and would never touch a dropdown that
+     was permanently in their way. #}
+  <details class="account" id="account-menu">
+    <summary title="{{ user.email }}">
+      <span class="avatar">{{ user | initials }}</span>
+    </summary>
+    <div class="account-panel">
+      <div class="account-head">
+        <span class="avatar big">{{ user | initials }}</span>
+        <div>
+          <strong>{{ user.display_name or user.email }}</strong>
+          <div class="det">{{ user.email }}</div>
+          <span class="pill idle">{{ role_here.label }}</span>
+        </div>
+      </div>
+
+      {% if brands | length > 1 %}
+        <div class="account-section">
+          <span class="hint">Organisation</span>
+          {% for b in brands %}
+            <form method="post" action="/switch-brand">
+              <input type="hidden" name="brand_id" value="{{ b.id }}">
+              <button type="submit" class="account-item {{ 'on' if active_brand and b.id == active_brand.id }}">
+                <span>{{ b.name }}</span>
+                {% if active_brand and b.id == active_brand.id %}<span class="tick">&check;</span>{% endif %}
+              </button>
+            </form>
+          {% endfor %}
+        </div>
+      {% elif active_brand %}
+        <div class="account-section">
+          <span class="hint">Organisation</span>
+          <div class="account-item static">{{ active_brand.name }}</div>
+        </div>
+      {% endif %}
+
+      <div class="account-section">
+        <a class="account-item" href="/me">Appearance and account</a>
+        {% if user.auth_source == 'LOCAL' %}
+          <a class="account-item" href="/me#password">Change password</a>
+          <a class="account-item" href="/me#twofactor">Two-factor</a>
+        {% else %}
+          <div class="account-item static det">
+            Signed in with {{ user.auth_source | lower }} &mdash; your password and
+            two-factor are managed there
+          </div>
+        {% endif %}
+      </div>
+
+      <div class="account-section">
+        <a class="account-item signout" href="/logout">Sign out</a>
+      </div>
+    </div>
+  </details>
 </header>
 
 <main class="{% block frame %}{% endblock %}">
@@ -78,17 +131,49 @@
 </main>
 
 <script>
-  // Three states, matching how the stylesheet is written: no stored value
-  // follows the OS, and an explicit choice pins light or dark.
-  function c2wToggleTheme() {
-    var root = document.documentElement;
-    var dark = root.dataset.theme
-      ? root.dataset.theme === "dark"
-      : window.matchMedia("(prefers-color-scheme: dark)").matches;
-    var next = dark ? "light" : "dark";
-    root.dataset.theme = next;
-    try { localStorage.setItem("c2w-theme", next); } catch (e) {}
-  }
+  // Keep the cached theme in step with what the account says, so the pre-paint
+  // script above cannot show the wrong one after a change on another machine.
+  try { localStorage.setItem("c2w-theme", {{ (prefs.theme | default('auto')) | tojson }}); }
+  catch (e) {}
+  (function () {
+    var t = {{ (prefs.theme | default('auto')) | tojson }};
+    if (t === "auto") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = t;
+  })();
+
+  // The organisation's clock. Ticking in the browser rather than rendered by
+  // the server, because a time that is wrong the moment the page loads is
+  // worse than no clock at all.
+  (function () {
+    var el = document.getElementById("clock-time");
+    if (!el) return;
+    var fmt;
+    try {
+      fmt = new Intl.DateTimeFormat([], {
+        timeZone: {{ org_timezone | tojson }},
+        hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+      });
+    } catch (e) {
+      // An unknown zone name must not take the page down with it.
+      fmt = new Intl.DateTimeFormat([], {
+        hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+      });
+    }
+    function tick() { el.textContent = fmt.format(new Date()); }
+    tick();
+    setInterval(tick, 1000);
+  })();
+
+  // A menu that stays open once you have clicked past it is a menu in the way.
+  document.addEventListener("click", function (e) {
+    var menu = document.getElementById("account-menu");
+    if (menu && menu.open && !menu.contains(e.target)) menu.open = false;
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    var menu = document.getElementById("account-menu");
+    if (menu) menu.open = false;
+  });
 </script>
 </body>
 </html>

@@ -67,6 +67,40 @@ them five times only delays the alert. On CommPeak, `ACL_ERROR` almost always
 means this server's public IP is missing from the account's Access Control List;
 that hint is already wired in, keep it.
 
+## Reading CommPeak's documentation
+
+**Start at `https://docs.commpeak.com/llms.txt`.** It indexes every page and
+every OpenAPI spec, and appending `.md` to any docs URL returns markdown.
+Section indexes are at `/reference/<section>/llms.txt`. Read the `.md` of an
+endpoint before writing a client for it -- guessing a contract from a plausible
+URL cost real work here, and the answer was one hop away.
+
+### CDRs — PBX Stats API
+
+`POST https://<instance>.stats.pbx.commpeak.com/api/cdrs`,
+form-encoded, API key in the `Authorization` header. Per-instance host, so
+every account carries its own base URL.
+
+Paging is `page` (1-based) and `cdrs_per_page`; the range is `from`/`till`;
+ordering is `sort_by`/`sort_direction`. Filters include `country` (ISO-3166
+alpha-2), `direction`, `call_type`, `destination`, `source`, `extension`,
+`did`, `caller_id`, `hangup_cause`, `agent`, `queue`, `uniqueid`, and any
+custom field by name. Returns `{"cdrs": [...]}` carrying `country_name`,
+`agent_name`, `agent_pbxExtension`, `queue_name`, `bill_duration`,
+`waiting_time`, `cost` and `recording_link`.
+
+**Two CDR shapes exist.** The `call_uuid`/`src`/`dst`/`start_at` shape is a
+different source (Dialer API or a webhook). `normalise_cdr` accepts both, and
+must keep doing so.
+
+### SMS — TextPeak
+
+`GET https://gw.commpeak.com/textpeak/streams/messages`, API key in
+`Authorization`. Params `type`, `status`, `streamId`, `phone`, `startDate`,
+`endDate`, `page`, `itemsPerPage`; returns `{items, total}` with delivery
+status, `sent_at`/`delivered_at`, country fields, `cost` and `content.body`.
+Not yet built into this system.
+
 ## CommPeak specifics
 
 Source: `https://recordings.commpeak.com`, **path-style addressing**, SigV4,

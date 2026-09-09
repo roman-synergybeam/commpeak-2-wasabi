@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from c2w.auth.local import resolve_session
 from c2w.auth.rbac import Permission, has_permission
-from c2w.db.models.auth import User
+from c2w.db.models.auth import Role, User, UserBrand
 from c2w.db.models.core import Brand
 from c2w.db.session import get_sessionmaker
 
@@ -100,14 +100,20 @@ async def active_brand_id(
     every brand, so they get the one they selected, or the first available if
     they have not chosen yet.
     """
-    if not user.is_super_admin:
-        if user.brand_id is None:
-            # The schema forbids this, so reaching it means something is wrong
-            # rather than merely unconfigured.
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "your account has no organisation")
-        return user.brand_id
-
     brands = await selectable_brands(session, user)
+    if not user.is_super_admin:
+        if not brands:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "your account has no organisation"
+            )
+        # The cookie is user input on an isolation boundary, so it is only
+        # honoured when it names an organisation this person actually has.
+        if c2w_brand and c2w_brand.isdigit():
+            chosen = int(c2w_brand)
+            if any(b.id == chosen for b in brands):
+                return chosen
+        return user.brand_id or brands[0].id
+
     if not brands:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -136,13 +142,22 @@ ScopedSession = Annotated[AsyncSession, Depends(scoped_session)]
 
 
 def require(permission: Permission):
-    """Dependency factory gating a route on one permission."""
+    """Dependency factory gating a route on one permission.
 
-    async def guard(user: CurrentUser) -> User:
-        if not has_permission(user.role, permission):
+    Checks the role for the organisation being acted on, not the one on the
+    account: the same person can be an admin in one and an operator in another.
+    """
+
+    async def guard(
+        user: CurrentUser,
+        session: Annotated[AsyncSession, Depends(get_session)],
+        brand_id: Annotated[int, Depends(active_brand_id)],
+    ) -> User:
+        role = await effective_role(session, user, brand_id)
+        if not has_permission(role, permission):
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
-                f"your role ({user.role}) does not allow {permission}",
+                f"your role here ({role}) does not allow {permission}",
             )
         return user
 
@@ -150,8 +165,53 @@ def require(permission: Permission):
 
 
 async def selectable_brands(session: AsyncSession, user: User) -> list[Brand]:
-    """Brands this user may act on, for the switcher in the UI."""
+    """Organisations this person may act in.
+
+    A platform admin reaches every one by role. Everyone else reaches the ones
+    listed against them, which is usually one and is sometimes several -- the
+    same operator handles calls for more than one of these companies.
+    """
     stmt = select(Brand).where(Brand.is_active.is_(True)).order_by(Brand.name)
-    if not user.is_super_admin:
-        stmt = stmt.where(Brand.id == user.brand_id)
-    return list((await session.execute(stmt)).scalars().all())
+    if user.is_super_admin:
+        return list((await session.execute(stmt)).scalars().all())
+
+    allowed = set(
+        (
+            await session.execute(
+                select(UserBrand.brand_id).where(UserBrand.user_id == user.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if user.brand_id:
+        allowed.add(user.brand_id)
+    if not allowed:
+        return []
+    return list(
+        (await session.execute(stmt.where(Brand.id.in_(allowed)))).scalars().all()
+    )
+
+
+async def effective_role(session: AsyncSession, user: User, brand_id: int | None) -> Role:
+    """What this person may do *in this organisation*.
+
+    The role sits on the pairing, not on the person, so the answer depends on
+    which organisation is being looked at: an admin for one of these companies
+    may be an operator for the other.
+    """
+    if user.is_super_admin:
+        return Role.SUPER_ADMIN
+    if brand_id is not None:
+        assigned = (
+            await session.execute(
+                select(UserBrand.role).where(
+                    UserBrand.user_id == user.id, UserBrand.brand_id == brand_id
+                )
+            )
+        ).scalar_one_or_none()
+        if assigned is not None:
+            return Role(assigned)
+    # Falls back to the role on the account for their home organisation, which
+    # is what an account created before the list existed relies on.
+    return Role(user.role)

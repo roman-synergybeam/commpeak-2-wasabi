@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block frame %}measured{% endblock %}
+{% block title %}My account — c2w{% endblock %}
+{% block body %}
+
+<h1>My account</h1>
+<p class="sub">{{ user.email }}</p>
+
+{% if saved %}<div class="flash ok">Saved.</div>{% endif %}
+{% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+
+<div class="summarygrid">
+  <div><span class="hint">Signed in as</span><strong>{{ user.display_name or user.email }}</strong></div>
+  <div><span class="hint">Role here</span><strong>{{ role_here.label }}</strong></div>
+  <div><span class="hint">Signs in with</span><strong>{{ user.auth_source | lower }}</strong></div>
+  <div><span class="hint">Organisations</span><strong>{{ brands | length }}</strong></div>
+</div>
+
+<h2>Appearance</h2>
+<form class="card" method="post" action="/me/appearance">
+  <p class="hint" style="margin:0 0 16px">
+    Kept on your account rather than in this browser, so it follows you to
+    another machine.
+  </p>
+  <div class="row">
+    <div>
+      <label for="theme">Theme</label>
+      <select id="theme" name="theme">
+        {% for value, label in theme_choices %}
+          <option value="{{ value }}" {{ 'selected' if (prefs.theme or 'auto') == value }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <p class="hint">Matching the system follows your operating system's setting.</p>
+    </div>
+    <div>
+      <label for="font_scale">Text size</label>
+      <select id="font_scale" name="font_scale">
+        {% for value, label in font_choices %}
+          <option value="{{ value }}" {{ 'selected' if (prefs.font_scale or 100) | string == value }}>
+            {{ label }} ({{ value }}%)
+          </option>
+        {% endfor %}
+      </select>
+      <p class="hint">Scales the whole console, tables included.</p>
+    </div>
+    <div>
+      <label for="volume">Playback volume ({{ prefs.volume or 100 }}%)</label>
+      <input id="volume" name="volume" type="range" min="0" max="100" step="5"
+             value="{{ prefs.volume or 100 }}"
+             oninput="document.getElementById('vol-now').textContent = this.value + '%'">
+      <p class="hint">
+        Where every recording starts. <span id="vol-now">{{ prefs.volume or 100 }}%</span>
+        &mdash; phone recordings are often quiet, so a higher default saves
+        reaching for the slider on every call.
+      </p>
+    </div>
+  </div>
+  <div class="actions"><button type="submit">Save appearance</button></div>
+</form>
+
+{% if user.auth_source == 'LOCAL' %}
+  <h2 id="password">Password</h2>
+  <form class="card" method="post" action="/me/password">
+    <p class="hint" style="margin:0 0 16px">
+      Changing it signs you out everywhere, including here &mdash; a session
+      that outlives the password it was issued against is a way back in for
+      whoever had the old one.
+    </p>
+    <div class="row">
+      <div>
+        <label for="current">Current password</label>
+        <input id="current" name="current" type="password" class="mono"
+               autocomplete="current-password" required>
+      </div>
+      <div>
+        <label for="new">New password</label>
+        <input id="new" name="new" type="password" class="mono"
+               autocomplete="new-password" required>
+        <p class="hint">At least 12 characters.</p>
+      </div>
+      <div>
+        <label for="again">New password again</label>
+        <input id="again" name="again" type="password" class="mono"
+               autocomplete="new-password" required>
+      </div>
+    </div>
+    <div class="actions"><button type="submit">Change password</button></div>
+  </form>
+
+  <h2 id="twofactor">Two-factor</h2>
+  <div class="card">
+    <div class="note caution">
+      <h3>Not built yet</h3>
+      <p>There is no authenticator enrolment here, and none can be faked: the
+         secret belongs to whoever will hold it. Until it is built, the way to
+         require a second factor is to sign in through Microsoft, Google or your
+         directory, which already enforces whatever your organisation has set.</p>
+    </div>
+    <p class="hint" style="margin-top:14px">
+      Configure single sign-on under Settings. Once staff use it, turn off
+      <em>Allow email and password sign-in</em> &mdash; the platform administrator
+      keeps it either way, as a way back in if single sign-on breaks.
+    </p>
+  </div>
+{% else %}
+  <h2 id="password">Password and two-factor</h2>
+  <div class="card">
+    <p>
+      This account signs in through
+      <strong>{{ user.auth_source | lower }}</strong>, so its password and second
+      factor are managed there rather than here. Nothing on this page can change
+      them.
+    </p>
+  </div>
+{% endif %}
+
+<h2>Organisations you can work in</h2>
+<div class="tw stack">
+  <table>
+    <thead><tr><th>Organisation</th><th>Your role there</th><th></th></tr></thead>
+    <tbody>
+    {% for b in brands %}
+      <tr>
+        <td data-label="Organisation">{{ b.name }}</td>
+        <td data-label="Role">
+          <span class="pill {{ 'ok' if (active_brand and b.id == active_brand.id) else 'idle' }}">
+            {{ (role_here.label if active_brand and b.id == active_brand.id else 'see menu') }}
+          </span>
+        </td>
+        <td data-label="">
+          {% if not (active_brand and b.id == active_brand.id) %}
+            <form method="post" action="/switch-brand">
+              <input type="hidden" name="brand_id" value="{{ b.id }}">
+              <button type="submit" class="ghost small">Switch to this one</button>
+            </form>
+          {% else %}
+            <span class="det">currently working here</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="3" class="empty">Your account has no organisation yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

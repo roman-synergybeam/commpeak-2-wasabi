@@ -28,36 +28,36 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
-#: Offered in the time-zone menu. Deliberately short -- a menu of all 486 IANA
-#: names is harder to use than a text box. Add to it as customers appear.
+#: The zones these businesses actually work in, nearest the top.
+#:
+#: Both are Seychelles-registered brokers selling into Latin America and
+#: Iberia, so the useful list is the Americas, the two Iberian zones, and the
+#: Seychelles zone the entities are registered in -- not a generic European
+#: list. A menu of all 486 IANA names is harder to use than a text box.
+#:
+#: America/Puerto_Rico is the default because it is -04:00 all year with no
+#: daylight saving, which is what makes a schedule set to 02:00 actually run at
+#: 02:00 in January and July alike.
 TIMEZONE_CHOICES: Final[tuple[str, ...]] = (
-    "UTC",
-    "Europe/Lisbon",
-    "Europe/London",
-    "Europe/Dublin",
-    "Europe/Madrid",
-    "Europe/Paris",
-    "Europe/Berlin",
-    "Europe/Amsterdam",
-    "Europe/Warsaw",
-    "Europe/Prague",
-    "Europe/Bucharest",
-    "Europe/Athens",
-    "Europe/Kyiv",
-    "Europe/Istanbul",
-    "Asia/Jerusalem",
-    "Asia/Dubai",
-    "Asia/Nicosia",
+    "America/Puerto_Rico",       # UTC-04:00 all year
+    "America/Santo_Domingo",     # UTC-04:00 all year
+    "America/Caracas",           # UTC-04:00 all year
+    "America/La_Paz",            # UTC-04:00 all year
+    "America/Manaus",            # UTC-04:00 all year
+    "America/Sao_Paulo",         # Brazil, UTC-03:00
+    "America/Argentina/Buenos_Aires",
+    "America/Bogota",            # UTC-05:00
+    "America/Lima",              # UTC-05:00
+    "America/Guayaquil",         # Ecuador, UTC-05:00
+    "America/Mexico_City",
+    "America/Santiago",          # Chile, with daylight saving
     "America/New_York",
-    "America/Chicago",
-    "America/Denver",
     "America/Los_Angeles",
-    "America/Sao_Paulo",
-    "America/Guayaquil",
-    "Africa/Johannesburg",
-    "Asia/Kolkata",
-    "Asia/Manila",
-    "Australia/Sydney",
+    "Europe/Lisbon",             # Portugal
+    "Europe/Madrid",             # Spain
+    "Europe/London",
+    "Indian/Mahe",               # Seychelles, UTC+04:00
+    "UTC",
 )
 
 #: Wasabi's regional endpoints, so the region is chosen rather than typed --
@@ -608,12 +608,13 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         key="org.timezone",
         choices=TIMEZONE_CHOICES,
         type=SettingType.STRING,
-        default="UTC",
+        default="America/Puerto_Rico",
         category="Organisation",
         label="Time zone",
-        description="Schedules for this organisation run in this zone, and times "
-        "on its pages are shown in it. Any IANA name, for example "
-        "Europe/Lisbon. The server's own clock is not used.",
+        description="Schedules for this organisation run in this zone, and the "
+        "clock in the corner shows it. The server's own clock is not used. The "
+        "zones offered first are -04:00 all year, so a job set for 02:00 runs "
+        "at 02:00 in January and in July.",
         help_url="https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
         help_label="list of time-zone names",
         brand_overridable=True,

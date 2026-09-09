@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import urlencode
+from urllib.parse import quote_plus, urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import (
@@ -36,6 +36,7 @@ from c2w.api.deps import (
     active_brand_id,
     client_ip,
     current_user,
+    effective_role,
     get_session,
     optional_user,
     selectable_brands,
@@ -51,16 +52,39 @@ from c2w.api.v1.cdrs import (
 )
 from c2w.auth.local import AuthError, authenticate, create_session, revoke_session
 from c2w.auth.rbac import Permission, permissions_for
-from c2w.db.models.auth import User
-from c2w.db.models.core import Brand, CommPeakConnection, StorageDestination
+from c2w.crypto import CryptoError
+from c2w.db.models.auth import AuthSource, User
+from c2w.db.models.core import Brand, CommPeakConnection, StorageDestination, Tenant
 from c2w.logging import get_logger
 from c2w.settings import SettingsError, settings_service
 from c2w.settings_spec import SETTINGS, SettingType, specs_by_category
-from c2w.storage.errors import ErrorClass
+from c2w.storage.commpeak import COMMPEAK_ENDPOINT
+from c2w.storage.errors import ErrorClass, TransferError
 from c2w.sync import queue
+from c2w.web.accounts import (
+    AccountError,
+    add_connection,
+    add_destination,
+    delete_connection,
+    delete_destination,
+    test_connection,
+    test_destination,
+    update_connection,
+    update_destination,
+    wasabi_region_choices,
+)
 from c2w.web.filters import register as register_filters
 
 log = get_logger(__name__)
+
+#: The result of the last Test, handed to the page after the redirect.
+#:
+#: In memory and per process, which is right for what it is: a probe result is
+#: interesting for one page view and worthless afterwards. Putting it in the
+#: database would mean writing a row on every button press and cleaning them up
+#: later; putting it in the session cookie would mean sending a report of
+#: someone's credentials back through a browser.
+_PROBE_RESULTS: dict[tuple[str, int | None], Any] = {}
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -69,24 +93,41 @@ register_filters(templates.env)
 router = APIRouter(include_in_schema=False)
 
 
+#: Falls back to the registry default rather than UTC, so the clock and the
+#: schedules agree with each other before anyone has chosen a zone.
 async def _shell(
     request: Request, session: AsyncSession, user: User, nav: str, **extra: Any
 ) -> dict[str, Any]:
-    """Context every page needs: who is signed in, which brand, what they may do."""
+    """Context every page needs.
+
+    Permissions are for the organisation being looked at, not the one on the
+    account: the same person can be an admin for one of these companies and an
+    operator for the other.
+    """
     brands = await selectable_brands(session, user)
     brand_cookie = request.cookies.get(BRAND_COOKIE)
     active: Brand | None = None
     if brand_cookie and brand_cookie.isdigit():
         active = next((b for b in brands if b.id == int(brand_cookie)), None)
     if active is None:
-        active = brands[0] if brands else None
+        active = next((b for b in brands if b.id == user.brand_id), None) or (
+            brands[0] if brands else None
+        )
+
+    role_here = await effective_role(session, user, active.id if active else None)
+    timezone = await settings_service.get_str(
+        session, "org.timezone", brand_id=active.id if active else None
+    )
     return {
         "request": request,
         "user": user,
         "brands": brands,
         "active_brand": active,
         "nav": nav,
-        "permissions": {str(p) for p in permissions_for(user.role)},
+        "role_here": role_here,
+        "org_timezone": timezone,
+        "prefs": user.preferences or {},
+        "permissions": {str(p) for p in permissions_for(role_here)},
         **extra,
     }
 
@@ -603,15 +644,25 @@ async def sync_status(user: CurrentUser, session: ScopedSession) -> Response:
 
 @router.get("/admin/connections", response_class=HTMLResponse)
 async def admin_connections(
-    request: Request, user: CurrentUser, session: ScopedSession
+    request: Request,
+    user: CurrentUser,
+    session: ScopedSession,
+    saved: str | None = None,
+    error: str | None = None,
+    tested: int | None = None,
 ) -> Response:
     connections = (
         (await session.execute(select(CommPeakConnection).order_by(CommPeakConnection.name)))
         .scalars()
         .all()
     )
-    destinations = {
-        d.id: d for d in (await session.execute(select(StorageDestination))).scalars().all()
+    destinations = (
+        (await session.execute(select(StorageDestination).order_by(StorageDestination.name)))
+        .scalars()
+        .all()
+    )
+    tenants = {
+        t.id: t for t in (await session.execute(select(Tenant))).scalars().all()
     }
     counts_rows = (
         await session.execute(
@@ -622,29 +673,140 @@ async def admin_connections(
             )
         )
     ).mappings().all()
-    counts = {r["connection_id"]: dict(r) for r in counts_rows}
+
+    probe = _PROBE_RESULTS.pop(("connection", tested), None) if tested else None
+
     return templates.TemplateResponse(
         request,
         "connections.html",
         await _shell(
             request, session, user, "connections",
-            connections=connections, destinations=destinations, counts=counts,
+            connections=connections,
+            destinations={d.id: d for d in destinations},
+            destination_list=destinations,
+            tenants=tenants,
+            counts={r["connection_id"]: dict(r) for r in counts_rows},
+            commpeak_endpoints=(COMMPEAK_ENDPOINT,),
+            auth_schemes=("bearer", "header", "basic", "query", "none"),
+            probe=probe,
+            probe_for=tested,
+            saved=saved,
+            error=error,
         ),
     )
 
 
+@router.post("/admin/connections")
+async def admin_connections_save(
+    request: Request,
+    user: CurrentUser,
+    session: ScopedSession,
+    brand_id: Annotated[int, Depends(active_brand_id)],
+) -> Response:
+    """Add or change a CommPeak account from the browser."""
+    if Permission.STORAGE_MANAGE not in permissions_for(
+        await effective_role(session, user, brand_id)
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not manage accounts")
+
+    form = {k: str(v) for k, v in (await request.form()).items()}
+    action = form.get("action") or "add"
+    try:
+        if action == "add":
+            conn = await add_connection(session, brand_id, form, actor=user.email)
+            target = f"/admin/connections?saved={quote_plus(conn.name)}"
+        elif action == "update":
+            conn = await update_connection(
+                session, brand_id, int(form["connection_id"]), form, actor=user.email
+            )
+            target = f"/admin/connections?saved={quote_plus(conn.name)}"
+        elif action == "test":
+            connection_id = int(form["connection_id"])
+            outcome = await test_connection(session, brand_id, connection_id)
+            _PROBE_RESULTS[("connection", connection_id)] = outcome
+            target = f"/admin/connections?tested={connection_id}"
+        elif action == "remove":
+            name = await delete_connection(
+                session, brand_id, int(form["connection_id"]), actor=user.email
+            )
+            target = f"/admin/connections?saved={quote_plus(name + ' removed')}"
+        else:
+            target = "/admin/connections"
+    except (AccountError, TransferError, CryptoError) as exc:
+        target = f"/admin/connections?error={quote_plus(str(exc))}"
+    return RedirectResponse(target, status_code=status.HTTP_303_SEE_OTHER)
+
+
 @router.get("/admin/storage", response_class=HTMLResponse)
-async def admin_storage(request: Request, user: CurrentUser, session: ScopedSession) -> Response:
+async def admin_storage(
+    request: Request,
+    user: CurrentUser,
+    session: ScopedSession,
+    saved: str | None = None,
+    error: str | None = None,
+    tested: int | None = None,
+) -> Response:
     destinations = (
         (await session.execute(select(StorageDestination).order_by(StorageDestination.name)))
         .scalars()
         .all()
     )
+    probe = _PROBE_RESULTS.pop(("destination", tested), None) if tested else None
     return templates.TemplateResponse(
         request,
         "storage.html",
-        await _shell(request, session, user, "storage", destinations=destinations),
+        await _shell(
+            request, session, user, "storage",
+            destinations=destinations,
+            providers=("wasabi", "s3", "minio", "backblaze", "other"),
+            regions=wasabi_region_choices(),
+            probe=probe,
+            probe_for=tested,
+            saved=saved,
+            error=error,
+        ),
     )
+
+
+@router.post("/admin/storage")
+async def admin_storage_save(
+    request: Request,
+    user: CurrentUser,
+    session: ScopedSession,
+    brand_id: Annotated[int, Depends(active_brand_id)],
+) -> Response:
+    """Add or change archive storage from the browser."""
+    if Permission.STORAGE_MANAGE not in permissions_for(
+        await effective_role(session, user, brand_id)
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not manage storage")
+
+    form = {k: str(v) for k, v in (await request.form()).items()}
+    action = form.get("action") or "add"
+    try:
+        if action == "add":
+            dest = await add_destination(session, brand_id, form, actor=user.email)
+            target = f"/admin/storage?saved={quote_plus(dest.name)}"
+        elif action == "update":
+            dest = await update_destination(
+                session, brand_id, int(form["destination_id"]), form, actor=user.email
+            )
+            target = f"/admin/storage?saved={quote_plus(dest.name)}"
+        elif action == "test":
+            destination_id = int(form["destination_id"])
+            outcome = await test_destination(session, brand_id, destination_id)
+            _PROBE_RESULTS[("destination", destination_id)] = outcome
+            target = f"/admin/storage?tested={destination_id}"
+        elif action == "remove":
+            name = await delete_destination(
+                session, brand_id, int(form["destination_id"]), actor=user.email
+            )
+            target = f"/admin/storage?saved={quote_plus(name + ' stopped')}"
+        else:
+            target = "/admin/storage"
+    except (AccountError, TransferError, CryptoError) as exc:
+        target = f"/admin/storage?error={quote_plus(str(exc))}"
+    return RedirectResponse(target, status_code=status.HTTP_303_SEE_OTHER)
 
 
 #: A one-line orientation for each card, above its fields.
@@ -980,6 +1142,132 @@ async def admin_users(
     return templates.TemplateResponse(
         request, "users.html", await _shell(request, session, user, "users", users=users)
     )
+
+
+
+# ------------------------------------------------------------------ my account
+
+
+@router.get("/me", response_class=HTMLResponse)
+async def my_account(
+    request: Request,
+    user: CurrentUser,
+    session: ScopedSession,
+    saved: str | None = None,
+    error: str | None = None,
+) -> Response:
+    """Everything about the person signed in, in one place.
+
+    Password and two-factor only appear for an account kept here: for one that
+    signs in through Microsoft, Google or a directory, those live in that
+    system, and offering them here would be offering something that cannot work.
+    """
+    return templates.TemplateResponse(
+        request,
+        "me.html",
+        await _shell(
+            request,
+            session,
+            user,
+            "me",
+            font_choices=(("90", "Smaller"), ("100", "Default"), ("110", "Larger"),
+                          ("125", "Largest")),
+            theme_choices=(("auto", "Match the system"), ("light", "Light"), ("dark", "Dark")),
+            saved=saved,
+            error=error,
+        ),
+    )
+
+
+@router.post("/me/appearance")
+async def save_appearance(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    """Store what this person chose for themselves.
+
+    On the account rather than in the browser, so it follows them to another
+    machine. Values are clamped rather than trusted: these come from a form.
+    """
+    form = await request.form()
+    prefs = dict(user.preferences or {})
+
+    theme = str(form.get("theme") or "auto")
+    prefs["theme"] = theme if theme in ("auto", "light", "dark") else "auto"
+
+    try:
+        scale = int(str(form.get("font_scale") or 100))
+    except ValueError:
+        scale = 100
+    prefs["font_scale"] = min(max(scale, 80), 150)
+
+    try:
+        volume = int(str(form.get("volume") or 100))
+    except ValueError:
+        volume = 100
+    prefs["volume"] = min(max(volume, 0), 100)
+
+    row = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+    row.preferences = prefs
+    await session.flush()
+    return RedirectResponse("/me?saved=appearance", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/me/password")
+async def change_my_password(
+    request: Request,
+    user: CurrentUser,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    """Change the password on an account kept here.
+
+    The current one is required: a session left open on an unlocked machine
+    should not be enough to lock its owner out. Every other session is ended,
+    because a stolen cookie must not outlive the credential it was issued
+    against.
+    """
+    from c2w.auth.local import (
+        AuthError,
+        hash_password,
+        revoke_all_sessions,
+        verify_password,
+    )
+
+    if user.auth_source != AuthSource.LOCAL:
+        return RedirectResponse(
+            "/me?error=This+account+signs+in+through+your+organisation",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    form = await request.form()
+    current = str(form.get("current") or "")
+    new = str(form.get("new") or "")
+    again = str(form.get("again") or "")
+
+    row = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+    if not row.password_hash or not verify_password(row.password_hash, current):
+        return RedirectResponse(
+            "/me?error=Your+current+password+is+not+right",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    if new != again:
+        return RedirectResponse(
+            "/me?error=The+two+new+passwords+do+not+match",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    try:
+        row.password_hash = hash_password(new)
+    except AuthError as exc:
+        return RedirectResponse(
+            f"/me?error={quote_plus(str(exc))}", status_code=status.HTTP_303_SEE_OTHER
+        )
+
+    await revoke_all_sessions(session, row.id)
+    await session.flush()
+    response = RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    response.delete_cookie(SESSION_COOKIE)
+    return response
 
 
 # ----------------------------------------------------------------------- media

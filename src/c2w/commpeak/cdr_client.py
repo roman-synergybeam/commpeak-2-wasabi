@@ -1,24 +1,35 @@
-"""CommPeak CDR API client and ingest.
+"""CommPeak CDR client, against the documented PBX Stats API.
 
-The field names here come from a real CDR payload, so the mapping is concrete::
+The contract, from https://docs.commpeak.com/reference/searchcdrs:
 
-    {"object_type_id":4, "start_at":"2026-09-08 00:52:17", "end_at":"...",
-     "src":"593990899917@did.commpeak.com", "dst":"0007281",
-     "call_uuid":"e9a46b6f-...", "call_duration":35, "status":"NORMAL_CLEARING",
-     "call_id":113332, "caller_user":"System",
-     "public_recording_url":"https://<tenant>/record/public/113332/<sha1>/as/mp3", ...}
+    POST https://<instance>.stats.pbx.commpeak.com/api/cdrs
+    Content-Type: application/x-www-form-urlencoded
+    Authorization: <API key>
 
-What is *not* pinned down is the transport: the endpoint path, the
-authentication scheme and the pagination style differ between CommPeak
-deployments, and the published reference for ``getAllCdrs`` was unavailable when
-this was written.  So those are configuration, and the response parsing is
-written defensively -- it accepts a bare list, ``{"data": [...]}`` or
-``{"items": [...]}``, and tolerates missing fields rather than refusing a whole
-page because one column was renamed.
+    page, cdrs_per_page        pagination, 1-based
+    from, till                 the range; defaults are yesterday 00:00 and now
+    sort_by, sort_direction    ordering
+    country                    ISO-3166 alpha-2, e.g. IL,UA,US
+    direction, call_type, destination, source, extension, did, caller_id,
+    hangup_cause, agent, queue, bridged_agent, uniqueid, id, successful,
+    completed, transferred, shift            filters
+    {custom_field}             any custom field, by name
 
-Timestamps arrive without a zone (``2026-09-08 00:52:17``).  They are read as
-UTC, which is consistent with the recording filenames: the documented example
-key's channel id decodes to exactly its wall-clock field in UTC.
+    -> {"cdrs": [ ... ]}
+
+Three things in here were guesses before the reference was found, and all three
+were wrong: it was a GET with query parameters, paged with limit/offset, and
+read a date range called ``start_at_from``. It is a form-encoded POST, paged
+with ``page``/``cdrs_per_page``, and the range is ``from``/``till``.
+
+The response carries what the calls page needs and this system was previously
+inferring or missing: ``country_name`` for the destination country,
+``agent_name`` and ``agent_pbxExtension`` for who handled it, ``queue_name``,
+``bill_duration``, ``waiting_time``, ``cost`` and ``recording_link``.
+
+Timestamps come back without a zone. They are read as UTC, which is consistent
+with the recording filenames: the documented example key's channel id decodes
+to exactly its wall-clock field in UTC.
 """
 
 from __future__ import annotations
@@ -26,7 +37,7 @@ from __future__ import annotations
 import enum
 import json
 from collections.abc import AsyncIterator, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -43,9 +54,11 @@ __all__ = [
     "AuthScheme",
     "CdrApiConfig",
     "CdrClient",
+    "CdrQueryFilters",
     "ingest_page",
     "normalise_cdr",
     "parse_cdr_timestamp",
+    "poll_window",
 ]
 
 _TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
@@ -64,25 +77,70 @@ class AuthScheme(enum.StrEnum):
 
 @dataclass(slots=True)
 class CdrApiConfig:
-    """How to reach one tenant's CDR API.
+    """How to reach one CommPeak PBX Stats instance.
 
-    Deliberately generic: until the exact contract is confirmed, an operator can
-    point this at the right endpoint without a code change.
+    ``base_url`` is the instance's own host -- the API is per-instance, not a
+    shared endpoint, which is why every account carries its own.
     """
 
     base_url: str
-    path: str = "/api/v1/cdrs"
-    auth: AuthScheme = AuthScheme.BEARER
+    path: str = "/api/cdrs"
+    auth: AuthScheme = AuthScheme.HEADER
     token: str = ""
     username: str = ""
-    #: Query parameter names, which vary between deployments.
-    param_from: str = "start_at_from"
-    param_to: str = "start_at_to"
-    param_limit: str = "limit"
-    param_offset: str = "offset"
-    header_name: str = "X-API-Key"
-    page_size: int = DEFAULT_PAGE_SIZE
+    header_name: str = "Authorization"
+    #: The API's own name for the page size.
+    page_size: int = 500
+    sort_by: str = "call_start"
+    sort_direction: str = "desc"
+    response_format: str = "json"
     verify_tls: bool = True
+
+
+@dataclass(slots=True)
+class CdrQueryFilters:
+    """The documented filters, as a narrowing on a fetch.
+
+    Only the ones with a value are sent, so an empty object fetches everything
+    in the range.
+    """
+
+    country: str = ""          # ISO-3166 alpha-2, comma separated
+    direction: str = ""
+    call_type: str = ""
+    destination: str = ""
+    source: str = ""
+    extension: str = ""
+    did: str = ""
+    caller_id: str = ""
+    hangup_cause: str = ""
+    agent: str = ""
+    queue: str = ""
+    uniqueid: str = ""
+    successful: bool | None = None
+    completed: bool | None = None
+    transferred: bool | None = None
+    bill_duration_from: int | None = None
+    #: Any custom field the instance defines, by its own name.
+    custom: dict[str, str] = field(default_factory=dict)
+
+    def as_form(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for name in (
+            "country", "direction", "call_type", "destination", "source",
+            "extension", "did", "caller_id", "hangup_cause", "agent", "queue",
+            "uniqueid",
+        ):
+            if value := getattr(self, name):
+                out[name] = str(value)
+        for name in ("successful", "completed", "transferred"):
+            value = getattr(self, name)
+            if value is not None:
+                out[name] = "1" if value else "0"
+        if self.bill_duration_from is not None:
+            out["bill_duration_from"] = str(self.bill_duration_from)
+        out.update({k: str(v) for k, v in self.custom.items() if v})
+        return out
 
 
 def parse_cdr_timestamp(value: Any) -> datetime | None:
@@ -105,58 +163,96 @@ def parse_cdr_timestamp(value: Any) -> datetime | None:
 
 
 def _direction_of(record: dict[str, Any]) -> str | None:
-    """Infer call direction.
+    """Map the API's ``type`` onto inbound or outbound.
 
-    CommPeak does not send a direction field in the observed payload, but an
-    ``@did.commpeak.com`` source is an inbound DID leg, which is the same signal
-    the recording filenames encode as ``in``/``out``.
+    The value is free-form across instances, so the check is on what it
+    contains rather than on an exact match.
     """
-    src = str(record.get("src") or "")
-    if "@did." in src:
-        return "in"
-    if str(record.get("object_type_id") or "") == "4":
-        return "in"
-    dst = str(record.get("dst") or "")
-    if "@" in dst:
+    raw = str(record.get("type") or record.get("direction") or "").strip().lower()
+    if not raw:
+        # The other CDR source has no direction field, but an @did. source is
+        # an inbound DID leg -- the same signal the recording filenames encode.
+        return "in" if "@did." in str(record.get("src") or "") else None
+    if "out" in raw:
         return "out"
+    if "in" in raw:
+        return "in"
+    if raw in ("internal", "local"):
+        return "internal"
     return None
 
 
-def normalise_cdr(record: dict[str, Any]) -> dict[str, Any]:
-    """Map one API record onto our column names.
+def _seconds(value: Any) -> int | None:
+    """Durations arrive as strings, and sometimes as H:MM:SS."""
+    if value in (None, ""):
+        return None
+    raw = str(value).strip()
+    if raw.isdigit():
+        return int(raw)
+    parts = raw.split(":")
+    if 1 < len(parts) <= 3 and all(part.strip().isdigit() for part in parts):
+        total = 0
+        for part in parts:
+            total = total * 60 + int(part)
+        return total
+    try:
+        return int(float(raw))
+    except ValueError:
+        return None
 
-    The full payload is kept in ``raw`` so a field we did not model -- or one
-    CommPeak adds later -- is never lost, and ``src_norm``/``dst_norm`` are
-    computed on write so number search and correlation never pay for
-    normalisation per row.
+
+def normalise_cdr(record: dict[str, Any]) -> dict[str, Any]:
+    """Map one documented CDR onto our columns.
+
+    Field names come from the PBX Stats reference, with the names from the
+    other CDR source accepted as fallbacks -- the two do not agree, and an
+    instance may be on either.
+
+    The whole payload is kept in ``raw`` so a field not modelled yet -- custom
+    fields, cost, desks -- is never lost, and a later column can be backfilled
+    from what was already stored.
+
+    ``src_norm``/``dst_norm`` are computed on write rather than at query time:
+    number search and recording correlation both compare digit suffixes, and
+    doing that per row on read would make both slow.
     """
-    start_at = parse_cdr_timestamp(record.get("start_at"))
-    end_at = parse_cdr_timestamp(record.get("end_at"))
-    src = record.get("src")
-    dst = record.get("dst")
-    recording_url = record.get("public_recording_url") or record.get("record_file")
+    start_at = parse_cdr_timestamp(record.get("call_start") or record.get("start_at"))
+    end_at = parse_cdr_timestamp(record.get("call_end") or record.get("end_at"))
+    source = record.get("caller_id") or record.get("source") or record.get("src")
+    destination = record.get("destination") or record.get("dst")
+
+    # PBX Stats calls it uniqueid; the other source called it call_uuid.
+    call_uuid = record.get("uniqueid") or record.get("call_uuid") or record.get("id")
+    numeric_id = record.get("id") if str(record.get("id") or "").isdigit() else None
 
     return {
-        "call_uuid": record.get("call_uuid"),
-        "call_id": record.get("call_id"),
+        "call_uuid": str(call_uuid) if call_uuid is not None else None,
+        "call_id": int(numeric_id) if numeric_id is not None else record.get("call_id"),
         "start_at": start_at,
         "end_at": end_at,
-        "call_duration": record.get("call_duration"),
+        "call_duration": _seconds(record.get("duration") or record.get("call_duration")),
         "direction": _direction_of(record),
-        "src": src,
-        "dst": dst,
-        "src_norm": normalise_msisdn(src) or None,
-        "dst_norm": normalise_msisdn(dst) or None,
-        "dst_country": record.get("dst_country"),
-        "agent_extension": record.get("agent_callerid_number"),
-        "agent_name": record.get("agent_callerid_name"),
+        "src": source,
+        "dst": destination,
+        "src_norm": normalise_msisdn(source) or None,
+        "dst_norm": normalise_msisdn(destination) or None,
+        # The destination country, which the calls page shows as a column.
+        "dst_country": record.get("country_name") or record.get("dst_country"),
+        # Whoever handled it. A transferred call has a second agent.
+        "agent_extension": record.get("agent_pbxExtension")
+        or record.get("agent_callerid_number"),
+        "agent_name": record.get("agent_name") or record.get("agent_callerid_name"),
         "caller_user": record.get("caller_user") or record.get("caller_username"),
-        "client_callerid_name": record.get("client_callerid_name"),
+        "client_callerid_name": record.get("source_name")
+        or record.get("client_callerid_name"),
         "client_callerid_number": record.get("client_callerid_number"),
-        "status": record.get("status"),
-        "hangup_disposition": record.get("client_hangup_disposition")
+        "status": record.get("hangup_cause") or record.get("status"),
+        "hangup_disposition": record.get("hangup_disposition")
+        or record.get("client_hangup_disposition")
         or record.get("agent_hangup_disposition"),
-        "public_recording_url": recording_url,
+        "public_recording_url": record.get("recording_link")
+        or record.get("public_recording_url")
+        or record.get("record_file"),
         "raw": record,
     }
 
@@ -177,57 +273,70 @@ def _extract_records(payload: Any) -> list[dict[str, Any]]:
 
 
 class CdrClient:
-    """Reads CDRs for one connection."""
+    """Reads CDRs from one PBX Stats instance."""
 
     def __init__(self, config: CdrApiConfig) -> None:
         self.config = config
 
-    def _auth_bits(self) -> tuple[dict[str, str], dict[str, str], httpx.Auth | None]:
-        headers: dict[str, str] = {"Accept": "application/json"}
-        params: dict[str, str] = {}
+    def _auth(self) -> tuple[dict[str, str], dict[str, str], httpx.Auth | None]:
+        headers = {"Accept": "application/json"}
+        form: dict[str, str] = {}
         auth: httpx.Auth | None = None
         match self.config.auth:
-            case AuthScheme.BEARER:
-                headers["Authorization"] = f"Bearer {self.config.token}"
             case AuthScheme.HEADER:
                 headers[self.config.header_name] = self.config.token
-            case AuthScheme.QUERY:
-                params["api_key"] = self.config.token
+            case AuthScheme.BEARER:
+                headers["Authorization"] = f"Bearer {self.config.token}"
             case AuthScheme.BASIC:
                 auth = httpx.BasicAuth(self.config.username, self.config.token)
+            case AuthScheme.QUERY:
+                form["api_key"] = self.config.token
             case AuthScheme.NONE:
                 pass
-        return headers, params, auth
+        return headers, form, auth
 
     async def fetch_range(
-        self, start: datetime, end: datetime, *, max_pages: int = 500
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        filters: CdrQueryFilters | None = None,
+        max_pages: int = 500,
     ) -> AsyncIterator[list[dict[str, Any]]]:
-        """Yield pages of raw CDR records covering ``[start, end]``.
+        """Yield pages of CDRs covering ``[start, end]``.
 
-        ``max_pages`` bounds a run: a misconfigured pagination parameter that
-        the API ignores would otherwise loop forever re-reading page one.
+        A form-encoded POST, because that is what the API takes -- not a GET
+        with query parameters. Pages are 1-based via ``page``/``cdrs_per_page``.
+
+        ``max_pages`` bounds a run: an instance that ignores the page parameter
+        would otherwise return page one for ever.
         """
-        headers, base_params, auth = self._auth_bits()
+        headers, base_form, auth = self._auth()
         url = self.config.base_url.rstrip("/") + "/" + self.config.path.lstrip("/")
+        narrowing = (filters or CdrQueryFilters()).as_form()
 
         async with httpx.AsyncClient(
             timeout=_TIMEOUT, verify=self.config.verify_tls, auth=auth
         ) as client:
-            offset = 0
-            for _page in range(max_pages):
-                params = {
-                    **base_params,
-                    self.config.param_from: start.strftime("%Y-%m-%d %H:%M:%S"),
-                    self.config.param_to: end.strftime("%Y-%m-%d %H:%M:%S"),
-                    self.config.param_limit: str(self.config.page_size),
-                    self.config.param_offset: str(offset),
+            for page in range(1, max_pages + 1):
+                form = {
+                    **base_form,
+                    **narrowing,
+                    "format": self.config.response_format,
+                    "page": str(page),
+                    "cdrs_per_page": str(self.config.page_size),
+                    "sort_by": self.config.sort_by,
+                    "sort_direction": self.config.sort_direction,
+                    "from": start.strftime("%Y-%m-%d %H:%M:%S"),
+                    "till": end.strftime("%Y-%m-%d %H:%M:%S"),
                 }
-                response = await client.get(url, params=params, headers=headers)
+                response = await client.post(url, data=form, headers=headers)
                 if response.status_code == 401:
-                    raise PermissionError("CDR API rejected the credentials (401)")
+                    raise PermissionError("the CDR API rejected the credentials (401)")
                 if response.status_code == 403:
                     raise PermissionError(
-                        "CDR API returned 403; check the API user's permissions and IP allow-list"
+                        "the CDR API returned 403; check the API key's permissions "
+                        "and whether this server's address is allowed"
                     )
                 response.raise_for_status()
 
@@ -237,11 +346,10 @@ class CdrClient:
                 yield records
                 if len(records) < self.config.page_size:
                     return
-                offset += len(records)
             log.warning(
                 "cdr.page_limit_reached",
                 max_pages=max_pages,
-                detail="stopping; check that the offset parameter is honoured",
+                detail="stopping; check that the page parameter is honoured",
             )
 
 
