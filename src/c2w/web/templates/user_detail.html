@@ -2,7 +2,7 @@
 {% block title %}{{ target.email }} — c2w{% endblock %}
 {% block body %}
 
-<p class="sub" style="margin-bottom:6px"><a href="/admin/users">&lsaquo; People</a></p>
+<p class="sub" style="margin-bottom:6px"><a href="/admin/users">&lsaquo; Users</a></p>
 <h1>{{ target.display_name or target.email }}</h1>
 <p class="sub">
   {{ target.email }} &mdash; signs in with {{ target.auth_source | auth_label }},

@@ -115,6 +115,52 @@ router = APIRouter(include_in_schema=False)
 
 #: Falls back to the registry default rather than UTC, so the clock and the
 #: schedules agree with each other before anyone has chosen a zone.
+#: Typefaces on offer. Every one is a stack of families already present on a
+#: normal machine: this console runs on a private network with no outbound
+#: access, so a downloaded font would silently fall back to something else and
+#: the setting would appear to do nothing.
+FONT_STACKS: Final[dict[str, tuple[str, str]]] = {
+    "system": (
+        "Match the system",
+        'system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif',
+    ),
+    "humanist": (
+        "Segoe UI / Helvetica",
+        '"Segoe UI","Helvetica Neue",Helvetica,Arial,sans-serif',
+    ),
+    "grotesque": ("Roboto / Arial", 'Roboto,Arial,"Liberation Sans",Helvetica,sans-serif'),
+    "serif": ("Georgia / Times", 'Georgia,"Times New Roman",Times,serif'),
+    "mono": (
+        "Monospace throughout",
+        'ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace',
+    ),
+}
+
+#: Sizes in pixels, so the label says what it does. 20 is the default: four
+#: more than the browser's usual 16.
+FONT_SIZES: Final[tuple[int, ...]] = (14, 16, 18, 20, 22, 24, 28)
+DEFAULT_FONT_PX = 20
+
+
+def _font_px(prefs: dict[str, Any]) -> int:
+    """The chosen size, converting an older percentage preference if present.
+
+    Sizes used to be stored as a percentage of the browser default. Anyone who
+    had set one keeps the size they chose rather than being silently reset.
+    """
+    raw = prefs.get("font_px")
+    if raw is None and prefs.get("font_scale"):
+        try:
+            raw = round(16 * float(prefs["font_scale"]) / 100)
+        except (TypeError, ValueError):
+            raw = None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_FONT_PX
+    return min(max(value, FONT_SIZES[0]), FONT_SIZES[-1])
+
+
 async def _brand_scope(
     request: Request, session: AsyncSession, user: User
 ) -> tuple[list[Brand], Brand | None]:
@@ -159,6 +205,12 @@ async def _shell(
         "nav": nav,
         "role_here": role_here,
         "org_timezone": timezone,
+        # Resolved here rather than in the template: an unknown value must fall
+        # back to a real stack, not to an empty `font-family:` declaration.
+        "font_stack": FONT_STACKS.get(
+            str((user.preferences or {}).get("font_family") or "system"),
+            FONT_STACKS["system"],
+        )[1],
         # Drives whether the Messages tab appears at all: an empty page behind
         # a menu item that will never have data is worse than no menu item.
         "sms_enabled": await settings_service.get_bool(
@@ -1052,7 +1104,7 @@ _CATEGORY_NOTES = {
     "Microsoft 365": "Let staff sign in with their Microsoft work account "
     "instead of a password kept here.",
     "Google Workspace": "Let staff sign in with their Google work account.",
-    "Active Directory": "Take the list of people, and who is an administrator, "
+    "Active Directory": "Take the list of users, and who is an administrator, "
     "from a domain controller you run.",
     "Two-factor and passwords": "Applies to accounts kept here. Accounts from "
     "Microsoft, Google or your directory follow that system's rules.",
@@ -1061,7 +1113,7 @@ _CATEGORY_NOTES = {
     "the recogniser is not.",
     "Cloudflare": "Reaching this console from outside, and keeping robots off "
     "the sign-in page.",
-    "Web address and sessions": "How people reach this console, and how long a sign-in lasts.",
+    "Web address and sessions": "How users reach this console, and how long a sign-in lasts.",
     "Logs and monitoring": "What the services write down.",
 }
 
@@ -1095,7 +1147,7 @@ _LOCKED_SETTINGS = frozenset({"source.read_only", "retention.allow_source_deleti
 _MANAGE_LINKS = {
     "CommPeak calls": ("/admin/connections", "Manage CommPeak accounts"),
     "Wasabi storage": ("/admin/storage", "Manage archive storage"),
-    "Two-factor and passwords": ("/admin/users", "Manage people"),
+    "Two-factor and passwords": ("/admin/users", "Manage users"),
 }
 
 
@@ -1189,7 +1241,7 @@ async def _setup_steps(session: AsyncSession, brand: Brand | None) -> list[dict[
             "action": "",
         },
         {
-            "label": "Add the people who need access",
+            "label": "Add the users who need access",
             "detail": f"{users} account(s)",
             "done": users > 1,
             "optional": True,
@@ -1565,7 +1617,7 @@ async def _users_context(
     error: str | None = None,
     saved: str | None = None,
 ) -> dict[str, Any]:
-    """The people page: the list, plus everything the add form has to offer."""
+    """The users page: the list, plus everything the add form has to offer."""
     stmt = select(User).order_by(User.email)
     if not user.is_super_admin:
         stmt = stmt.where(User.brand_id == user.brand_id)
@@ -1663,7 +1715,7 @@ def _assert_may_assign(actor: User, role: Role, brand_id: int | None) -> None:
         )
     if not actor.is_super_admin and brand_id != actor.brand_id:
         raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "you can only add people to your own organisation"
+            status.HTTP_403_FORBIDDEN, "you can only add users to your own organisation"
         )
 
 
@@ -1780,9 +1832,9 @@ async def add_user(
         try:
             brand_ids = [int(v) for v in brand_raws]
         except ValueError:
-            return await back("That is not an organisation you can add people to")
+            return await back("That is not an organisation you can add users to")
         if not set(brand_ids) <= allowed:
-            return await back("That is not an organisation you can add people to")
+            return await back("That is not an organisation you can add users to")
         # The first ticked is where they land after signing in; the rest are
         # theirs to switch to.
         brand_id = brand_ids[0]
@@ -1889,14 +1941,35 @@ async def browse_directory(
     _, active = await _brand_scope(request, session, user)
     brand_id = active.id if active else None
     config = await directory.load_config(session, brand_id=brand_id)
-    enabled = await settings_service.get_bool(session, "ldap.enabled", brand_id=brand_id)
-    if not enabled:
+    ldap_on = await settings_service.get_bool(session, "ldap.enabled", brand_id=brand_id)
+    entra_on = await settings_service.get_bool(
+        session, "auth.oidc_entra_enabled", brand_id=brand_id
+    )
+    google_on = await settings_service.get_bool(
+        session, "auth.oidc_google_enabled", brand_id=brand_id
+    )
+
+    if ldap_on:
+        result = await directory.search(config, entry_kind, q)
+    elif entra_on or google_on:
+        # Being honest about the gap rather than returning an empty list that
+        # looks like "nobody matches". Entra and Google are wired for *sign-in*;
+        # reading their user lists needs Microsoft Graph or the Google Admin
+        # SDK, which is a separate integration and is not built.
+        which = " and ".join(
+            n for n, on in (("Microsoft Entra ID", entra_on), ("Google Workspace", google_on)) if on
+        )
         result = directory.DirectoryResult(
-            error="Active Directory is switched off. Turn on "
-                  "\u201cTake the list of people from Active Directory\u201d under Settings."
+            error=f"{which} is set up for signing in, but its directory cannot be "
+                  "searched from here yet -- that needs Microsoft Graph or the Google "
+                  "Admin API, which is not built. Type the address in by hand; it is "
+                  "matched at their first sign-in."
         )
     else:
-        result = await directory.search(config, entry_kind, q)
+        result = directory.DirectoryResult(
+            error="No directory is connected. Turn on Active Directory under "
+                  "Settings to search it, or type the address in by hand."
+        )
 
     return templates.TemplateResponse(
         request,
@@ -3020,8 +3093,10 @@ async def my_account(
             session,
             user,
             "me",
-            font_choices=(("90", "Smaller"), ("100", "Default"), ("110", "Larger"),
-                          ("125", "Largest")),
+            font_sizes=FONT_SIZES,
+            font_px=_font_px(user.preferences or {}),
+            font_families=[(k, v[0]) for k, v in FONT_STACKS.items()],
+            font_family=str((user.preferences or {}).get("font_family") or "system"),
             theme_choices=(("auto", "Match the system"), ("light", "Light"), ("dark", "Dark")),
             recovery_left=len(user.totp_recovery_hashes or []),
             mfa_required=await settings_service.get_bool(session, "mfa.require_totp"),
@@ -3048,11 +3123,18 @@ async def save_appearance(
     theme = str(form.get("theme") or "auto")
     prefs["theme"] = theme if theme in ("auto", "light", "dark") else "auto"
 
+    # Size in pixels now. The old percentage is dropped rather than kept in
+    # step, because two fields meaning the same thing is how they end up
+    # disagreeing.
     try:
-        scale = int(str(form.get("font_scale") or 100))
+        size = int(str(form.get("font_px") or DEFAULT_FONT_PX))
     except ValueError:
-        scale = 100
-    prefs["font_scale"] = min(max(scale, 80), 150)
+        size = DEFAULT_FONT_PX
+    prefs["font_px"] = min(max(size, FONT_SIZES[0]), FONT_SIZES[-1])
+    prefs.pop("font_scale", None)
+
+    family = str(form.get("font_family") or "system")
+    prefs["font_family"] = family if family in FONT_STACKS else "system"
 
     try:
         volume = int(str(form.get("volume") or 100))

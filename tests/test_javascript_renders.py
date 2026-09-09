@@ -57,7 +57,8 @@ def _context() -> dict:
         ),
         # A theme with a quote in it would break a naive filter; a zone with a
         # slash is the real value that did.
-        "prefs": {"theme": "dark", "font_scale": 110, "volume": 140},
+        "prefs": {"theme": "dark", "font_px": 20, "volume": 140},
+        "font_stack": 'system-ui,-apple-system,"Segoe UI",Arial,sans-serif',
         "org_timezone": "America/Puerto_Rico",
         "role_here": _Obj(label="operator", value="OPERATOR"),
         "brands": [],
@@ -178,3 +179,41 @@ class TestZoneLabel:
     def test_reads_as_an_offset(self, zone: str, expected: str) -> None:
         env = _env()
         assert env.from_string("{{ z | zone_label }}").render(z=zone) == expected
+
+
+class TestRenderedInlineStyles:
+    """The <style> block is escaped-value territory too.
+
+    Autoescaping turned the quotes in a font stack -- `"Segoe UI"` -- into
+    `&#34;`, which is invalid CSS, so choosing a typeface silently did nothing.
+    Same failure as the `<script>` one this file was written for: the template
+    renders, the page returns 200, and only the behaviour is missing.
+    """
+
+    STYLE = re.compile(r"<style[^>]*>(.*?)</style>", re.S)
+
+    def test_no_escaped_entity_reaches_a_style_block(self) -> None:
+        context = _context()
+        context["font_stack"] = (
+            'system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif'
+        )
+        html = _env().get_template("base.html").render(**context)
+        blocks = self.STYLE.findall(html)
+        assert blocks, "base.html was expected to carry an inline style block"
+        for block in blocks:
+            assert "&#" not in block, f"HTML-escaped text inside <style>: {block.strip()[:120]}"
+            assert "&quot;" not in block
+            assert "&amp;" not in block
+
+    def test_the_font_stack_arrives_intact(self) -> None:
+        context = _context()
+        context["font_stack"] = 'Georgia,"Times New Roman",Times,serif'
+        html = _env().get_template("base.html").render(**context)
+        block = "\n".join(self.STYLE.findall(html))
+        assert '"Times New Roman"' in block
+
+    def test_the_size_is_a_number_of_pixels(self) -> None:
+        context = _context()
+        context["prefs"] = {"font_px": 24}
+        html = _env().get_template("base.html").render(**context)
+        assert "font-size: 24px" in html

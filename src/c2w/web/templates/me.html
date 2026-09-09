@@ -32,15 +32,31 @@
       <p class="hint">Matching the system follows your operating system's setting.</p>
     </div>
     <div>
-      <label for="font_scale">Text size</label>
-      <select id="font_scale" name="font_scale">
-        {% for value, label in font_choices %}
-          <option value="{{ value }}" {{ 'selected' if (prefs.font_scale or 100) | string == value }}>
-            {{ label }} ({{ value }}%)
+      <label for="font_px">Text size</label>
+      <select id="font_px" name="font_px">
+        {% for size in font_sizes %}
+          <option value="{{ size }}" {{ 'selected' if size == font_px }}>
+            {{ size }}px{{ ' — default' if size == 20 }}
           </option>
         {% endfor %}
       </select>
-      <p class="hint">Scales the whole console, tables included.</p>
+      <p class="hint">
+        Scales the whole console, tables and captions included. In pixels
+        rather than a percentage, because a percentage is relative to a browser
+        default you cannot see.
+      </p>
+    </div>
+    <div>
+      <label for="font_family">Typeface</label>
+      <select id="font_family" name="font_family">
+        {% for value, label in font_families %}
+          <option value="{{ value }}" {{ 'selected' if value == font_family }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <p class="hint">
+        Only faces already on this machine &mdash; the console runs on a private
+        network, so a downloaded font would quietly fall back to something else.
+      </p>
     </div>
     <div>
       <label for="volume">Playback volume

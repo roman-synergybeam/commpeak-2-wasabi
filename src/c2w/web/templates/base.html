@@ -22,9 +22,26 @@
     } catch (e) {}
   </script>
   <style>
-    /* Text size, as chosen on the account page. Every size in the kit is
-       relative to the root, so one number scales the whole console. */
-    :root { font-size: {{ (prefs.font_scale | default(100)) }}%; }
+    /* Text size and typeface, as chosen on the account page. Every size in the
+       kit is relative to the root, so one number scales the whole console --
+       tables, pills and captions included.
+
+       Pixels rather than a percentage: "18px" is a size somebody can reason
+       about, where "110%" is a size relative to a browser default they cannot
+       see. The default is 20px, four more than the browser's usual 16.
+
+       Every family below is one already installed on the machine. This console
+       runs on a private network with no outbound access, so a web font would
+       render as a silent fallback. */
+    :root {
+      font-size: {{ (prefs.font_px | default(20)) }}px;
+      {# `safe` because this is a CSS declaration, not text: autoescaping turns
+         the quotes in "Segoe UI" into &#34; and the whole font-family becomes
+         invalid, so the choice silently does nothing. The value is a constant
+         from FONT_STACKS -- the preference only ever selects a key, and an
+         unknown key falls back -- so nothing from the user reaches here. #}
+      --sans: {{ font_stack | safe }};
+    }
   </style>
   {# The kit, then the handful of rules it leaves to the application. kit.css
      is @imports in dependency order: tokens define what everything else

@@ -2,13 +2,13 @@
 {% block title %}People — c2w{% endblock %}
 {% block body %}
 
-<h1>People</h1>
+<h1>Users</h1>
 <p class="sub">Who can sign in, and what each role may do.</p>
 
 {% if users_error %}<div class="flash err">{{ users_error }}</div>{% endif %}
 {% if users_saved %}<div class="flash ok">{{ users_saved }}</div>{% endif %}
 
-<h2>Add someone</h2>
+<h2>Add a user</h2>
 
 {% if directory.any %}
   <div class="note">
@@ -35,54 +35,39 @@
   </div>
 {% endif %}
 
-{% if directory.ldap %}
-  <div class="card">
-    <h3 style="margin-top:0">Find them in Active Directory</h3>
-    <p class="hint">
-      Pick somebody from the directory rather than retyping their address. An
-      address that does not match exactly is not rejected &mdash; the account is
-      created and then never matches at sign-in, which is a worse failure than
-      a typo.
-    </p>
-    <div class="row">
-      <div>
-        <label for="dirq">Search the directory</label>
-        <input id="dirq" name="q" type="search" placeholder="name, login or address"
-               hx-get="/admin/users/directory" hx-target="#dirresults"
-               hx-include="#dirkind" hx-indicator="#dirspin"
-               hx-trigger="keyup changed delay:400ms, search">
-      </div>
-      <div>
-        <label for="dirkind">Looking for</label>
-        <select id="dirkind" name="kind"
-                hx-get="/admin/users/directory" hx-target="#dirresults"
-                hx-include="#dirq" hx-indicator="#dirspin">
-          <option value="user">People</option>
-          <option value="group">Groups</option>
-          <option value="ou">Organisational units</option>
-        </select>
-      </div>
-    </div>
-    <p><span id="dirspin" class="spin">searching the directory…</span></p>
-    <div id="dirresults"></div>
-  </div>
-{% endif %}
-
 <form class="card" method="post" action="/admin/users">
   <div class="row">
     <div>
       <label for="email">Email address</label>
+      {# The field is the search box: start typing a name or an address and the
+         directory is queried underneath it. Nothing is required of you if there
+         is no directory -- it stays an ordinary text field. #}
       <input id="email" name="email" type="email" required autocomplete="off"
-             placeholder="name@company.com">
-      <p class="hint">Also how they are matched to a directory account.</p>
+             placeholder="start typing a name or address"
+             {% if directory.any %}
+             hx-get="/admin/users/directory" hx-target="#dirresults"
+             hx-trigger="keyup changed delay:300ms"
+             hx-vals='js:{kind: "user", q: document.getElementById("email").value}'
+             hx-params="none"
+             hx-indicator="#dirspin"
+             {% endif %}>
+      <input type="hidden" id="directory_dn" name="directory_dn" value="">
+      {% if directory.any %}
+        <p class="hint">
+          <span id="dirspin" class="spin">searching the directory…</span>
+          Picking somebody fills the rest in from the directory, and their
+          password stops being asked for &mdash; a directory account has none
+          here.
+        </p>
+        <div id="dirresults"></div>
+      {% else %}
+        <p class="hint">Also how they are matched to a directory account later.</p>
+      {% endif %}
     </div>
     <div>
       <label for="display_name">Full name</label>
       <input id="display_name" name="display_name" autocomplete="off"
              placeholder="optional">
-      {# Filled by the directory picker above. Storing the directory's own
-         identifier means matching survives somebody changing their name. #}
-      <input type="hidden" id="directory_dn" name="directory_dn" value="">
       <p class="hint">Shown in the console and against anything they do.</p>
     </div>
   </div>
@@ -165,10 +150,10 @@
     </div>
   </div>
 
-  <div class="actions"><button type="submit">Add person</button></div>
+  <div class="actions"><button type="submit">Add user</button></div>
 </form>
 
-<h2>Everyone</h2>
+<h2>All users</h2>
 <div class="tw stack">
   <table>
     <thead>
@@ -261,8 +246,15 @@
         || src.querySelector('option[value="ENTRA"]:not([disabled])')
         || src.querySelector('option[value="GOOGLE"]:not([disabled])');
       if (option) src.value = option.value;
+      // sync() is what actually drops the password requirement: it hides the
+      // pair and clears `required`, because a directory account holds no
+      // password here at all.
       sync();
-      if (emailField) emailField.focus();
+
+      // The list has served its purpose. Leaving it open invites a second
+      // click that silently replaces what was just chosen.
+      var results = document.getElementById("dirresults");
+      if (results) results.innerHTML = "";
     });
   })();
 </script>
