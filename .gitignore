@@ -24,3 +24,6 @@ uv.lock.bak
 # shadcn.io MCP personal token. The URL in .mcp.json expands ${SHADCNIO_TOKEN}
 # from the environment, so the token itself is never committed.
 .shadcnio-token
+
+# Written by the auto-sync hook.
+.claude/auto-sync.log

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/c2w/commpeak-2-wasabi/.claude/auto-sync.sh",
+            "timeout": 180
+          }
+        ]
+      }
+    ]
+  }
+}
