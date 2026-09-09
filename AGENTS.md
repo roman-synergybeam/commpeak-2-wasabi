@@ -360,6 +360,12 @@ decoration and several are enforced in `web/filters.py`:
   probing, not catching, because a failed `CREATE EXTENSION` aborts the
   transaction alembic keeps its own version row in -- skips the two GIN indexes
   and warns with the exact SQL to add them later.
+- **`TRUNCATE` on a partitioned parent empties every partition.** A pipeline
+  fixture ran `TRUNCATE ... recordings, cdrs CASCADE` to reset its own working
+  set and silently deleted every other organisation's calls and recordings with
+  it -- invisible in a throwaway database, destructive in one anybody else is
+  using. It now deletes `WHERE brand_id = :b`, with the brand scope set first
+  so RLS narrows it even if the predicate were dropped.
 - The test suite creates a brand per run and never drops it, and each brand adds
   a partition to three tables. A query on a partitioned parent takes one lock
   per partition, so a long-lived scratch database eventually fails with *out of

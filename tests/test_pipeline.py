@@ -80,10 +80,21 @@ async def scenario(db, s3_creds, moto_endpoint):
             )
         # These tests share brand 1 and several reuse the same source key on
         # purpose, so each starts from an empty working set.
-        await s.execute(text("TRUNCATE transfer_attempts, transfer_jobs, recordings, cdrs CASCADE"))
+        #
+        # Scoped to this brand, not TRUNCATE. `TRUNCATE cdrs` on a partitioned
+        # parent empties *every* brand's partition, so this fixture used to
+        # delete other organisations' calls and recordings as a side effect --
+        # harmless in a throwaway database, and destructive in any database
+        # somebody else is also using. Setting the brand first means RLS
+        # narrows these deletes even if the WHERE were ever dropped.
         await s.execute(
             text("SELECT set_config('c2w.brand_id', :b, false)"), {"b": str(brand_id)}
         )
+        for table in ("transfer_attempts", "transfer_jobs", "recordings", "cdrs"):
+            await s.execute(
+                text(f"DELETE FROM {table} WHERE brand_id = :b"),  # noqa: S608 - fixed names
+                {"b": brand_id},
+            )
 
         tenant_id = (
             await s.execute(
