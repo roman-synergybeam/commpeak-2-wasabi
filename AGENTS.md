@@ -78,8 +78,34 @@ URL cost real work here, and the answer was one hop away.
 ### CDRs — PBX Stats API
 
 `POST https://<instance>.stats.pbx.commpeak.com/api/cdrs`,
-form-encoded, API key in the `Authorization` header. Per-instance host, so
+form-encoded, API key in the **`X-API-KEY`** header. Per-instance host, so
 every account carries its own base URL.
+
+**The header is `X-API-KEY`, not `Authorization`.** This section said
+`Authorization` and so did `cdr_client`. Measured against a live instance with
+a deliberately invalid key: `X-API-KEY` answers `No user found for given API
+key.` while `Authorization` answers `No valid API key was given.` -- which is
+word-for-word the reply when no header is sent, so it is ignored outright. The
+consequence was a 401 with a perfectly good key, and the obvious reading of a
+401 is that the key is wrong. TextPeak is the opposite and does use
+`Authorization`, checked the same way, so the two clients genuinely differ.
+
+**Which instances exist, and where their CDRs come from.** A `POST /api/cdrs`
+with no key distinguishes them: `401` means the instance exists, `404` means it
+does not. Of the eight accounts, four are Cloud PBX and report through
+`<instance>.stats.pbx.commpeak.com`; the four `.td` accounts are Dialer and
+answer `/api/cdrs` on their own host, `<instance>.td.commpeak.com`.
+`go4rexnew` and `verificationgo4rex` have **no** stats instance -- do not go
+looking for one. All eight returned `401`, not `403`, so **the CDR API is not
+affected by whatever is blocking `recordings.commpeak.com`**.
+
+**The CDR key is not a portal API key.** `my.commpeak.com` -> Billing -> API
+Keys issues keys for the Billing/Portal API, and those do *not* authenticate
+PBX Stats -- tested, all rejected with `No user found for given API key.` The
+PBX Stats key is created inside PBX Stats: log in there, click your name (top
+right) -> **My Profile** -> **Get API Key** in the API Key panel -> **Show**.
+It is a per-user credential, so it is issued per PBX Stats login rather than
+once for the account.
 
 Paging is `page` (1-based) and `cdrs_per_page`; the range is `from`/`till`;
 ordering is `sort_by`/`sort_direction`. Filters include `country` (ISO-3166

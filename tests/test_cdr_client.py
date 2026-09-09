@@ -303,8 +303,23 @@ class TestFetching:
         assert route.calls[0].request.headers["authorization"] == "Bearer tok"
 
     @respx.mock
-    async def test_the_api_key_goes_in_the_authorization_header_by_default(self):
-        """The documented scheme: an API key in Authorization, not a Bearer."""
+    async def test_the_api_key_goes_in_x_api_key_by_default(self):
+        """`X-API-KEY`, established against the live endpoint.
+
+        This test asserted `Authorization` because the module docstring said
+        so. Both headers were then sent to a real PBX Stats instance with a
+        deliberately invalid key:
+
+            X-API-KEY:     {"error":"No user found for given API key."}
+            Authorization: {"error":"No valid API key was given."}
+
+        The second is word-for-word what the endpoint returns when no header
+        is sent at all, so `Authorization` is ignored, while `X-API-KEY` was
+        read and looked up. Sending the wrong one would have produced a 401
+        with a perfectly good key -- and the obvious conclusion from a 401 is
+        that the key is wrong, so this would have cost somebody a re-issued
+        key and an afternoon.
+        """
         config = CdrApiConfig(base_url="https://pbx.example", token="an-api-key")
         route = respx.post(url__startswith="https://pbx.example").mock(
             return_value=httpx.Response(200, json={"cdrs": []})
@@ -313,7 +328,10 @@ class TestFetching:
             datetime(2026, 9, 8, tzinfo=UTC), datetime(2026, 9, 9, tzinfo=UTC)
         ):
             pass
-        assert route.calls[0].request.headers["authorization"] == "an-api-key"
+        sent = route.calls[0].request.headers
+        assert sent["x-api-key"] == "an-api-key"
+        # And not the one the endpoint ignores, which is the actual regression.
+        assert "authorization" not in sent
 
     @respx.mock
     async def test_header_auth_scheme(self):

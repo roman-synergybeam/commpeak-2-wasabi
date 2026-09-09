@@ -4,7 +4,7 @@ The contract, from https://docs.commpeak.com/reference/searchcdrs:
 
     POST https://<instance>.stats.pbx.commpeak.com/api/cdrs
     Content-Type: application/x-www-form-urlencoded
-    Authorization: <API key>
+    X-API-KEY: <API key>
 
     page, cdrs_per_page        pagination, 1-based
     from, till                 the range; defaults are yesterday 00:00 and now
@@ -89,7 +89,18 @@ class CdrApiConfig:
     auth: AuthScheme = AuthScheme.HEADER
     token: str = ""
     username: str = ""
-    header_name: str = "Authorization"
+    #: `X-API-KEY`, established against the live endpoint rather than read off
+    #: a page. Both headers were sent with a deliberately invalid key:
+    #:
+    #:     X-API-KEY:     {"error":"No user found for given API key."}
+    #:     Authorization: {"error":"No valid API key was given."}
+    #:
+    #: The second is the *same* answer the endpoint gives when no header is
+    #: sent at all, so `Authorization` is ignored outright, while `X-API-KEY`
+    #: was read and looked up. The docstring at the top of this file said
+    #: `Authorization`, which would have produced a 401 with a perfectly good
+    #: key and sent somebody off to re-issue it.
+    header_name: str = "X-API-KEY"
     #: The API's own name for the page size.
     page_size: int = 500
     sort_by: str = "call_start"
