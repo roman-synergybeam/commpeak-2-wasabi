@@ -298,6 +298,15 @@ a file containing a fake AWS key past its own guard:
   it, and states in the log and the commit message whether those suites really
   ran. If you add a gate here, ask what it does when its input is missing —
   silently passing is the wrong answer.
+- **A third failure mode, found while fixing the first two:** the pattern list
+  was rewritten to begin with `-----BEGIN`, which `grep` parsed as a bundle of
+  short options. It exited 2 and matched nothing, while the log still read
+  clean. Hence `grep -qE -e "$PATTERNS"`, and hence
+  `tests/test_auto_sync_guard.py`, which runs the real invocation against leak
+  shapes *and* against prose that merely names a credential field. The hook
+  will not push on a failing suite, so that test is what keeps the guard from
+  quietly dying again. Fixtures in it are assembled from two halves on purpose
+  — as literals they trip the guard and it refuses to commit its own tests.
 
 ## Out of scope for v1
 

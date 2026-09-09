@@ -107,14 +107,14 @@ so the UI is useful in the meantime and nothing needs re-scanning later.
 
 ```bash
 uv sync --extra dev
-uv run pytest -q                     # 181 tests
+uv run pytest -q                     # 203 tests
 uv run ruff check src/ tests/
 uv run uvicorn c2w.api.app:app --reload
 ```
 
 Most tests need PostgreSQL, because what they test *is* database behaviour —
 RLS policies, `SKIP LOCKED` claims, partition routing. They skip cleanly
-without one (82 pass, 99 skip):
+without one (104 pass, 99 skip):
 
 ```bash
 createdb c2w_test
@@ -152,7 +152,14 @@ echo 'postgresql+asyncpg://c2w@127.0.0.1:5432/c2w_test' \
 chmod 600 ~/.config/c2w/test-database-url
 ```
 
-Without that file the database-backed suites skip themselves, the push still
+The guard's pattern list is itself covered by `tests/test_auto_sync_guard.py`,
+which runs the real `grep` invocation against known leak shapes and against
+prose that merely names a credential field — it has to pass both, since a guard
+that blocks its own documentation gets loosened by whoever it blocks. Because
+the hook refuses to push on a failing suite, breaking that regex now stops the
+push instead of silently matching nothing.
+
+Without the URL file the database-backed suites skip themselves, the push still
 happens, and both the log line and the commit message say so — `NO DATABASE, so
 the RLS/pipeline/web suites skipped` rather than a bare green tick. If the file
 points at a database that no longer answers, the hook notes it and proceeds
