@@ -52,7 +52,7 @@
         <td class="mono" data-label="Bucket">{{ c.s3_bucket }}</td>
         <td class="statuscell" data-label="State">
           <div class="pills">
-            <span class="pill {{ c.status | conn_class }}">{{ c.status | lower }}</span>
+            <span class="pill {{ c.status | conn_class }}">{{ c.status | conn_label }}</span>
             {% if not c.is_enabled %}<span class="pill idle">off</span>{% endif %}
           </div>
           {% if c.status_detail %}<div class="det wrap">{{ c.status_detail }}</div>{% endif %}
@@ -70,10 +70,24 @@
               <input type="hidden" name="connection_id" value="{{ c.id }}">
               <button type="submit" class="btn small">Test</button>
             </form>
-            <details class="more">
-              <summary>Edit</summary>
-              <div class="menu">
-                <form method="post" action="/admin/connections" style="display:block;width:100%">
+          </div>
+        </td>
+      </tr>
+      {# The edit form on its own full-width row.
+
+         It used to live inside the last cell's `.rowactions .menu`,
+         which is the kit's tray for one or two small buttons: a
+         right-aligned flex row under a dashed rule. A ten-field form
+         in there rendered as a cramped column pinned to the right of
+         the table with a wide empty gap beside it. `colspan` gives it
+         the width of the table, which is what a form of this size
+         needs. #}
+      <tr class="editrow">
+        <td colspan="8">
+          <details>
+            <summary>Edit</summary>
+            <div class="card">
+                <form method="post" action="/admin/connections">
                   <input type="hidden" name="action" value="update">
                   <input type="hidden" name="connection_id" value="{{ c.id }}">
                   <div class="row" style="margin-top:10px">
@@ -129,11 +143,13 @@
                     <div>
                       <label>S3 token</label>
                       <input name="s3_access_key" type="password" class="mono"
+                             autocomplete="new-password"
                              placeholder="stored — type to replace">
                     </div>
                     <div>
                       <label>S3 secret</label>
                       <input name="s3_secret" type="password" class="mono"
+                             autocomplete="new-password"
                              placeholder="stored — type to replace">
                     </div>
                     <div>
@@ -176,11 +192,9 @@
                   <input type="hidden" name="connection_id" value="{{ c.id }}">
                   <button type="submit" class="danger small">Delete</button>
                 </form>
-              </div>
-            </details>
-          </div>
+            </div>
+          </details>
         </td>
-      </tr>
     {% else %}
       <tr><td colspan="8" class="empty">No CommPeak account yet. Add the first one below.</td></tr>
     {% endfor %}

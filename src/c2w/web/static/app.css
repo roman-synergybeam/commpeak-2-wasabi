@@ -227,6 +227,27 @@ input[type="range"]:focus-visible{outline:2px solid var(--accent);outline-offset
 .settings-pane{min-width:0}
 .settings-pane h2:first-child{margin-top:0}
 
+/* An edit form belonging to one table row, on its own full-width row beneath
+   it.
+
+   The kit's `.rowactions .menu` is for a couple of small buttons -- it is a
+   flex row, right-aligned, with a dashed rule above. A ten-field form was
+   being put inside it, which is why the archive and CommPeak panels rendered
+   as a cramped column pinned to the right of the last column with a wide
+   empty gap beside it. The component was not wrong; the use was.
+   `colspan` gives the form the width of the table, which is what it needs. */
+tr.editrow>td{padding:0 12px 16px}
+tr.editrow .card{margin:0}
+tr.editrow>td>details{margin:0}
+tr.editrow>td>details>summary{list-style:none;cursor:pointer;display:inline-block;
+  font:600 12.5px var(--sans);padding:5px 10px;margin:2px 0 0;
+  border:1px solid var(--rule-strong);border-radius:var(--radius-sm);
+  color:var(--ink-2)}
+tr.editrow>td>details>summary::-webkit-details-marker{display:none}
+tr.editrow>td>details>summary:hover,
+tr.editrow>td>details[open]>summary{background:var(--surface-2);color:var(--ink)}
+tr.editrow>td>details[open]>summary{margin-bottom:12px}
+
 .railnav{position:sticky;top:16px;min-width:0}
 
 /* Settings search. Tokens only -- no literal colours outside the token block,

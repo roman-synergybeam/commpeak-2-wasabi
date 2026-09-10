@@ -1258,3 +1258,107 @@ class TestSignInAlerts:
         for key in ("alerts.on_signin", "alerts.on_failed_signin"):
             assert SETTINGS[key].brand_overridable is False, key
             assert SETTINGS[key].default is True, key
+
+
+class TestTheAccountPanelsAreLaidOutProperly:
+    """The archive and CommPeak panels put a whole form in a button tray.
+
+    `.rowactions .menu` is the UI kit's tray for one or two small buttons: a
+    right-aligned flex row under a dashed rule. A ten-field edit form was
+    being rendered inside it, inside the last table cell, which is why the
+    page showed a cramped column pinned to the right with a wide empty gap
+    beside it. The component was correct; the use of it was not.
+    """
+
+    async def _a_destination(self, db, brand_id):
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"), {"b": str(brand_id)}
+            )
+            await s.execute(
+                text(
+                    "INSERT INTO storage_destinations (brand_id, name, provider, "
+                    "endpoint, region, bucket, path_prefix, access_key_sealed, "
+                    "secret_sealed) VALUES (:b, :n, 'wasabi', "
+                    "'https://s3.eu-central-1.wasabisys.com', 'eu-central-1', "
+                    ":bk, 'archive', 'x', 'x')"
+                ),
+                {
+                    "b": brand_id,
+                    "n": f"arch-{uuid.uuid4().hex[:6]}",
+                    "bk": f"b-{uuid.uuid4().hex[:8]}",
+                },
+            )
+            await s.commit()
+
+    async def test_the_edit_form_is_on_its_own_full_width_row(
+        self, app_client, scenario, db
+    ):
+        await self._a_destination(db, scenario["brand_id"])
+        await _login(
+            app_client,
+            scenario["admin_email"],
+            scenario["password"],
+            brand_id=scenario["brand_id"],
+        )
+        page = await app_client.get("/admin/storage")
+        assert page.status_code == 200
+        assert 'class="editrow"' in page.text
+        assert "colspan=" in page.text
+
+    def test_no_form_is_left_inside_the_button_tray(self):
+        """The kit's tray is for buttons. Guarded on the templates directly.
+
+        A page-level assertion would pass as soon as one panel was fixed; this
+        catches the pattern coming back anywhere.
+        """
+        import re
+        from pathlib import Path
+
+        for path in Path("src/c2w/web/templates").glob("*.html"):
+            body = path.read_text()
+            for block in re.findall(
+                r'<div class="menu">(.*?)</div>\s*</details>', body, re.S
+            ):
+                assert "<label" not in block, f"{path.name} puts a form in .menu"
+
+    def test_a_browser_cannot_autofill_a_stored_credential(self):
+        """The bug the screenshot revealed, and the one with consequences.
+
+        Both credential inputs are `type="password"` and empty, with a
+        placeholder saying a value is stored. A password manager will fill any
+        such field, and the save handler treats a non-empty value as a
+        replacement -- so an autofilled entry would silently overwrite a live
+        S3 key with whatever the browser had saved for the site. The add forms
+        already said `autocomplete="off"`; the edit forms did not.
+        """
+        import re
+        from pathlib import Path
+
+        for name in ("_archive_accounts.html", "_commpeak_accounts.html"):
+            body = (Path("src/c2w/web/templates") / name).read_text()
+            for field in re.findall(r"<input[^>]*type=\"password\"[^>]*>", body, re.S):
+                assert "autocomplete=" in field, f"{name}: unguarded {field[:70]}"
+
+    async def test_the_service_is_named_the_way_its_vendor_spells_it(
+        self, app_client, scenario, db
+    ):
+        """The database stores `wasabi`; the page showed `wasabi`."""
+        await self._a_destination(db, scenario["brand_id"])
+        await _login(
+            app_client,
+            scenario["admin_email"],
+            scenario["password"],
+            brand_id=scenario["brand_id"],
+        )
+        page = await app_client.get("/admin/storage")
+        assert "Wasabi" in page.text
+
+    def test_every_connection_state_has_a_human_label(self):
+        """`conn_class` gives the colour; `conn_label` gives the words."""
+        from c2w.db.base import ConnectionStatus
+        from c2w.web.filters import _CONNECTION_LABEL
+
+        for state in ConnectionStatus:
+            assert str(state) in _CONNECTION_LABEL, state
+            assert _CONNECTION_LABEL[str(state)] != str(state)

@@ -112,6 +112,18 @@ _CONNECTION_CLASS = {
     "DISABLED": "idle",
 }
 
+#: The same four states as words. `conn_class` already collapses these onto the
+#: kit's four pill meanings; this is the text beside the colour. "untested" is
+#: "not tested yet" because the bare adjective reads like a verdict on the
+#: account rather than a statement about what we have done.
+_CONNECTION_LABEL = {
+    "OK": "working",
+    "ERROR": "failing",
+    "DEGRADED": "degraded",
+    "UNTESTED": "not tested yet",
+    "DISABLED": "switched off",
+}
+
 _ERROR_LABEL = {
     "ACL_ERROR": "address not allowed",
     "AUTH_ERROR": "wrong credentials",
@@ -303,6 +315,24 @@ _AUDIT_ACTION_LABEL = {
     "PASSWORD_CHANGED": "password changed",
     "CREDENTIALS_REVEALED": "S3 credentials shown in clear",
 }
+
+
+#: Storage services, as their vendors spell them. The database stores a lowercase
+#: slug; a page that prints "wasabi" is showing the operator a machine value,
+#: which the kit's own rule forbids.
+_PROVIDER_LABEL = {
+    "wasabi": "Wasabi",
+    "s3": "Amazon S3",
+    "minio": "MinIO",
+    "backblaze": "Backblaze B2",
+    "b2": "Backblaze B2",
+    "gcs": "Google Cloud Storage",
+}
+
+
+def _provider_label(value: Any) -> str:
+    raw = str(value or "").strip()
+    return _PROVIDER_LABEL.get(raw.lower(), raw.title() or "—")
 
 
 def _audit_action(value: Any) -> str:
@@ -553,6 +583,9 @@ def register(env: Any) -> None:
                 str(v), str(v or "").replace("_", " ").lower()
             ),
             "conn_class": lambda v: _CONNECTION_CLASS.get(str(v), "idle"),
+            "conn_label": lambda v: _CONNECTION_LABEL.get(
+                str(v), str(v).replace("_", " ").lower()
+            ),
             "error_label": lambda v: _ERROR_LABEL.get(str(v), str(v).replace("_", " ").lower()),
             "run_label": lambda v: _RUN_LABEL.get(str(v), str(v).replace("_", " ").lower()),
             "sortlink": _sortlink,
@@ -565,6 +598,7 @@ def register(env: Any) -> None:
             "sms_status_class": _sms_status_class,
             "sms_status_help": _sms_status_help,
             "auth_label": _auth_label,
+            "provider_label": _provider_label,
             "audit_state": _audit_state,
             "audit_action": _audit_action,
             "change_line": _change_line,
