@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from c2w.db.base import JobState, RecordingState
+from c2w.db.base import JobKind, JobState, RecordingState
 from c2w.db.models.core import CommPeakConnection, Recording, StorageDestination, TransferJob
 from c2w.storage.commpeak import CommPeakSource
 from c2w.storage.s3_adapter import S3Client
@@ -1266,3 +1266,152 @@ class TestTheSyncSummaryAlert:
         keys = {a.dedupe_key for a in first + second if a.brand_id == scenario["brand_id"]}
         assert len(keys) >= 1
         assert all(str(scenario["brand_id"]) in k for k in keys)
+
+
+class TestTheClaimSpreadsAcrossAccounts:
+    """Every account with work gets a share of each pass.
+
+    Measured on the live backlog before this: five accounts holding 120,000
+    queued jobs were idle while everything piled onto one. Inventory enqueues
+    an account's objects in bulk, so a single claim ordered by
+    `priority, next_attempt_at` returns consecutive jobs -- all from the same
+    account -- and the per-account cap then runs them one at a time. Eight
+    accounts at five concurrent each is a budget of forty; about five were in
+    use.
+    """
+
+    async def _two_accounts(self, db, scenario):
+        """A second account in the same organisation, with jobs on both."""
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            tenant_id = (
+                await s.execute(
+                    text("SELECT tenant_id FROM commpeak_connections WHERE id = :i"),
+                    {"i": scenario["connection_id"]},
+                )
+            ).scalar_one()
+            other = CommPeakConnection(
+                brand_id=scenario["brand_id"],
+                tenant_id=tenant_id,
+                name=f"second-{uuid.uuid4().hex[:6]}",
+                s3_endpoint="http://127.0.0.1:1",
+                s3_region="us-east-1",
+                s3_bucket=str(uuid.uuid4()),
+                s3_access_key_sealed="x",
+                s3_secret_sealed="x",
+            )
+            s.add(other)
+            await s.flush()
+
+            # A big backlog on the first account and a small one on the second:
+            # the shape that starved the small account.
+            for conn_id, count in ((scenario["connection_id"], 40), (other.id, 3)):
+                for _ in range(count):
+                    rec_id = (
+                        await s.execute(
+                            text(
+                                "INSERT INTO recordings (brand_id, connection_id, "
+                                "tenant_id, source_key, source_size, state) VALUES "
+                                "(:b, :c, :t, :k, 10, 'QUEUED') RETURNING id"
+                            ),
+                            {
+                                "b": scenario["brand_id"],
+                                "c": conn_id,
+                                "t": tenant_id,
+                                "k": f"recordings/2026/09/08/{uuid.uuid4().hex}.flac",
+                            },
+                        )
+                    ).scalar_one()
+                    await s.execute(
+                        text(
+                            "INSERT INTO transfer_jobs (brand_id, recording_id, "
+                            "connection_id, kind, state, priority, next_attempt_at) "
+                            "VALUES (:b, :r, :c, 'TRANSFER', 'PENDING', 100, now())"
+                        ),
+                        {"b": scenario["brand_id"], "r": rec_id, "c": conn_id},
+                    )
+            await s.commit()
+            return scenario["connection_id"], other.id
+
+    async def test_a_small_account_is_not_starved_by_a_large_one(self, db, scenario):
+        from c2w.sync import queue
+
+        big, small = await self._two_accounts(db, scenario)
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            from c2w.workers.worker import Worker
+
+            order = await Worker._connections_with_work(s)
+            # Fewest queued first, so the small account is claimed from before
+            # the large one rather than behind 40 of its jobs.
+            assert order.index(small) < order.index(big), order
+
+            claimed = []
+            for conn_id in order:
+                got = await queue.claim_batch(
+                    s,
+                    worker="test",
+                    limit=2,
+                    lease_seconds=60,
+                    kinds=[JobKind.TRANSFER],
+                    connection_ids=[conn_id],
+                )
+                claimed.extend(got)
+            await s.commit()
+
+        accounts = {j.connection_id for j in claimed}
+        assert small in accounts, "the small account got nothing"
+        assert big in accounts, "the large account got nothing"
+
+    async def test_narrowing_to_one_account_still_claims_exclusively(self, db, scenario):
+        """The property the whole queue rests on must survive the new filter.
+
+        Two workers asking for the same account must get disjoint sets. This
+        is why the ranking is not done inside the claim: a window function
+        cannot share a SELECT with `FOR UPDATE`, and moving the lock outward
+        makes `SKIP LOCKED` stop skipping during selection -- the second worker
+        then re-picks the same head rows and comes back empty.
+        """
+        from c2w.sync import queue
+
+        big, _small = await self._two_accounts(db, scenario)
+
+        async with db() as s1, db() as s2:
+            for s in (s1, s2):
+                await s.execute(
+                    text("SELECT set_config('c2w.brand_id', :b, false)"),
+                    {"b": str(scenario["brand_id"])},
+                )
+            first = await queue.claim_batch(
+                s1, worker="w1", limit=3, lease_seconds=60,
+                kinds=[JobKind.TRANSFER], connection_ids=[big],
+            )
+            second = await queue.claim_batch(
+                s2, worker="w2", limit=3, lease_seconds=60,
+                kinds=[JobKind.TRANSFER], connection_ids=[big],
+            )
+            assert len(first) == 3, len(first)
+            assert len(second) == 3, len(second)
+            assert not ({j.id for j in first} & {j.id for j in second})
+            await s1.rollback()
+            await s2.rollback()
+
+    async def test_an_account_with_no_work_is_not_asked(self, db, scenario):
+        from c2w.workers.worker import Worker
+
+        _big, _small = await self._two_accounts(db, scenario)
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            await s.execute(text("UPDATE transfer_jobs SET state = 'DONE'"))
+            await s.commit()
+            assert await Worker._connections_with_work(s) == []

@@ -744,6 +744,25 @@ What one evening of tuning actually produced:
 | + a second worker | 181/min | 23.8 Mbit/s | ~13 h |
 | + two more workers | 232/min | 18.7 Mbit/s | ~10 h |
 | + a fifth worker | 304/min | 15.7 Mbit/s | ~7 h |
+| claiming per account | **484/min** | 62.9 Mbit/s | ~4 h |
+
+**The largest single gain came from using the budget already available, not
+from asking for more.** Eight accounts at five concurrent each is forty slots;
+about five were in use, because `claim_batch` orders by
+`priority, next_attempt_at` and inventory enqueues an account's objects in
+bulk -- so one claim returned consecutive jobs from a single account and the
+per-account cap ran them serially while seven accounts sat idle. Five accounts
+holding 120,000 queued jobs were doing nothing. The worker now claims **per
+account**, fewest-queued first so a small account is not stuck behind a large
+one, and every account with work progresses on every pass. Per-account
+concurrency is unchanged at five, so CommPeak sees exactly what it did before.
+
+**Do not try to do that ranking inside `claim_batch`.** It was tried: a window
+function cannot share a SELECT with `FOR UPDATE`, so the locking moves to an
+outer step, and `SKIP LOCKED` then stops skipping *while* selecting -- two
+workers pick the same head rows and the second comes back with nothing. The
+selecting query has to keep its `FOR UPDATE SKIP LOCKED` exactly where it is,
+which is why fairness is a `connection_id` filter and a loop instead.
 
 **Five workers at one per account is the ceiling, and it is CommPeak's, not
 ours.** Five concurrent per S3 account is exactly what their documentation

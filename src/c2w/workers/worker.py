@@ -17,7 +17,7 @@ import contextlib
 import signal
 from collections import defaultdict
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from c2w.alerts.base import Alert, Severity, dispatch
@@ -88,24 +88,51 @@ class Worker:
             lease = await settings_service.get_int(session, "transfer.job_lease_seconds")
             batch = await settings_service.get_int(session, "transfer.job_claim_batch")
             global_cap = await settings_service.get_int(session, "transfer.concurrency_global")
+            # Read before the claim, because the claim needs it: the share per
+            # account is derived from the per-account cap.
+            per_conn = await settings_service.get_int(session, "source.concurrency_per_connection")
 
             # A worker that died leaves its jobs RUNNING; the lease is what
             # makes recovery automatic rather than needing a janitor.
             if reclaimed := await queue.reclaim_expired(session, lease_seconds=lease):
                 log.info("worker.reclaimed_expired", jobs=reclaimed)
 
-            jobs = await queue.claim_batch(
-                session,
-                worker=self.identity,
-                limit=min(batch, global_cap),
-                lease_seconds=lease,
-                kinds=[JobKind.TRANSFER],
-            )
+            # One claim per account, rather than one claim off the head of a
+            # global queue.
+            #
+            # This is worth the extra statements. Inventory enqueues an
+            # account's objects in bulk, so a single claim ordered by
+            # `priority, next_attempt_at` returns consecutive jobs -- in
+            # practice all from one account -- and the per-account cap then
+            # runs them one at a time. Measured on the live backlog: five
+            # accounts holding 120,000 queued jobs were idle while everything
+            # piled onto one, using about five of the forty concurrent slots
+            # eight accounts at five each allow.
+            #
+            # Asking per account cannot be folded into one query: ranking
+            # accounts with a window function forces the row locking into an
+            # outer step, and `SKIP LOCKED` then stops skipping *while*
+            # selecting, so two workers pick the same head rows and the second
+            # gets nothing. See claim_batch.
+            share = max(2, per_conn * 2)
+            jobs: list[TransferJob] = []
+            for connection_id in await self._connections_with_work(session):
+                if len(jobs) >= min(batch, global_cap):
+                    break
+                jobs.extend(
+                    await queue.claim_batch(
+                        session,
+                        worker=self.identity,
+                        limit=share,
+                        lease_seconds=lease,
+                        kinds=[JobKind.TRANSFER],
+                        connection_ids=[connection_id],
+                    )
+                )
             if not jobs:
                 return IDLE_SLEEP_SECONDS
 
             limiter = await self._limiter_for(session)
-            per_conn = await settings_service.get_int(session, "source.concurrency_per_connection")
             per_brand = await settings_service.get_int(session, "transfer.concurrency_per_brand")
 
         # Group by connection so the per-connection cap is honoured; CommPeak
@@ -125,6 +152,33 @@ class Worker:
             )
         )
         return 0.0
+
+    @staticmethod
+    async def _connections_with_work(session: AsyncSession) -> list[int]:
+        """Accounts that have runnable jobs, fewest queued first.
+
+        Fewest first so a small account is not permanently behind a large one:
+        `go4rex.td` has 52,000 queued and would otherwise be claimed from on
+        every pass while an account with 300 waited for it to finish.
+
+        Cheap enough to run each pass -- it is an index scan over PENDING and
+        there are eight accounts -- and reading it fresh is what lets a worker
+        notice an account whose access has just come back.
+        """
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT connection_id
+                    FROM transfer_jobs
+                    WHERE state = 'PENDING' AND next_attempt_at <= now()
+                    GROUP BY connection_id
+                    ORDER BY count(*) ASC
+                    """
+                )
+            )
+        ).scalars().all()
+        return [int(r) for r in rows]
 
     async def _run_connection_group(
         self,

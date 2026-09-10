@@ -114,6 +114,7 @@ async def claim_batch(
     lease_seconds: int,
     kinds: Sequence[JobKind] | None = None,
     brand_ids: Sequence[int] | None = None,
+    connection_ids: Sequence[int] | None = None,
 ) -> list[TransferJob]:
     """Atomically claim up to ``limit`` runnable jobs.
 
@@ -136,6 +137,18 @@ async def claim_batch(
     if brand_ids:
         conditions.append("brand_id = ANY(:brand_ids)")
         params["brand_ids"] = list(brand_ids)
+    # Narrowing to one account is how a caller claims fairly across accounts:
+    # it asks per account rather than taking the head of one global queue. Kept
+    # as a plain condition on purpose. Ranking the accounts inside this query
+    # with a window function was tried and is wrong -- a window function cannot
+    # sit in the same SELECT as `FOR UPDATE`, so the locking has to move to an
+    # outer step, and then `SKIP LOCKED` no longer skips *while* selecting: two
+    # workers pick the same head rows, the second skips all of them and comes
+    # back with nothing. The skip has to happen during selection, which means
+    # the selecting query stays exactly as it is.
+    if connection_ids:
+        conditions.append("connection_id = ANY(:connection_ids)")
+        params["connection_ids"] = list(connection_ids)
 
     claimed_ids = (
         (
