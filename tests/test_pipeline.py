@@ -25,7 +25,7 @@ from c2w.storage.commpeak import CommPeakSource
 from c2w.storage.s3_adapter import S3Client
 from c2w.storage.wasabi import WasabiDestination
 from c2w.sync import queue
-from c2w.sync.inventory import backfill_priority, plan_incremental, scan_hour
+from c2w.sync.inventory import backfill_priority, plan_incremental, scan_day
 from c2w.sync.transfer import build_sidecar, transfer_recording, verify_recording
 
 TEST_DB = os.environ.get("C2W_TEST_DATABASE_URL")
@@ -33,10 +33,13 @@ pytestmark = pytest.mark.skipif(
     not TEST_DB, reason="set C2W_TEST_DATABASE_URL to a migrated scratch database"
 )
 
-HOUR = datetime(2026, 9, 8, 0, tzinfo=UTC)
+DAY = datetime(2026, 9, 8, tzinfo=UTC)
 # Channel id whose epoch is exactly the call start, as CommPeak names them.
 UNIQUEID = int(datetime(2026, 9, 8, 0, 52, 17, tzinfo=UTC).timestamp())
-SRC_KEY = f"2026/09/08/00/out-593990899917-101-20260908-005217-{UNIQUEID}.0.flac"
+# The real layout: a `recordings/` root and no hour folder. Seeding the
+# documented shape instead let the scanner pass against a prefix that
+# exists nowhere in a live bucket.
+SRC_KEY = f"recordings/2026/09/08/out-593990899917-101-20260908-005217-{UNIQUEID}.0.flac"
 
 
 @pytest.fixture
@@ -177,7 +180,7 @@ class TestInventory:
         audio = os.urandom(40_000)
         await _seed_recording(scenario["src"], SRC_KEY, audio)
         # A sidecar-ish artefact that must not become a playable recording.
-        await _seed_recording(scenario["src"], "2026/09/08/00/notes.json", b"{}")
+        await _seed_recording(scenario["src"], "recordings/2026/09/08/notes.json", b"{}")
 
         async with await _scoped(db, scenario["brand_id"]) as s:
             conn = (
@@ -188,8 +191,8 @@ class TestInventory:
                 )
             ).scalar_one()
             async with CommPeakSource(scenario["src"]) as src:
-                result = await scan_hour(
-                    s, src, conn, HOUR, destination_id=scenario["destination_id"]
+                result = await scan_day(
+                    s, src, conn, DAY, destination_id=scenario["destination_id"]
                 )
             await s.commit()
 
@@ -235,11 +238,11 @@ class TestInventory:
                 )
             ).scalar_one()
             async with CommPeakSource(scenario["src"]) as src:
-                first = await scan_hour(
-                    s, src, conn, HOUR, destination_id=scenario["destination_id"]
+                first = await scan_day(
+                    s, src, conn, DAY, destination_id=scenario["destination_id"]
                 )
-                second = await scan_hour(
-                    s, src, conn, HOUR, destination_id=scenario["destination_id"]
+                second = await scan_day(
+                    s, src, conn, DAY, destination_id=scenario["destination_id"]
                 )
             await s.commit()
 
@@ -273,7 +276,7 @@ class TestInventory:
                 )
             ).scalar_one()
             async with CommPeakSource(scenario["src"]) as src:
-                result = await scan_hour(s, src, conn, HOUR, destination_id=None)
+                result = await scan_day(s, src, conn, DAY, destination_id=None)
             await s.commit()
 
         assert result.recordings_new == 1
@@ -306,7 +309,7 @@ class TestTransfer:
                 )
             ).scalar_one()
             async with CommPeakSource(scenario["src"]) as src:
-                await scan_hour(s, src, conn, HOUR, destination_id=scenario["destination_id"])
+                await scan_day(s, src, conn, DAY, destination_id=scenario["destination_id"])
             await s.commit()
 
         async with await _scoped(db, scenario["brand_id"]) as s:
@@ -395,7 +398,7 @@ class TestTransfer:
                 )
             ).scalar_one()
             async with CommPeakSource(scenario["src"]) as src:
-                await scan_hour(s, src, conn, HOUR, destination_id=scenario["destination_id"])
+                await scan_day(s, src, conn, DAY, destination_id=scenario["destination_id"])
             rec = (
                 await s.execute(
                     select(Recording).where(
@@ -445,7 +448,7 @@ class TestTransfer:
                 )
             ).scalar_one()
             async with CommPeakSource(scenario["src"]) as src:
-                await scan_hour(s, src, conn, HOUR, destination_id=scenario["destination_id"])
+                await scan_day(s, src, conn, DAY, destination_id=scenario["destination_id"])
             await s.commit()
 
         # Remove it from the source, as CommPeak's own retention would.
@@ -509,7 +512,7 @@ class TestTransfer:
                 )
             ).scalar_one()
             async with CommPeakSource(scenario["src"]) as src:
-                await scan_hour(s, src, conn, HOUR, destination_id=scenario["destination_id"])
+                await scan_day(s, src, conn, DAY, destination_id=scenario["destination_id"])
             rec = (
                 await s.execute(
                     select(Recording).where(
@@ -793,10 +796,12 @@ class TestPriorityAndScheduling:
             s3_secret_sealed="x",
         )
         now = datetime(2026, 9, 8, 12, 30, tzinfo=UTC)
-        conn.inventory_cursor_hour = datetime(2026, 9, 8, 11, tzinfo=UTC)
+        conn.inventory_cursor_day = datetime(2026, 9, 8, tzinfo=UTC)
+        # Days now, and the overlap is rounded up to whole days: 3 hours means
+        # "also re-list the day before", not "round down to nothing".
         start, end = plan_incremental(conn, overlap_hours=3, now=now)
-        assert start == datetime(2026, 9, 8, 8, tzinfo=UTC)
-        assert end == datetime(2026, 9, 8, 12, tzinfo=UTC)
+        assert start == datetime(2026, 9, 7, tzinfo=UTC)
+        assert end == datetime(2026, 9, 8, tzinfo=UTC)
 
     def test_never_scanned_connection_does_not_walk_all_history(self):
         """An incremental poll must not accidentally start a 12.9M-object scan."""
@@ -810,7 +815,7 @@ class TestPriorityAndScheduling:
         )
         now = datetime(2026, 9, 8, 12, 30, tzinfo=UTC)
         start, end = plan_incremental(conn, overlap_hours=3, now=now)
-        assert (end - start) <= timedelta(hours=3)
+        assert (end - start) <= timedelta(days=1)
 
 
 class TestSidecar:

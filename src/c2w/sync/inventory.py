@@ -1,11 +1,20 @@
 """Inventory: discover recordings in a CommPeak bucket and record them.
 
-Scanning is done one hour-prefix at a time.  That is the single most important
+Scanning is done one day-prefix at a time.  That is the single most important
 decision in this module: the largest bucket in play holds 12.9M objects, and a
-flat listing of it is a multi-hour operation that must survive a restart.  An
-hour prefix is a cheap, independent listing whose completion can be recorded,
-so a scan interrupted after eight hours of work resumes where it stopped
-instead of starting again.
+flat listing of it is a multi-hour operation that must survive a restart.  A
+day prefix is an independent listing whose completion can be recorded, so a
+scan interrupted after hours of work resumes where it stopped instead of
+starting again.
+
+**A day, because that is how the buckets are actually organised.** This module
+listed `YYYY/MM/DD/HH/` for a long time, from the published key layout. Live
+keys are `recordings/YYYY/MM/DD/<basename>`: there is a root prefix the
+documentation omits and no hour level at all. Listing an hour that does not
+exist returns nothing and returns it *successfully* -- 170 recorded incremental
+runs, every one `ok = true`, every one `discovered = 0`, and no error anywhere
+to explain why the calls page stayed empty. The root is configurable through
+`source.key_root_prefix` because it is somebody else's layout.
 
 Discovery is decoupled from transfer on purpose.  Inventory and correlation run
 whether or not an archive destination exists yet -- which is the situation while
@@ -15,6 +24,7 @@ immediately and transfers begin later without a re-scan.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -22,7 +32,12 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from c2w.commpeak.correlate import CdrCandidate, MatchMethod, correlate
-from c2w.commpeak.keyparse import ParsedKey, iter_hour_prefixes, parse_key
+from c2w.commpeak.keyparse import (
+    DEFAULT_KEY_ROOT,
+    ParsedKey,
+    iter_day_prefixes,
+    parse_key,
+)
 from c2w.db.base import JobKind, RecordingState
 from c2w.db.models.core import CommPeakConnection, Recording
 from c2w.logging import get_logger
@@ -31,7 +46,7 @@ from c2w.sync import queue
 
 log = get_logger(__name__)
 
-__all__ = ["InventoryResult", "backfill_priority", "plan_incremental", "scan_hour", "scan_range"]
+__all__ = ["InventoryResult", "backfill_priority", "plan_incremental", "scan_day", "scan_range"]
 
 #: Newest recordings matter most: they are what people ask to hear, so the
 #: current month should drain before years of history. Priority is derived from
@@ -138,29 +153,34 @@ async def _candidates_for(
     ]
 
 
-async def scan_hour(
+async def scan_day(
     session: AsyncSession,
     source: CommPeakSource,
     connection: CommPeakConnection,
-    hour: datetime,
+    day: datetime,
     *,
     page_size: int = 1000,
     destination_id: int | None = None,
     enqueue_transfers: bool = True,
     correlation_window_seconds: int = 120,
+    root: str = DEFAULT_KEY_ROOT,
 ) -> InventoryResult:
-    """Inventory one hour prefix.
+    """Inventory one day prefix.
 
     Every audio object found is recorded, correlated and (when a destination
     exists) queued.  Objects that fail to correlate are still recorded and still
     queued: losing access to audio because a metadata join failed would be a far
     worse outcome than a call row with thin metadata.
+
+    A day, not an hour: `recordings/YYYY/MM/DD/` is how every live bucket is
+    organised, and the hour level this used to list does not exist.
     """
-    from c2w.commpeak.keyparse import hour_prefix
+    from c2w.commpeak.keyparse import day_prefix
 
-    result = InventoryResult(prefixes_scanned=1, last_prefix=hour_prefix(hour))
+    prefix = day_prefix(day, root)
+    result = InventoryResult(prefixes_scanned=1, last_prefix=prefix)
 
-    async for ref in source.list_prefix(hour_prefix(hour), page_size=page_size):
+    async for ref in source.list_prefix(prefix, page_size=page_size):
         result.objects_seen += 1
         parsed = parse_key(ref.key)
 
@@ -254,36 +274,42 @@ async def scan_range(
     destination_id: int | None = None,
     enqueue_transfers: bool = True,
     commit_every_prefix: bool = True,
+    root: str = DEFAULT_KEY_ROOT,
 ) -> InventoryResult:
-    """Inventory every hour in ``[start, end]``, oldest first.
+    """Inventory every day in ``[start, end]``, oldest first.
 
     Commits after each prefix by default so progress survives a crash. At
-    12.9M objects the alternative -- one enormous transaction -- would both hold
-    locks for hours and lose everything on a restart.
+    millions of objects the alternative -- one enormous transaction -- would
+    both hold locks for hours and lose everything on a restart.
     """
     total = InventoryResult()
-    for prefix in iter_hour_prefixes(start, end):
-        hour = datetime.strptime(prefix.strip("/"), "%Y/%m/%d/%H").replace(tzinfo=UTC)
-        got = await scan_hour(
+    for prefix in iter_day_prefixes(start, end, root):
+        # Parsed back out of the prefix rather than tracked alongside it, so
+        # the cursor can only ever be a day this loop actually listed. The
+        # root is stripped first: it is configurable and may contain slashes.
+        datepart = prefix[len(root):] if root and prefix.startswith(root) else prefix
+        day = datetime.strptime(datepart.strip("/"), "%Y/%m/%d").replace(tzinfo=UTC)
+        got = await scan_day(
             session,
             source,
             connection,
-            hour,
+            day,
             page_size=page_size,
             destination_id=destination_id,
             enqueue_transfers=enqueue_transfers,
+            root=root,
         )
         total.merge(got)
 
         # Record how far we got, so an incremental pass resumes from here.
-        connection.inventory_cursor_hour = hour
+        connection.inventory_cursor_day = day
         connection.last_inventory_at = datetime.now(UTC)
         if commit_every_prefix:
             await session.commit()
 
         if got.objects_seen:
             log.info(
-                "inventory.hour_scanned",
+                "inventory.day_scanned",
                 connection_id=connection.id,
                 prefix=prefix,
                 objects=got.objects_seen,
@@ -299,20 +325,26 @@ def plan_incremental(
     overlap_hours: int,
     now: datetime | None = None,
 ) -> tuple[datetime, datetime]:
-    """Decide which hours the next incremental pass should re-list.
+    """Decide which days the next incremental pass should re-list.
 
-    Starts slightly before the last scanned hour, because a recording can be
-    written to an hour bucket after we have already passed it -- a call that
-    began at 10:59 and ran for ten minutes lands in the 10:00 prefix well after
-    that hour ended. Without the overlap those recordings would be missed
+    Starts before the last scanned day, because a recording can be written to a
+    dated folder after we have already passed it -- a call that began at 23:59
+    and ran for ten minutes lands in the previous day's folder well after that
+    day ended. Without the overlap those recordings would be missed
     permanently.
+
+    ``overlap_hours`` keeps its name and its unit: it is a setting an operator
+    has already chosen a value for, and it is still expressed in hours. It is
+    rounded *up* to whole days here, so the default of 2 hours re-lists
+    yesterday and today rather than silently rounding to nothing.
     """
-    now = (now or datetime.now(UTC)).replace(minute=0, second=0, microsecond=0)
-    cursor = connection.inventory_cursor_hour
+    now = (now or datetime.now(UTC)).replace(hour=0, minute=0, second=0, microsecond=0)
+    overlap_days = max(1, math.ceil(max(overlap_hours, 0) / 24))
+    cursor = connection.inventory_cursor_day
     if cursor is None:
-        # Never scanned: look at today only. A full backfill is an explicit,
-        # separately-planned operation, not something an incremental poll
-        # should stumble into.
-        return now - timedelta(hours=max(overlap_hours, 1)), now
-    start = cursor - timedelta(hours=overlap_hours)
+        # Never scanned: look at the overlap window only. A full backfill is an
+        # explicit, separately-planned operation, not something an incremental
+        # poll should stumble into.
+        return now - timedelta(days=overlap_days), now
+    start = cursor - timedelta(days=overlap_days)
     return min(start, now), now

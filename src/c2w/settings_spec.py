@@ -923,6 +923,19 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         brand_overridable=True,
     ),
     SettingSpec(
+        key="source.key_root_prefix",
+        type=SettingType.STRING,
+        default="recordings/",
+        category="CommPeak calls",
+        label="Where recordings start in the bucket",
+        description="The prefix the dated folders sit under. CommPeak uses "
+        "\"recordings/\" on every account measured, and the published key "
+        "layout omits it -- which is why this is a setting and not an "
+        "assumption. Must end with a slash; empty means the dates are at the "
+        "top of the bucket.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
         key="source.watch_enabled",
         type=SettingType.BOOL,
         default=True,

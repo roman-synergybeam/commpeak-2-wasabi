@@ -31,10 +31,11 @@ from datetime import UTC, datetime
 from typing import Final
 
 __all__ = [
+    "DEFAULT_KEY_ROOT",
     "Direction",
     "ParsedKey",
-    "hour_prefix",
-    "iter_hour_prefixes",
+    "day_prefix",
+    "iter_day_prefixes",
     "parse_key",
 ]
 
@@ -89,15 +90,49 @@ _NO_EXTENSION: Final[re.Pattern[str]] = re.compile(
     re.VERBOSE,
 )
 
+# 1788871734.100994-out-005551999752466-201-20260908-124856.flac
+#  ^uniqueid ^seq     ^dir ^number        ^ext ^date   ^time  ^ext
+#
+# The channel id comes *first* here, not last. This is what InterMagnum's PBX
+# instances actually write, and Go4Rex's write the documented order, so both
+# shapes are live at once across the two organisations. Without this pattern
+# the salvage path below still recovered the uniqueid and the timestamp -- but
+# it took the leading channel id to be the phone `number`, because that is the
+# first six-or-more digit run in the basename. A wrong number is worse than no
+# number: it feeds `numbers_agree` during correlation and the indexed search
+# column, so it produces confident false matches rather than an obvious gap.
+_UNIQUEID_FIRST: Final[re.Pattern[str]] = re.compile(
+    r"""
+    ^
+    (?P<uniqueid>\d{9,12})
+    (?:\.(?P<seq>\d{1,8}))?       -
+    (?P<direction>[a-z]+)          -
+    (?P<number>\+?\d{1,20})        -
+    (?P<extension>[A-Za-z0-9_]{1,32}) -
+    (?P<date>\d{8})                -
+    (?P<time>\d{6})
+    \.(?P<ext>[A-Za-z0-9]{1,8})
+    $
+    """,
+    re.VERBOSE,
+)
+
 # Last-resort salvage: pull out whatever recognisable tokens exist anywhere in
 # the basename.  Used only when the structured patterns fail.
 _ANY_UNIQUEID: Final[re.Pattern[str]] = re.compile(r"(?<!\d)(?P<uniqueid>1\d{9})(?!\d)")
 _ANY_DATETIME: Final[re.Pattern[str]] = re.compile(r"(?<!\d)(?P<date>\d{8})-(?P<time>\d{6})(?!\d)")
 _ANY_NUMBER: Final[re.Pattern[str]] = re.compile(r"(?<!\d)(?P<number>\d{6,20})(?!\d)")
 
-# /2025/11/11/02/<basename>
+# The date path a key sits under. Measured against all eight live buckets, it
+# is `recordings/YYYY/MM/DD/<basename>` -- a root prefix the documentation
+# omits, and **no hour level**, which the documentation shows. So the hour
+# group is optional: real keys have three date components, and the documented
+# four-component form is still accepted in case an account somewhere uses it.
+#
+# `\d{4}/` before it would also match the leading digits of a phone number in
+# a basename, so the pattern is anchored to a path separator or the start.
 _PREFIX: Final[re.Pattern[str]] = re.compile(
-    r"(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2})/(?P<hour>\d{2})/"
+    r"(?:^|/)(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2})/(?:(?P<hour>\d{2})/)?"
 )
 
 _AUDIO_EXTENSIONS: Final[frozenset[str]] = frozenset({"flac", "mp3", "wav", "ogg", "opus", "m4a"})
@@ -161,14 +196,26 @@ def _to_datetime(date: str, time: str) -> datetime | None:
         return None
 
 
-def _prefix_hour(key: str) -> datetime | None:
-    """Extract the hour bucket from the ``/YYYY/MM/DD/HH/`` prefix."""
+def _prefix_time(key: str) -> datetime | None:
+    """The date bucket a key sits in, from its path.
+
+    Midnight when the path stops at the day, which is what every live bucket
+    does. This is only ever a *fallback* anchor for correlation -- the epoch
+    channel id and the basename's own wall clock are both far more precise and
+    are tried first -- so a whole-day granularity here costs nothing when it is
+    used and is better than the `None` the hour-only pattern returned for every
+    real key.
+    """
     m = _PREFIX.search(key)
     if not m:
         return None
     try:
         return datetime(
-            int(m["year"]), int(m["month"]), int(m["day"]), int(m["hour"]), tzinfo=UTC
+            int(m["year"]),
+            int(m["month"]),
+            int(m["day"]),
+            int(m["hour"] or 0),
+            tzinfo=UTC,
         )
     except ValueError:
         return None
@@ -186,11 +233,11 @@ def _normalise_number(raw: str) -> str:
 def parse_key(key: str) -> ParsedKey:
     """Parse a recording object key. Never raises."""
     basename = key.rsplit("/", 1)[-1]
-    result = ParsedKey(key=key, basename=basename, prefix_hour=_prefix_hour(key))
+    result = ParsedKey(key=key, basename=basename, prefix_hour=_prefix_time(key))
     if result.prefix_hour is not None:
         result.confidence_inputs.add("prefix_hour")
 
-    for pattern in (_FULL, _NO_EXTENSION):
+    for pattern in (_FULL, _NO_EXTENSION, _UNIQUEID_FIRST):
         m = pattern.match(basename)
         if not m:
             continue
@@ -238,24 +285,50 @@ def parse_key(key: str) -> ParsedKey:
     return result
 
 
-def hour_prefix(moment: datetime) -> str:
-    """Return the CommPeak listing prefix for one hour, e.g. ``2025/11/11/02/``."""
+#: Where the date tree starts inside a CommPeak bucket.
+#:
+#: Measured on all eight live buckets. The published key layout starts at the
+#: year; the real one does not. Overridable per organisation through
+#: `source.key_root_prefix`, because it is somebody else's bucket layout and
+#: not ours to assume for ever.
+DEFAULT_KEY_ROOT: Final[str] = "recordings/"
+
+
+def day_prefix(moment: datetime, root: str = DEFAULT_KEY_ROOT) -> str:
+    """The listing prefix for one day, e.g. ``recordings/2025/11/11/``.
+
+    A **day**, not an hour, and with a root. Both corrections come from
+    measuring the live buckets: keys are `recordings/YYYY/MM/DD/<basename>`
+    with files directly under the day.
+
+    This was `hour_prefix`, producing `2025/11/11/02/`. That matched nothing in
+    any of the eight buckets, so a scan listed empty prefix after empty prefix
+    and finished *successfully* having found nothing -- 170 recorded runs, all
+    `ok = true`, all `discovered = 0`. A scanner that cannot find anything and
+    does not say so is worse than one that fails.
+    """
     utc = moment.astimezone(UTC)
-    return f"{utc.year:04d}/{utc.month:02d}/{utc.day:02d}/{utc.hour:02d}/"
+    return f"{root}{utc.year:04d}/{utc.month:02d}/{utc.day:02d}/"
 
 
-def iter_hour_prefixes(start: datetime, end: datetime):
-    """Yield every hour prefix in ``[start, end]`` inclusive, oldest first.
+def iter_day_prefixes(start: datetime, end: datetime, root: str = DEFAULT_KEY_ROOT):
+    """Yield every day prefix in ``[start, end]`` inclusive, oldest first.
 
-    Hour-at-a-time enumeration is what makes a 12.9M-object bucket scan
-    resumable and parallelisable: each prefix is an independent, cheap listing
-    whose completion we can record.
+    Day-at-a-time enumeration is what makes a multi-million-object bucket scan
+    resumable: each prefix is an independent listing whose completion can be
+    recorded, so a scan interrupted after hours of work resumes where it
+    stopped rather than starting again.
+
+    A day is a larger unit of work than the hour this used to yield -- more
+    objects per listing, and the S3 paginator handles that -- but it is the
+    unit the bucket is actually organised into, and inventing a level that does
+    not exist bought resumability at the price of finding nothing.
     """
     from datetime import timedelta
 
-    cursor = start.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
-    last = end.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
-    step = timedelta(hours=1)
+    cursor = start.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    last = end.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    step = timedelta(days=1)
     while cursor <= last:
-        yield hour_prefix(cursor)
+        yield day_prefix(cursor, root)
         cursor += step

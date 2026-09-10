@@ -142,11 +142,13 @@ class CommPeakConnection(Base, IdMixin, TimestampMixin):
     status_detail: Mapped[str | None] = mapped_column(Text)
     last_probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_inventory_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    #: Newest hour prefix fully inventoried; incremental scans resume from here
-    #: (minus an overlap) instead of re-walking millions of objects.
-    inventory_cursor_hour: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    #: Oldest hour known to exist, discovered by prefix descent.
-    earliest_hour: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Newest day prefix fully inventoried; incremental scans resume from here
+    #: (minus an overlap) instead of re-walking millions of objects. A day
+    #: because that is the deepest folder CommPeak buckets actually have --
+    #: these were named `_hour` and listed an hour level that does not exist.
+    inventory_cursor_day: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Oldest day known to exist, discovered by prefix descent.
+    earliest_day: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_cdr_cursor: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     concurrency_limit: Mapped[int] = mapped_column(
@@ -380,7 +382,12 @@ class Recording(Base, TimestampMixin):
     extension: Mapped[str | None] = mapped_column(String(40))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     uniqueid: Mapped[int | None] = mapped_column(BigInteger)
-    seq: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("0"))
+    #: The part number within a call. `SmallInteger` was too narrow: it is a
+    #: FreeSWITCH channel sequence, not a 0/1/2 part counter, and InterMagnum's
+    #: PBX writes six-digit values -- 100994 overflows int16 and the insert
+    #: fails outright, so the first real recording of that shape could not be
+    #: stored at all.
+    seq: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     call_group_key: Mapped[str | None] = mapped_column(String(40))
     file_ext: Mapped[str | None] = mapped_column(String(12))
     key_parsed_ok: Mapped[bool] = mapped_column(

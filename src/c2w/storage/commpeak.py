@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from c2w.commpeak.keyparse import hour_prefix
+from c2w.commpeak.keyparse import DEFAULT_KEY_ROOT, day_prefix
 from c2w.storage.base import S3Credentials
 from c2w.storage.errors import ErrorClass, TransferError
 from c2w.storage.s3_adapter import RateLimiter, S3Client
@@ -87,39 +87,56 @@ class CommPeakSource(S3Client):
     async def put_bytes(self, *args: object, **kwargs: object) -> None:
         raise SourceIsReadOnly("refusing to write to CommPeak: the source is read-only")
 
-    async def list_hour(self, moment: datetime, *, start_after: str | None = None):
-        """List one hour bucket.  The unit of work for inventory scanning."""
-        async for ref in self.list_prefix(hour_prefix(moment), start_after=start_after):
+    async def list_day(
+        self,
+        moment: datetime,
+        *,
+        start_after: str | None = None,
+        root: str = DEFAULT_KEY_ROOT,
+    ):
+        """List one day's folder.  The unit of work for inventory scanning."""
+        async for ref in self.list_prefix(day_prefix(moment, root), start_after=start_after):
             yield ref
 
-    async def discover_years(self) -> list[int]:
+    async def discover_years(self, root: str = DEFAULT_KEY_ROOT) -> list[int]:
         """Which years this bucket actually contains.
 
         Cheaper and far more reliable than assuming a start date: a delimiter
-        listing at the root returns only the top-level year prefixes, so we can
-        bound a 12.9M-object backfill without walking it first.
+        listing returns only the top-level year folders, so a multi-million
+        object backfill can be bounded without walking it first.
+
+        Listed under ``root``, not at the bucket root -- the dates sit inside
+        `recordings/` on every live account. A non-numeric sibling is skipped
+        rather than tripped over: `go4rex.pbx` really does have
+        `recordings/default/997/tmp/` alongside its years.
         """
         years: list[int] = []
-        for prefix in await self.list_common_prefixes(""):
-            token = prefix.strip("/").split("/")[0]
+        for prefix in await self.list_common_prefixes(root):
+            token = prefix.rstrip("/").rsplit("/", 1)[-1]
             if token.isdigit() and len(token) == 4:
                 years.append(int(token))
         return sorted(years)
 
-    async def earliest_hour(self) -> datetime | None:
-        """Walk year/month/day/hour prefixes down to the oldest populated hour."""
+    async def earliest_day(self, root: str = DEFAULT_KEY_ROOT) -> datetime | None:
+        """Walk year/month/day folders down to the oldest populated day.
+
+        Three levels, not four. There is no hour folder; this walked into a
+        fourth level that does not exist, found nothing there, and returned
+        ``None`` for every bucket -- so "how far back does this account go"
+        was unanswerable on every account that had data.
+        """
         parts: list[str] = []
-        for _ in range(4):
-            children = await self.list_common_prefixes("".join(f"{p}/" for p in parts))
-            leaves = (c.strip("/").split("/")[-1] for c in children)
+        for _ in range(3):
+            children = await self.list_common_prefixes(root + "".join(f"{p}/" for p in parts))
+            leaves = (c.rstrip("/").rsplit("/", 1)[-1] for c in children)
             tokens = sorted(t for t in leaves if t.isdigit())
             if not tokens:
                 break
             parts.append(tokens[0])
-        if len(parts) < 4:
+        if len(parts) < 3:
             return None
-        year, month, day, hour = (int(p) for p in parts[:4])
-        return datetime(year, month, day, hour, tzinfo=UTC)
+        year, month, day = (int(p) for p in parts[:3])
+        return datetime(year, month, day, tzinfo=UTC)
 
 
 @dataclass(slots=True)
@@ -175,15 +192,15 @@ async def run_source_probes(
         years = []
         record("bucket_discovery", exc)
 
-    # 3. can we enumerate a populated hour
+    # 3. can we enumerate a populated day
     sample_key: str | None = None
     sample_size = 0
     try:
-        earliest = await source.earliest_hour()
+        earliest = await source.earliest_day()
         if earliest is None:
-            record("recordings_directory", None, "bucket contains no hour-partitioned objects yet")
+            record("recordings_directory", None, "bucket contains no dated folders yet")
         else:
-            record("recordings_directory", None, f"earliest hour {earliest:%Y-%m-%d %H:00}Z")
+            record("recordings_directory", None, f"oldest recording day {earliest:%Y-%m-%d}")
     except BaseException as exc:
         record("recordings_directory", exc)
 

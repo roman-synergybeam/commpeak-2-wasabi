@@ -195,3 +195,122 @@ class TestSummary:
         summary = correlation_summary([])
         assert summary["total"] == 0
         assert summary["strong_ratio"] == 0.0
+
+
+class TestTheTwoLayoutsThatAreActuallyLive:
+    """Measured against the eight production buckets, not the documentation.
+
+    Two things the published key layout gets wrong for this estate, and both
+    were silently costing us data:
+
+    * Keys sit under a `recordings/` root and have **no hour folder**. The
+      scanner listed `YYYY/MM/DD/HH/`, matched nothing, and completed
+      successfully -- 170 incremental runs, all `ok = true`, all
+      `discovered = 0`.
+    * The basename comes in two orders. Go4Rex's PBX writes the documented one
+      (direction first, channel id last); InterMagnum's writes the channel id
+      **first**. Both are live right now.
+    """
+
+    GO4REX = (
+        "recordings/2022/12/26/"
+        "in-99150321131757-5031470050247407092-20221226-152523-1672068323.91098.flac"
+    )
+    INTERMAGNUM = (
+        "recordings/2026/09/08/1788871734.100994-out-005551999752466-201-20260908-124856.flac"
+    )
+    INTERNAL = "recordings/2026/09/08/1788871734.100995-internal-201-201-20260908-124854.flac"
+    DOCUMENTED = "/2025/11/11/02/out-441632960770-101-20211111-125343-1636635223.0.flac"
+
+    def test_the_channel_id_first_layout_is_parsed(self):
+        from c2w.commpeak.keyparse import parse_key
+
+        parsed = parse_key(self.INTERMAGNUM)
+        assert parsed.direction == "out"
+        # The regression this guards: the leading channel id is not the number.
+        assert parsed.number == "005551999752466"
+        assert int(parsed.uniqueid) == 1788871734
+        assert parsed.extension == "201"
+        assert parsed.is_audio
+
+    def test_the_channel_id_is_never_mistaken_for_the_number(self):
+        """The failure mode, stated as its own test.
+
+        Before the channel-id-first pattern existed the salvage path recovered
+        the uniqueid and the timestamp but returned the channel id as `number`,
+        because it is the first long digit run in the basename. That is worse
+        than returning nothing: `numbers_agree` uses it during correlation and
+        it lands in the indexed search column, so it manufactures confident
+        false matches instead of an obvious gap.
+        """
+        from c2w.commpeak.keyparse import parse_key
+
+        for key in (self.INTERMAGNUM, self.INTERNAL):
+            parsed = parse_key(key)
+            # Compared as strings on purpose: `number` is a str and `uniqueid`
+            # an int, so a bare `!=` is true whatever they hold and the
+            # assertion would pass even with the bug present.
+            assert str(parsed.number) != str(parsed.uniqueid), key
+
+    def test_the_documented_layout_still_parses(self):
+        """Adding a pattern must not cost the one the docs describe."""
+        from c2w.commpeak.keyparse import parse_key
+
+        parsed = parse_key(self.DOCUMENTED)
+        assert parsed.direction == "out"
+        assert parsed.number == "441632960770"
+        assert parsed.extension == "101"
+        assert int(parsed.uniqueid) == 1636635223
+
+    def test_both_live_layouts_recover_a_usable_anchor(self):
+        """The epoch and the wall clock must agree, or correlation degrades."""
+        from c2w.commpeak.keyparse import parse_key
+
+        for key in (self.GO4REX, self.INTERMAGNUM, self.INTERNAL, self.DOCUMENTED):
+            parsed = parse_key(key)
+            assert parsed.uniqueid_time is not None, key
+            assert parsed.started_at is not None, key
+            assert abs((parsed.uniqueid_time - parsed.started_at).total_seconds()) <= 2, key
+
+    def test_the_day_prefix_has_a_root_and_no_hour(self):
+        from datetime import UTC, datetime
+
+        from c2w.commpeak.keyparse import DEFAULT_KEY_ROOT, day_prefix
+
+        moment = datetime(2026, 9, 8, 13, 4, tzinfo=UTC)
+        assert day_prefix(moment) == "recordings/2026/09/08/"
+        assert DEFAULT_KEY_ROOT == "recordings/"
+        # An empty root is legitimate -- an account whose dates sit at the top.
+        assert day_prefix(moment, "") == "2026/09/08/"
+
+    def test_day_prefixes_are_whole_days_oldest_first(self):
+        from datetime import UTC, datetime
+
+        from c2w.commpeak.keyparse import iter_day_prefixes
+
+        got = list(
+            iter_day_prefixes(
+                datetime(2026, 8, 30, 23, 59, tzinfo=UTC),
+                datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+            )
+        )
+        assert got == [
+            "recordings/2026/08/30/",
+            "recordings/2026/08/31/",
+            "recordings/2026/09/01/",
+        ]
+
+    def test_a_key_under_the_non_date_branch_yields_no_prefix_time(self):
+        """`go4rex.pbx` really has `recordings/default/997/tmp/`."""
+        from c2w.commpeak.keyparse import parse_key
+
+        assert parse_key("recordings/default/997/tmp/x.flac").prefix_hour is None
+
+    def test_the_prefix_time_falls_back_to_midnight_on_a_day_path(self):
+        from datetime import UTC, datetime
+
+        from c2w.commpeak.keyparse import parse_key
+
+        assert parse_key(self.GO4REX).prefix_hour == datetime(2022, 12, 26, tzinfo=UTC)
+        # And the documented four-component form keeps its hour.
+        assert parse_key(self.DOCUMENTED).prefix_hour == datetime(2025, 11, 11, 2, tzinfo=UTC)

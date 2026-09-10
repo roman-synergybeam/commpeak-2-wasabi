@@ -179,12 +179,44 @@ Source: `https://recordings.commpeak.com`, **path-style addressing**, SigV4,
 bucket name is the account UUID, calling IP must be whitelisted in the account
 ACL, ~5 concurrent transfers per account.
 
-Object keys look like:
+**Object keys, as measured on all eight live buckets** -- the published layout
+is wrong for this estate in three ways, and each cost real data:
 
 ```
+Go4Rex PBX / Dialer            no hour folder, direction first
+recordings/2022/12/26/in-99150321131757-503147…-20221226-152523-1672068323.91098.flac
+
+InterMagnum PBX                hour folder, channel id FIRST
+recordings/2026/09/08/12/1788871734.100994-out-005551999752466-201-20260908-124856.flac
+
+as documented (still accepted)
 /2025/11/11/02/out-441632960770-101-20211111-125343-1636635223.0.flac
-   year/mo/dy/hr  dir number       ext date     time   channel-id  seq  format
 ```
+
+1. **There is a `recordings/` root prefix.** The docs start at the year.
+   Configurable as `source.key_root_prefix`; it is somebody else's layout.
+2. **The hour folder is optional and differs by organisation.** Go4Rex puts
+   files directly under the day; InterMagnum adds an hour. The scanner lists a
+   **day** prefix, which covers both because `list_prefix` is recursive -- and
+   `_PREFIX` makes the hour group optional so a key parses either way.
+3. **The basename comes in two orders.** Go4Rex writes the documented one;
+   InterMagnum writes the channel id first (`_UNIQUEID_FIRST`). Without that
+   pattern the salvage path recovered the uniqueid and timestamp but took the
+   leading channel id to be the phone **number** -- worse than no number, since
+   it feeds `numbers_agree` and the indexed search column and so manufactures
+   confident false matches.
+
+**What the old assumption cost:** `hour_prefix()` built `2025/11/11/02/`, which
+matches nothing in any bucket. Listing it returns nothing and returns it
+*successfully* -- 170 recorded incremental runs, every one `ok = true`, every
+one `discovered = 0`, no error anywhere, and an empty calls page with no
+explanation. A scanner that cannot find anything and does not say so is worse
+than one that fails.
+
+**And `recordings.seq` was `smallint`.** It is a FreeSWITCH channel sequence,
+not a 0/1/2 part counter: InterMagnum writes six digits, `100994` overflows
+int16, and the insert was *refused* -- the first real key of that shape could
+not be stored at all. Widened to `integer` in migration 0011.
 
 **Keys carry no `call_uuid`.** The trailing `1636635223` is a FreeSWITCH channel
 id — a unix epoch second at channel creation — and in the documented example it

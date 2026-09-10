@@ -46,7 +46,7 @@
       <tr>
         <td data-label="Account">{{ row.name }}</td>
         <td class="mono" data-label="Last scan">{{ row.last_inventory_at | dt }}</td>
-        <td class="mono" data-label="Scanned up to">{{ row.inventory_cursor_hour | dt }}</td>
+        <td class="mono" data-label="Scanned up to">{{ row.inventory_cursor_day | dt }}</td>
         <td class="col-progress" data-label="Archived">
           {# A meter, not a bare number: down a list of accounts the colour is
              what gets noticed. .warn/.bad go on the fill *and* the percentage,

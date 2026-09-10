@@ -982,7 +982,7 @@ async def _sync_context(session: AsyncSession) -> _QueryParams:
         await session.execute(
             text(
                 """
-                SELECT k.id, k.name, k.last_inventory_at, k.inventory_cursor_hour,
+                SELECT k.id, k.name, k.last_inventory_at, k.inventory_cursor_day,
                        count(r.id)                                          AS total,
                        count(r.id) FILTER (
                            WHERE r.state IN ('AVAILABLE','SOURCE_DELETED')
@@ -995,7 +995,7 @@ async def _sync_context(session: AsyncSession) -> _QueryParams:
                        )                                                    AS failed
                 FROM commpeak_connections k
                 LEFT JOIN recordings r ON r.connection_id = k.id AND r.brand_id = k.brand_id
-                GROUP BY k.id, k.name, k.last_inventory_at, k.inventory_cursor_hour
+                GROUP BY k.id, k.name, k.last_inventory_at, k.inventory_cursor_day
                 ORDER BY k.name
                 """
             )
