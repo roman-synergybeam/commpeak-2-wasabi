@@ -164,6 +164,7 @@ async def scan_day(
     enqueue_transfers: bool = True,
     correlation_window_seconds: int = 120,
     root: str = DEFAULT_KEY_ROOT,
+    commit_every: int = 500,
 ) -> InventoryResult:
     """Inventory one day prefix.
 
@@ -265,6 +266,23 @@ async def scan_day(
             recording.state = RecordingState.QUEUED
             result.queued += 1
 
+        # Commit in slices rather than once per day.
+        #
+        # A day is not a safe unit of work here: one real day on
+        # `intermagnum.td` holds 124,784 objects, and inserting all of them in
+        # a single transaction holds row locks on tens of thousands of
+        # recordings and jobs at once. Meanwhile the workers lock the same rows
+        # in the opposite order -- they take a job first and update its
+        # recording second, where this takes the recording first and its job
+        # second -- so a deadlock is not bad luck, it is the arrangement. It
+        # killed two backfill runs before the transaction was bounded.
+        #
+        # Safe to commit part-way through: the cursor still only advances once
+        # the whole day is done, and the upsert is keyed on the source key, so
+        # re-listing a partly-scanned day writes nothing new.
+        if commit_every and result.objects_seen % commit_every == 0:
+            await session.commit()
+
     return result
 
 
@@ -280,6 +298,7 @@ async def scan_range(
     enqueue_transfers: bool = True,
     commit_every_prefix: bool = True,
     root: str = DEFAULT_KEY_ROOT,
+    commit_every: int = 500,
 ) -> InventoryResult:
     """Inventory every day in ``[start, end]``, oldest first.
 
@@ -303,6 +322,7 @@ async def scan_range(
             destination_id=destination_id,
             enqueue_transfers=enqueue_transfers,
             root=root,
+            commit_every=commit_every,
         )
         total.merge(got)
 

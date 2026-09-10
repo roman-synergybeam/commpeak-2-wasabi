@@ -1415,3 +1415,51 @@ class TestTheClaimSpreadsAcrossAccounts:
             await s.execute(text("UPDATE transfer_jobs SET state = 'DONE'"))
             await s.commit()
             assert await Worker._connections_with_work(s) == []
+
+
+class TestTheScannerBoundsItsTransaction:
+    """A day is not a safe unit of work to hold locks for.
+
+    One real day on `intermagnum.td` holds 124,784 objects. Inserting them in
+    a single transaction holds row locks on tens of thousands of recordings and
+    jobs, while the workers lock the same rows in the opposite order -- they
+    take a job then update its recording; the scanner inserts the recording
+    then its job. That is a deadlock by arrangement rather than by luck, and it
+    killed two backfill runs.
+    """
+
+    def test_scan_day_commits_in_slices_by_default(self):
+        import inspect
+
+        from c2w.sync.inventory import scan_day
+
+        default = inspect.signature(scan_day).parameters["commit_every"].default
+        assert isinstance(default, int)
+        assert 0 < default <= 2000, default
+
+    def test_scan_range_passes_the_slice_through(self):
+        """Otherwise the bound exists and the backfill never uses it."""
+        import inspect
+
+        from c2w.sync.inventory import scan_range
+
+        assert "commit_every" in inspect.signature(scan_range).parameters
+        source = inspect.getsource(scan_range)
+        assert "commit_every=commit_every" in source
+
+    async def test_a_partly_scanned_day_leaves_the_cursor_alone(self, db, scenario):
+        """Committing part-way through must not claim the day is done.
+
+        The cursor is what an incremental pass resumes from, so advancing it
+        for a day that only partly landed would skip the rest for ever.
+        """
+        import inspect
+
+        from c2w.sync.inventory import scan_range
+
+        source = inspect.getsource(scan_range)
+        cursor_line = next(
+            line for line in source.splitlines() if "inventory_cursor_day" in line
+        )
+        # Set after the day's scan returns, not inside it.
+        assert source.index("await scan_day(") < source.index(cursor_line)
