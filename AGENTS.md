@@ -743,6 +743,16 @@ What one evening of tuning actually produced:
 | 32 global, 16/brand, 1 worker | 129/min | 23.2 Mbit/s | ~19 h |
 | + a second worker | 181/min | 23.8 Mbit/s | ~13 h |
 | + two more workers | 232/min | 18.7 Mbit/s | ~10 h |
+| + a fifth worker | 304/min | 15.7 Mbit/s | ~7 h |
+
+**Five workers at one per account is the ceiling, and it is CommPeak's, not
+ours.** Five concurrent per S3 account is exactly what their documentation
+recommends. The host still has headroom at that point -- 1.65 of 4 cores --
+so the next gain would have to come from CommPeak confirming a higher
+per-account figure, or from cutting the round trips per object. At 304/min
+with 40 transfers in flight each object takes about eight seconds, which for a
+0.73 MB file is latency (GET, PUT, HEAD verify, then the row) rather than
+throughput. More parallelism against the same limit will not fix that.
 
 **`source.concurrency_per_connection` is enforced per worker *process*, not
 across the platform.** It gates each connection group inside

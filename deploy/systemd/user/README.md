@@ -38,8 +38,15 @@ systemctl --user enable --now c2w-scheduler c2w-reconciler
 sudo loginctl enable-linger c2w      # or none of it survives a reboot
 ```
 
-More workers are more instances: `c2w-worker@2`, `c2w-worker@3`. Keep the total
-at or below CommPeak's ~5 concurrent transfers per account.
+More workers are more instances: `c2w-worker@2` … `c2w-worker@5`. Five are
+enabled here.
+
+**`source.concurrency_per_connection` must come down as workers go up.** It is
+enforced per worker *process*, so N workers at that value put N times as many
+concurrent requests on one CommPeak account, and CommPeak recommends about
+five. Five workers therefore run it at `1`. Leaving it at `5` while adding
+workers would put twenty-five on a single account, and the punishment is a
+rate-limited 403 indistinguishable from a missing ACL entry.
 
 `c2w-scheduler` is the unit that reaches out to CommPeak on a timer. While an
 account is being refused there, running it only produces a failed scan every
