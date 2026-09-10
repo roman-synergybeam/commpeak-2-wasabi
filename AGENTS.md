@@ -341,6 +341,11 @@ decoration and several are enforced in `web/filters.py`:
 - **`.tw` wraps every table**; add `.stack` plus a `data-label` per cell when it
   has more than about six columns, or it is unreadable on a phone.
 - **Every figure carries a caption and a unit**, `tabular-nums` if it updates.
+- **A menu choice whose raw value does not say what it means gets a label.**
+  `SettingSpec.choice_labels` exists because `0` in a menu of years means
+  *forever* and rendered as `0`, which reads as the exact opposite -- keep
+  nothing. Same for `0` days, which means *straight away*. A number that
+  reads as its own negation is worse than not offering the option.
 - Traps the kit names: `min-width:0` on grid and flex children;
   `overflow-x:clip` on body, never `hidden`; a `<button>` rule with a
   background will paint your chips.
@@ -672,6 +677,24 @@ must stay arranged:
 
 `/admin/users/<email>` is still a page in its own right. Editing one person is
 not a settings pane.
+
+**The organisations pane deliberately ignores the selected brand.** It runs on
+the ordinary request session, whose RLS is scoped to whatever the profile has
+selected -- so it showed the selected organisation correctly and every other
+one as zeros with no PBXes. That does not read as "you are looking at Go4Rex";
+it reads as "InterMagnum is empty", and confidently wrong numbers are worse
+than an error. `_organisations_pane` now moves `c2w.brand_id` per organisation
+and restores it in a `finally`, which is the same thing `record_admin_event`
+does and for the same reason: this is a user request, so RLS stays the control
+rather than reaching for the BYPASSRLS role. The restore matters because the
+caller goes on to read settings for the brand the operator actually chose. The
+section is `brands.manage`, which only `SUPER_ADMIN` holds, so "all
+organisations" is already scoped to the only role entitled to see them.
+
+The people count reads `users.brand_id` **union** `user_brands.brand_id`.
+Counting only the column missed everyone who works across organisations, which
+is the whole point of `user_brands` -- an organisation staffed entirely by
+shared users read as having nobody in it.
 
 ## Out of scope for v1
 

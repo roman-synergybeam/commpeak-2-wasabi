@@ -798,3 +798,186 @@ class TestShowingStoredCredentials:
         assert self.TOKEN not in section.text
         assert self.SECRET not in section.text
         assert str(conn_id) in page.text          # the account itself is listed
+
+
+class TestTheOrganisationsPaneIgnoresTheSelectedBrand:
+    """A platform administrator asking to see the organisations means all of them.
+
+    The pane runs on the ordinary request session, which carries forced RLS
+    scoped to whichever brand the profile has selected. So it showed the
+    selected organisation correctly and every other one as zeros with no
+    PBXes -- which reads as "that company has nothing in it" rather than "you
+    are looking at the other one". Wrong numbers presented confidently are
+    worse than an error.
+    """
+
+    async def test_every_organisation_shows_its_own_real_figures(self, db, scenario):
+        from c2w.web.routes import _organisations_pane
+
+        other_slug = f"other-{uuid.uuid4().hex[:8]}"
+        async with db() as s:
+            other_id = (
+                await s.execute(
+                    text(
+                        "INSERT INTO brands (name, slug) VALUES (:n, :s) RETURNING id"
+                    ),
+                    {"n": f"Other {other_slug}", "s": other_slug},
+                )
+            ).scalar_one()
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"), {"b": str(other_id)}
+            )
+            await s.execute(
+                text(
+                    "INSERT INTO tenants (brand_id, name, slug) VALUES (:b, 'other.pbx', :s)"
+                ),
+                {"b": other_id, "s": f"t-{uuid.uuid4().hex[:6]}"},
+            )
+            await s.commit()
+
+        # Scoped to the *scenario* brand, as a request would be.
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            pane = await _organisations_pane(s)
+
+            ids = {b.id for b in pane["organisations"]}
+            assert {scenario["brand_id"], other_id} <= ids
+
+            # The other organisation's PBX is counted and listed, even though
+            # the session is scoped elsewhere. This is the regression.
+            assert pane["counts"][other_id]["tenants"] >= 1, pane["counts"][other_id]
+            assert any(
+                t["name"] == "other.pbx" for t in pane["tenants"].get(other_id, [])
+            ), pane["tenants"].get(other_id)
+
+            # And the selected brand is still right.
+            assert pane["counts"][scenario["brand_id"]]["tenants"] >= 1
+
+    async def test_it_restores_the_scope_it_was_given(self, db, scenario):
+        """The caller goes on to read settings for the brand actually chosen.
+
+        Moving the scope per organisation and forgetting to put it back would
+        leave the rest of the page reading whichever organisation happened to
+        sort last.
+        """
+        from c2w.web.routes import _organisations_pane
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            await _organisations_pane(s)
+            still = (
+                await s.execute(text("SELECT current_setting('c2w.brand_id', true)"))
+            ).scalar_one()
+        assert still == str(scenario["brand_id"])
+
+    async def test_membership_in_another_organisation_is_counted(self, db, scenario):
+        """`user_brands` is how a person works across organisations.
+
+        Counting only `users.brand_id` missed every such person, so an
+        organisation with five shared users read as empty.
+        """
+        from c2w.web.routes import _organisations_pane
+
+        email = f"shared-{uuid.uuid4().hex[:8]}@example.com"
+        async with db() as s:
+            # Their *home* organisation is a different one -- which is the
+            # whole point: `users.brand_id` will never count them here, only
+            # the `user_brands` membership will. A non-super-admin must have a
+            # home brand (ck_users_brand_required), so this is also the only
+            # shape the constraint allows.
+            home_id = (
+                await s.execute(
+                    text("INSERT INTO brands (name, slug) VALUES (:n, :s) RETURNING id"),
+                    {
+                        "n": f"Home {uuid.uuid4().hex[:6]}",
+                        "s": f"home-{uuid.uuid4().hex[:8]}",
+                    },
+                )
+            ).scalar_one()
+            uid = (
+                await s.execute(
+                    text(
+                        "INSERT INTO users (brand_id, email, display_name, role, "
+                        "auth_source, password_hash) "
+                        "VALUES (:h, :e, 'Shared', 'OPERATOR', 'LOCAL', :p) "
+                        "RETURNING id"
+                    ),
+                    {
+                        "h": home_id,
+                        "e": email,
+                        "p": hash_password("a-long-enough-password"),
+                    },
+                )
+            ).scalar_one()
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            await s.execute(
+                text(
+                    "INSERT INTO user_brands (user_id, brand_id, role) "
+                    "VALUES (:u, :b, 'OPERATOR')"
+                ),
+                {"u": uid, "b": scenario["brand_id"]},
+            )
+            await s.commit()
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            pane = await _organisations_pane(s)
+        assert pane["counts"][scenario["brand_id"]]["people"] >= 1
+
+
+class TestForeverIsOfferedForArchiveRetention:
+    """`0` years means forever, and must not render as "0"."""
+
+    def test_zero_is_a_choice_and_reads_as_forever(self):
+        from c2w.settings_spec import SETTINGS
+
+        spec = SETTINGS["retention.keep_archive_years"]
+        assert "0" in spec.choices
+        assert spec.choice_labels.get("0") == "forever"
+
+    def test_zero_passes_validation(self):
+        """A validator rejecting 0 would make the option unselectable."""
+        from c2w.settings_spec import SETTINGS
+
+        spec = SETTINGS["retention.keep_archive_years"]
+        assert spec.validator is not None
+        spec.validator(0)
+
+    def test_no_code_turns_the_number_into_a_deletion_cutoff(self):
+        """The danger `0` carries, guarded rather than trusted.
+
+        Nothing deletes from the archive on age today. If something starts to,
+        it must treat 0 as "never" -- because the obvious implementation,
+        `now - years`, makes 0 mean "delete everything immediately", which is
+        the exact opposite of what the operator picked.
+        """
+        from pathlib import Path
+
+        for path in Path("src/c2w").rglob("*.py"):
+            if path.name == "settings_spec.py":
+                continue
+            body = path.read_text()
+            if "keep_archive_years" in body:
+                assert "forever" in body or "== 0" in body or "or None" in body, (
+                    f"{path} consumes keep_archive_years -- it must handle 0 as "
+                    "forever, and say so"
+                )
+
+    async def test_the_menu_renders_the_label(self, app_client, scenario):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/admin/settings?section=retention")
+        assert page.status_code == 200
+        assert '<option value="0"' in page.text
+        assert "forever" in page.text

@@ -3075,40 +3075,77 @@ async def _organisations_pane(session: AsyncSession) -> dict[str, Any]:
     Creating one used to be `c2w-admin brand add` and nothing else, so the one
     thing you cannot do without -- an organisation to put anything in -- was
     the one thing the console could not do.
+
+    **Every organisation's real figures, whatever brand the profile has
+    selected.** This page runs on the ordinary request session, which carries
+    forced RLS scoped to the *active* brand -- so it used to show the selected
+    organisation correctly and every other one as zeros with no PBXes, which
+    reads as "InterMagnum has nothing in it" rather than "you are looking at
+    Go4Rex". A platform administrator asking to see the organisations is asking
+    across all of them; that is what the section is.
+
+    The scope is therefore moved per organisation and restored, rather than
+    reaching for the BYPASSRLS role: this is a user request, RLS stays the
+    control, and one extra round trip per organisation is nothing next to
+    quietly wrong numbers. `record_admin_event` does the same thing for the
+    same reason. `set_config(..., true)` is transaction-local, so the restore
+    matters only within this transaction -- but it matters, because the caller
+    goes on to read settings for the brand the operator actually chose.
     """
     brands = (await session.execute(select(Brand).order_by(Brand.name))).scalars().all()
-    counts = (
-        await session.execute(
-            text(
-                """
-                SELECT b.id,
-                       (SELECT count(*) FROM tenants t WHERE t.brand_id = b.id) AS tenants,
-                       (SELECT count(*) FROM commpeak_connections c
-                         WHERE c.brand_id = b.id)                               AS accounts,
-                       (SELECT count(*) FROM storage_destinations d
-                         WHERE d.brand_id = b.id)                               AS archives,
-                       (SELECT count(*) FROM users u WHERE u.brand_id = b.id)    AS people
-                FROM brands b
-                """
-            )
-        )
-    ).mappings().all()
 
-    tenants = (
-        await session.execute(
-            text(
-                "SELECT id, brand_id, name, slug, commpeak_domain FROM tenants "
-                "ORDER BY brand_id, name"
-            )
-        )
-    ).mappings().all()
+    was = (
+        await session.execute(text("SELECT current_setting('c2w.brand_id', true)"))
+    ).scalar_one() or ""
+
+    counts: dict[int, dict[str, Any]] = {}
     by_brand: dict[int, list[Any]] = {}
-    for row in tenants:
-        by_brand.setdefault(row["brand_id"], []).append(dict(row))
+    try:
+        for brand in brands:
+            await session.execute(
+                text("SELECT set_config('c2w.brand_id', :b, true)"), {"b": str(brand.id)}
+            )
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT (SELECT count(*) FROM tenants)              AS tenants,
+                               (SELECT count(*) FROM commpeak_connections) AS accounts,
+                               (SELECT count(*) FROM storage_destinations) AS archives,
+                               -- Both routes into an organisation: the home
+                               -- brand on the account, and a membership in
+                               -- user_brands for somebody who works across
+                               -- several. Counting only the column missed
+                               -- every multi-organisation user.
+                               (SELECT count(*) FROM (
+                                    SELECT id FROM users WHERE brand_id = :b
+                                    UNION
+                                    SELECT user_id FROM user_brands WHERE brand_id = :b
+                               ) AS m)                                     AS people
+                        """
+                    ),
+                    {"b": brand.id},
+                )
+            ).mappings().one()
+            counts[brand.id] = {"id": brand.id, **dict(row)}
+
+            for tenant in (
+                await session.execute(
+                    text(
+                        "SELECT id, brand_id, name, slug, commpeak_domain FROM tenants "
+                        "ORDER BY name"
+                    )
+                )
+            ).mappings().all():
+                by_brand.setdefault(tenant["brand_id"], []).append(dict(tenant))
+    finally:
+        await session.execute(
+            text("SELECT set_config('c2w.brand_id', :b, true)"), {"b": was}
+        )
 
     return {
         "organisations": brands,
-        "counts": {row["id"]: dict(row) for row in counts},
+        "counts": counts,
         "tenants": by_brand,
         "timezone_choices": SETTINGS["org.timezone"].choices,
     }

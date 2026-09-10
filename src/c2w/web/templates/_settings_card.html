@@ -52,9 +52,12 @@
               {% if current not in known %}
                 <option value="{{ current }}" selected>{{ current }} (set outside this list)</option>
               {% endif %}
+              {# A choice whose raw value does not say what it means gets a
+                 label: `0` in a menu of years means "forever", and rendering
+                 it as "0" reads as the exact opposite. #}
               {% for choice in spec.choices %}
                 <option value="{{ choice }}" {{ 'selected' if current == choice }}>
-                  {{ choice }}
+                  {{ spec.choice_labels.get(choice, choice) }}
                 </option>
               {% endfor %}
             </select>

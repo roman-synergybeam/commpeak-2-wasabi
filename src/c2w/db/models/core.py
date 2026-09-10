@@ -217,6 +217,11 @@ class RetentionPolicy(Base, IdMixin, TimestampMixin):
     offload_after_days: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("90")
     )
+    #: How long an archived recording is kept. **Zero means forever**, and the
+    #: obvious implementation of the opposite -- a `now - years` cutoff -- turns
+    #: that into "delete everything immediately", which is the exact reverse of
+    #: what the operator selected. Nothing acts on this column yet; whatever
+    #: eventually does must special-case 0 before computing any cutoff.
     keep_archive_years: Mapped[int] = mapped_column(
         Integer,
         nullable=False,

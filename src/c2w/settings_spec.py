@@ -24,8 +24,8 @@ to the database in the first place: the database URL and the master key.  See
 from __future__ import annotations
 
 import enum
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Any, Final
 
 #: The zones these businesses actually work in, nearest the top.
@@ -141,6 +141,11 @@ class SettingSpec:
     help_label: str = ""
     #: Fixed set of acceptable values, rendered as a menu instead of a text box.
     choices: tuple[str, ...] = ()
+    #: What a choice should read as, where the raw value is not self-explaining.
+    #: `0` in a menu of years is the case that forced this: it means "forever"
+    #: and rendered as "0", which reads as "keep nothing". A number whose
+    #: meaning is the opposite of how it looks is worse than no option at all.
+    choice_labels: Mapping[str, str] = field(default_factory=dict)
 
 
 def _positive(value: Any) -> None:
@@ -392,6 +397,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     SettingSpec(
         key="retention.offload_after_days",
         choices=('0', '7', '30', '60', '90', '180', '365'),
+        choice_labels={'0': 'straight away'},
         type=SettingType.INT,
         default=90,
         category="Retention",
@@ -414,12 +420,16 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
     ),
     SettingSpec(
         key="retention.keep_archive_years",
-        choices=('1', '2', '3', '5', '7', '10'),
+        choices=('1', '2', '3', '5', '7', '10', '0'),
+        choice_labels={'0': 'forever'},
         type=SettingType.INT,
         default=7,
         category="Retention",
         label="Keep archived recordings for",
-        description="How long recordings are retained in long-term storage.",
+        description="How long recordings are retained in long-term storage. "
+        "\"Forever\" means nothing in this platform will ever remove an "
+        "archived recording on age -- which is the safe answer for call "
+        "recordings held for compliance, and the reason it is offered.",
         unit="years",
         validator=_non_negative,
         brand_overridable=True,
