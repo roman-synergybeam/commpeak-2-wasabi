@@ -138,8 +138,7 @@ async def transfer_recording(
     source: CommPeakSource,
     dest: WasabiDestination,
     *,
-    brand_slug: str,
-    tenant_slug: str,
+    account: str,
     multipart_threshold: int,
     multipart_chunk: int,
     write_sidecar: bool = True,
@@ -171,8 +170,7 @@ async def transfer_recording(
 
     dest_key = destination_key(
         path_prefix=destination_row.path_prefix,
-        brand_slug=brand_slug,
-        tenant_slug=tenant_slug,
+        account=account,
         source_key=recording.source_key,
     )
     content_type = _CONTENT_TYPES.get(recording.file_ext or "", "application/octet-stream")

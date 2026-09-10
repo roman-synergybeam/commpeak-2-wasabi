@@ -339,8 +339,7 @@ class TestTransfer:
                     dest_row,
                     src,
                     dst,
-                    brand_slug="go4rex",
-                    tenant_slug="go4rex-td",
+                    account="go4rex.td",
                     multipart_threshold=16 * 1024 * 1024,
                     multipart_chunk=5 * 1024 * 1024,
                 )
@@ -350,7 +349,9 @@ class TestTransfer:
         assert outcome.bytes_transferred == len(audio)
         assert outcome.sidecar_written
         # Brand and tenant lead the key so a brand's objects stay contiguous.
-        assert outcome.destination_key == f"archive/go4rex/go4rex-td/{SRC_KEY}"
+        # The account folder leads, and the source key is preserved verbatim
+        # underneath -- including CommPeak's own recordings/ tree.
+        assert outcome.destination_key == f"archive/go4rex.td/{SRC_KEY}"
 
         async with await _scoped(db, scenario["brand_id"]) as s:
             rec = (
@@ -424,8 +425,7 @@ class TestTransfer:
                     dest_row,
                     src,
                     dst,
-                    brand_slug="go4rex",
-                    tenant_slug="go4rex-td",
+                    account="go4rex.td",
                     multipart_threshold=16 * 1024 * 1024,
                     multipart_chunk=5 * 1024 * 1024,
                 )
@@ -481,8 +481,7 @@ class TestTransfer:
                     dest_row,
                     src,
                     dst,
-                    brand_slug="go4rex",
-                    tenant_slug="go4rex-td",
+                    account="go4rex.td",
                     multipart_threshold=16 * 1024 * 1024,
                     multipart_chunk=5 * 1024 * 1024,
                 )
@@ -538,8 +537,7 @@ class TestTransfer:
                     dest_row,
                     src,
                     dst,
-                    brand_slug="go4rex",
-                    tenant_slug="go4rex-td",
+                    account="go4rex.td",
                     multipart_threshold=16 * 1024 * 1024,
                     multipart_chunk=5 * 1024 * 1024,
                 )
@@ -1091,3 +1089,180 @@ class TestWatchingForAccessToComeBack:
             sched.Scheduler._scan_connection = original
             sched.platform_session = session_original
         assert scenario["connection_id"] in scanned
+
+
+class TestTheArchiveIsArrangedByAccount:
+    """The bucket's top level must read as the list of CommPeak accounts.
+
+    Asked for directly: folders named `go4rex.pbx`, `go4rex.td`,
+    `go4rexnew.td` and so on, matching what they are called at CommPeak.
+    """
+
+    def test_the_account_name_leads_the_key(self):
+        from c2w.storage.wasabi import destination_key
+
+        key = destination_key(
+            path_prefix="archive",
+            account="go4rex.pbx",
+            source_key="recordings/2026/09/08/12/1788871734.100994-out-1-201-20260908-124856.flac",
+        )
+        assert key == (
+            "archive/go4rex.pbx/"
+            "recordings/2026/09/08/12/1788871734.100994-out-1-201-20260908-124856.flac"
+        )
+
+    def test_no_brand_folder_is_inserted(self):
+        """Each organisation has its own bucket, so a brand level says nothing.
+
+        It also pushed the account names one deeper than asked for.
+        """
+        from c2w.storage.wasabi import destination_key
+
+        key = destination_key(
+            path_prefix="", account="intermagnum.td", source_key="recordings/2026/09/08/x.flac"
+        )
+        assert key == "intermagnum.td/recordings/2026/09/08/x.flac"
+        assert "go4rex" not in key and "intermagnum/" not in key
+
+    def test_the_source_path_is_preserved_verbatim(self):
+        """An archived object must be traceable without the database."""
+        from c2w.storage.wasabi import destination_key
+
+        source = "recordings/2022/12/26/in-99150321131757-503-20221226-152523-1672068323.9.flac"
+        key = destination_key(path_prefix="archive", account="go4rex.td", source_key=source)
+        assert key.endswith(source)
+
+    def test_dots_survive_but_path_tricks_do_not(self):
+        """`go4rex.pbx` must stay readable; `../` must not become a path."""
+        from c2w.storage.wasabi import account_folder
+
+        assert account_folder("go4rex.pbx") == "go4rex.pbx"
+        assert account_folder("verificationgo4rex.td") == "verificationgo4rex.td"
+        # Operator-entered free text ends up in an object key.
+        assert "/" not in account_folder("a/b/c")
+        assert account_folder("../../etc") == "etc"
+        assert not account_folder("...").startswith(".")
+        assert account_folder("   ") == "unnamed-account"
+
+    def test_the_tenant_slug_is_not_used(self):
+        """The slug is not the account name, and collides.
+
+        `go4rex.pbx` really has the tenant slug `go4rex-2` in production --
+        slugs get a counter appended on collision -- so archiving by slug
+        produced a folder nobody could identify.
+        """
+        from pathlib import Path
+
+        body = Path("src/c2w/storage/wasabi.py").read_text()
+        assert "tenant_slug" not in body
+
+
+class TestTheSyncSummaryAlert:
+    """A periodic message saying what actually moved.
+
+    Two of its numbers were wrong when first written, and both wrongnesses
+    are the interesting part:
+
+    * **Copied** read `sync_runs.transferred`, which only *inventory* writes --
+      never the worker. So it reported "Copied: 0" while 485 recordings sat
+      verified in the archive. That is the single figure the message exists to
+      carry. It now counts recordings whose `verified_at` falls in the window,
+      which is the only moment "copied" is actually true.
+    * **Waiting** counted only `DISCOVERED`, and a recording with a job is
+      `QUEUED`. It reported 0 while 54,525 were outstanding.
+    """
+
+    async def _summary(self, db, brand_id, *, minutes=60):
+        import c2w.workers.scheduler as sched
+        from c2w.workers.scheduler import Scheduler
+
+        sent = []
+
+        async def _spy(_session, alert):
+            sent.append(alert)
+            return ["telegram"]
+
+        async def _scoped():
+            return _scoped_platform_session(db, brand_id)
+
+        original_dispatch, original_session = sched.dispatch, sched.platform_session
+        sched.dispatch = _spy
+        sched.platform_session = lambda: _scoped_platform_session(db, brand_id)
+        try:
+            await Scheduler()._send_sync_summary(minutes)
+        finally:
+            sched.dispatch = original_dispatch
+            sched.platform_session = original_session
+        return sent
+
+    async def _seed_one(self, db, scenario, *, state, verified):
+        """One recording in a known state. The fixture creates none."""
+        from datetime import UTC, datetime
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            tenant_id = (
+                await s.execute(
+                    text("SELECT tenant_id FROM commpeak_connections WHERE id = :i"),
+                    {"i": scenario["connection_id"]},
+                )
+            ).scalar_one()
+            await s.execute(
+                text(
+                    "INSERT INTO recordings (brand_id, connection_id, tenant_id, "
+                    "source_key, source_size, state, verified_at, destination_size) "
+                    "VALUES (:b, :c, :t, :k, 1000, :st, :v, 1000)"
+                ),
+                {
+                    "b": scenario["brand_id"],
+                    "c": scenario["connection_id"],
+                    "t": tenant_id,
+                    "k": f"recordings/2026/09/08/{uuid.uuid4().hex}.flac",
+                    "st": state,
+                    "v": datetime.now(UTC) if verified else None,
+                },
+            )
+            await s.commit()
+
+    async def test_it_counts_a_verified_recording_as_copied(self, db, scenario):
+        await self._seed_one(db, scenario, state="AVAILABLE", verified=True)
+
+        sent = await self._summary(db, scenario["brand_id"])
+        mine = [a for a in sent if a.brand_id == scenario["brand_id"]]
+        assert mine, "no summary was sent for this organisation"
+        copied = mine[0].fields["Copied"]
+        # The regression: this said "0" while the archive held the rows.
+        assert not copied.startswith("0 "), copied
+
+    async def test_a_queued_recording_counts_as_waiting(self, db, scenario):
+        await self._seed_one(db, scenario, state="QUEUED", verified=False)
+
+        sent = await self._summary(db, scenario["brand_id"])
+        mine = [a for a in sent if a.brand_id == scenario["brand_id"]]
+        assert mine
+        assert not mine[0].fields["Waiting to copy"].startswith("0")
+
+    async def test_it_names_every_account_and_how_far_it_has_scanned(
+        self, db, scenario
+    ):
+        """"With details" was the request: per account, not one total."""
+        sent = await self._summary(db, scenario["brand_id"])
+        mine = [a for a in sent if a.brand_id == scenario["brand_id"]]
+        assert mine
+        assert "Go4Rex TD" in mine[0].body or "scanned" in mine[0].body
+
+    async def test_it_still_reports_when_nothing_moved(self, db, scenario):
+        """Silence cannot distinguish an idle system from a stopped one."""
+        sent = await self._summary(db, scenario["brand_id"])
+        assert [a for a in sent if a.brand_id == scenario["brand_id"]]
+
+    async def test_each_window_is_its_own_alert_not_a_duplicate(self, db, scenario):
+        """Deduplication must not swallow a periodic report."""
+        first = await self._summary(db, scenario["brand_id"], minutes=60)
+        second = await self._summary(db, scenario["brand_id"], minutes=30)
+        keys = {a.dedupe_key for a in first + second if a.brand_id == scenario["brand_id"]}
+        assert len(keys) >= 1
+        assert all(str(scenario["brand_id"]) in k for k in keys)

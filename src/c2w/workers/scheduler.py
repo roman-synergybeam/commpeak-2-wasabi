@@ -37,6 +37,7 @@ class Scheduler:
         self._stopping = asyncio.Event()
         self._last_inventory = 0.0
         self._last_watch = 0.0
+        self._last_summary = 0.0
         self._last_retention = 0.0
         self._last_sms = 0.0
         self._last_transcribe = 0.0
@@ -92,6 +93,20 @@ class Scheduler:
             self._last_transcribe = loop_now
             await _transcribe_pending()
 
+        # What the last period actually moved, per organisation. Its own
+        # interval because it is a report rather than work.
+        async with platform_session() as session:
+            summary_minutes = await settings_service.get_int(
+                session, "alerts.sync_summary_minutes"
+            )
+        if summary_minutes and loop_now - self._last_summary >= summary_minutes * 60:
+            first_pass = self._last_summary == 0.0
+            self._last_summary = loop_now
+            # Not on the very first tick: the window would start at process
+            # start and report a few seconds of activity as if it were an hour.
+            if not first_pass:
+                await self._send_sync_summary(summary_minutes)
+
         # Retention only gates which discovered recordings become eligible for
         # offload; it never deletes anything at the source.
         if loop_now - self._last_retention >= 3600:
@@ -131,6 +146,176 @@ class Scheduler:
                     "scheduler.inventory_failed",
                     connection_id=connection.id,
                     error=str(exc),
+                )
+
+    async def _send_sync_summary(self, window_minutes: int) -> None:
+        """Report what the last window actually moved, per organisation.
+
+        Sent per organisation rather than as one platform-wide message,
+        because the two brands are unrelated companies and their figures do not
+        belong in the same message -- the same reason every other alert carries
+        a brand.
+
+        Sent **even when nothing moved**, unless switched off. A monitoring
+        message that only arrives when there is news teaches you nothing from
+        silence: an idle system and a stopped one look identical. This is the
+        message that distinguishes them, so "nothing moved" is a valid and
+        useful thing for it to say.
+
+        Everything here is read from `sync_runs` and `recordings`, so it
+        reports what was actually recorded rather than what this process
+        happens to remember -- a scheduler restart does not blank the numbers.
+        """
+        since = datetime.now(UTC) - timedelta(minutes=window_minutes)
+
+        async with platform_session() as session:
+            quiet_when_idle = await settings_service.get_bool(
+                session, "alerts.sync_summary_quiet_when_idle"
+            )
+            brands = (
+                (await session.execute(select(Brand).order_by(Brand.name))).scalars().all()
+            )
+
+            for brand in brands:
+                moved = (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT coalesce(sum(discovered), 0) AS discovered,
+                                   coalesce(sum(queued), 0)     AS queued,
+                                   coalesce(sum(transferred), 0) AS transferred,
+                                   coalesce(sum(failed), 0)      AS failed,
+                                   coalesce(sum(bytes_transferred), 0) AS bytes,
+                                   count(*)                      AS runs,
+                                   count(*) FILTER (WHERE ok IS FALSE) AS bad_runs
+                            FROM sync_runs
+                            WHERE brand_id = :b AND started_at >= :since
+                            """
+                        ),
+                        {"b": brand.id, "since": since},
+                    )
+                ).mappings().one()
+
+                # What was actually copied in the window, read from the
+                # recordings themselves rather than from `sync_runs`.
+                #
+                # `sync_runs.transferred` is written by inventory, not by the
+                # worker, so it reported "Copied: 0" while 485 recordings sat
+                # verified in the archive -- the single number this message
+                # exists to carry, and it was wrong. `verified_at` is the
+                # honest source: it is set when a copy has been checked byte
+                # for byte, which is the only point at which "copied" is true.
+                copied = (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT count(*) AS n,
+                                   coalesce(sum(destination_size), 0) AS bytes
+                            FROM recordings
+                            WHERE brand_id = :b AND verified_at >= :since
+                            """
+                        ),
+                        {"b": brand.id, "since": since},
+                    )
+                ).mappings().one()
+
+                # The standing position, not just the window: "54,525 waiting"
+                # is the number somebody wants when deciding whether to worry.
+                # QUEUED and DISCOVERED are both waiting -- queued has a job,
+                # discovered does not yet -- and collapsing them into one
+                # "waiting" figure reported 0 while 54,525 were outstanding.
+                state = (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT count(*) FILTER (
+                                       WHERE state IN ('DISCOVERED', 'QUEUED')
+                                   ) AS waiting,
+                                   count(*) FILTER (WHERE state = 'AVAILABLE')  AS archived,
+                                   count(*) FILTER (WHERE state = 'FAILED')     AS failed,
+                                   count(*)                                     AS total
+                            FROM recordings WHERE brand_id = :b
+                            """
+                        ),
+                        {"b": brand.id},
+                    )
+                ).mappings().one()
+
+                if quiet_when_idle and not (
+                    int(moved["discovered"] or 0)
+                    or int(copied["n"] or 0)
+                    or int(state["failed"] or 0)
+                ):
+                    continue
+
+                accounts = (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT c.name,
+                                   c.status::text AS status,
+                                   to_char(c.inventory_cursor_day, 'YYYY-MM-DD') AS scanned_to
+                            FROM commpeak_connections c
+                            WHERE c.brand_id = :b AND c.is_enabled
+                            ORDER BY c.name
+                            """
+                        ),
+                        {"b": brand.id},
+                    )
+                ).mappings().all()
+
+                per_account = "\n".join(
+                    f"{row['name']}: {row['status'].lower()}"
+                    + (
+                        f", scanned to {row['scanned_to']}"
+                        if row["scanned_to"]
+                        else ", not scanned"
+                    )
+                    for row in accounts
+                ) or "no accounts configured"
+
+                # `sum()` over a bigint column comes back as Decimal, which
+                # will not divide by a float.
+                gb = int(copied["bytes"] or 0) / 1e9
+                bad = int(moved["bad_runs"] or 0)
+                severity = (
+                    Severity.WARNING
+                    if (bad or int(state["failed"] or 0))
+                    else Severity.INFO
+                )
+
+                await dispatch(
+                    session,
+                    Alert(
+                        title=f"Sync summary, last {window_minutes} min",
+                        body=per_account,
+                        severity=severity,
+                        brand_id=brand.id,
+                        brand_name=brand.name,
+                        # Per brand and per window, so a summary is never
+                        # suppressed as a duplicate of the previous one.
+                        dedupe_key=f"sync-summary:{brand.id}:{since:%Y%m%d%H%M}",
+                        fields={
+                            "Found": f"{int(moved['discovered'] or 0):,}",
+                            "Queued": f"{int(moved['queued'] or 0):,}",
+                            "Copied": f"{int(copied['n'] or 0):,} ({gb:.2f} GB)",
+                            # Standing failures, matching what sets the
+                            # severity above. Reporting the window's count here
+                            # while colouring the message from the standing one
+                            # would let an amber alert say "Failed: 0".
+                            "Failed": f"{int(state['failed'] or 0):,}",
+                            "Scans": f"{int(moved['runs'] or 0):,}"
+                            + (f", {bad} failed" if bad else ""),
+                            "Waiting to copy": f"{state['waiting']:,}",
+                            "In the archive": f"{state['archived']:,} of {state['total']:,}",
+                        },
+                    ),
+                )
+                log.info(
+                    "scheduler.sync_summary_sent",
+                    brand_id=brand.id,
+                    discovered=int(moved["discovered"]),
+                    copied=int(copied["n"] or 0),
                 )
 
     async def _watch_access(self) -> None:

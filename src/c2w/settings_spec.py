@@ -526,6 +526,33 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         brand_overridable=True,
     ),
     SettingSpec(
+        key="alerts.sync_summary_minutes",
+        choices=('0', '15', '30', '60', '180', '360', '720', '1440'),
+        choice_labels={'0': 'off'},
+        type=SettingType.INT,
+        default=60,
+        category="Alerts",
+        label="Send a sync summary every",
+        description="A message saying what the last period actually moved: "
+        "recordings found, copied, verified and failed, per CommPeak account, "
+        "with how far each one has scanned. Sent even when nothing happened, "
+        "because silence is ambiguous -- it could equally mean idle or broken.",
+        unit="minutes",
+        validator=_non_negative,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="alerts.sync_summary_quiet_when_idle",
+        type=SettingType.BOOL,
+        default=False,
+        category="Alerts",
+        label="Skip the sync summary when nothing moved",
+        description="Off by default. A regular message that says \"nothing "
+        "moved\" is how you learn the difference between a quiet system and a "
+        "stopped one; turn this on once that distinction stops being useful.",
+        brand_overridable=True,
+    ),
+    SettingSpec(
         key="alerts.daily_digest_hour",
         choices=_HOURS,
         type=SettingType.INT,

@@ -7,6 +7,9 @@ and its sidecar-metadata convention.
 
 from __future__ import annotations
 
+import re
+from typing import Final
+
 from c2w.storage.base import S3Credentials
 from c2w.storage.errors import ErrorClass, TransferError
 from c2w.storage.s3_adapter import S3Client
@@ -69,23 +72,55 @@ class WasabiDestination(S3Client):
     """Archive destination.  Wasabi is the source of truth for retained media."""
 
 
+#: Characters allowed in the account folder. Dots are kept on purpose -- the
+#: folder is meant to read as `go4rex.pbx`, matching the CommPeak account it
+#: came from, so somebody browsing the bucket recognises it immediately.
+_UNSAFE_IN_KEY: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def account_folder(name: str) -> str:
+    """The archive folder for one CommPeak account.
+
+    The account *name* rather than the tenant slug, because the name is what
+    the account is called at CommPeak and the slug is not: slugs collide and
+    get a counter appended, so `go4rex.pbx` had the tenant slug `go4rex-2` and
+    would have archived into a folder nobody could identify.
+
+    Sanitised because the name is operator-entered free text and this ends up
+    in an object key: anything outside `[A-Za-z0-9._-]` becomes a hyphen, and
+    leading dots and hyphens are trimmed so a name cannot produce `..` or a
+    hidden-looking path segment.
+    """
+    cleaned = _UNSAFE_IN_KEY.sub("-", name.strip()).strip(".-")
+    return cleaned or "unnamed-account"
+
+
 def destination_key(
     *,
     path_prefix: str,
-    brand_slug: str,
-    tenant_slug: str,
+    account: str,
     source_key: str,
 ) -> str:
     """Lay out the archive key.
 
-    Brand and tenant lead the path so a brand's objects are contiguous -- that
-    makes per-brand lifecycle rules, usage accounting and (if a brand ever
-    leaves) bulk deletion straightforward.  The source's date hierarchy and
-    filename are preserved verbatim underneath, so an archived object can always
-    be traced back to its origin without consulting the database.
+    ``{path_prefix}/{account}/{source key verbatim}``.
+
+    The account folder leads, so the bucket's top level reads as the list of
+    CommPeak accounts it holds -- `go4rex.pbx`, `go4rex.td`, `go4rexnew.td` and
+    so on. That was asked for directly, and it is also the arrangement that
+    makes the archive navigable without the database.
+
+    The brand is deliberately *not* in the path any more. Each organisation has
+    its own bucket, so a brand segment inside it was a level that told you
+    nothing and pushed the account names one deeper than they should be. Brand
+    isolation is the bucket and the credentials, not a folder name.
+
+    The source key is preserved verbatim underneath -- including CommPeak's own
+    `recordings/YYYY/MM/DD/` tree -- so an archived object can always be traced
+    back to its origin without consulting anything.
     """
     tail = source_key.lstrip("/")
-    parts = [p for p in (path_prefix.strip("/"), brand_slug, tenant_slug) if p]
+    parts = [p for p in (path_prefix.strip("/"), account_folder(account)) if p]
     return "/".join(parts) + "/" + tail
 
 

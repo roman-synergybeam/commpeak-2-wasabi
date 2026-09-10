@@ -162,7 +162,10 @@ class Worker:
             chunk = await settings_service.get_int(session, "transfer.multipart_chunk_bytes")
 
             try:
-                recording, connection, destination, brand, tenant = await self._load_context(
+                # The tenant is still loaded by _load_context -- it is part of
+                # the job's context and other callers use it -- but the archive
+                # path no longer needs it: the folder is the account name.
+                recording, connection, destination, brand, _tenant = await self._load_context(
                     session, job
                 )
             except LookupError as exc:
@@ -190,8 +193,9 @@ class Worker:
                         destination,
                         src,
                         dst,
-                        brand_slug=brand.slug,
-                        tenant_slug=tenant.slug,
+                        # The CommPeak account name, so the archive's top
+                        # level reads as the list of accounts it holds.
+                        account=connection.name,
                         multipart_threshold=threshold,
                         multipart_chunk=chunk,
                         write_sidecar=write_sidecar,
