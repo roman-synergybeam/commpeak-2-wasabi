@@ -143,6 +143,38 @@
   .clock .clock-zone{display:none}
   .account{position:absolute;top:8px;right:14px}
   .account-panel{width:min(290px,calc(100vw - 28px));right:0}
+
+  /* The clock and the account button are taken out of flow and pinned to the
+     header's top-right, so nothing reserves the space they occupy: the brand
+     name ran underneath them and the clock was drawn on top of the title.
+     Padding is what keeps them apart, and `anywhere` stops a long
+     installation name pushing the header wider than the phone. */
+  .brand{padding-right:150px;overflow-wrap:anywhere}
+
+  /* A flex item's default `min-width:auto` is its content's min-content
+     width. The header is a column flex container on a phone, so a child that
+     does not wrap -- a nav of eight items -- sets the header's width from its
+     own content and the whole page then scrolls sideways, which is what
+     `overflow-x:clip` on body is trying to prevent and cannot, because the
+     width is decided before the clipping. This is the trap the kit names;
+     the header's children were the one place it was not applied. */
+  header.top>*{min-width:0;max-width:100%}
+
+  /* The kit hides a stacked table's heading with `.tw.stack tr:first-child`,
+     and `tr:first-child` matches the first row of `<tbody>` just as much as
+     the one in `<thead>` -- they are children of different parents. So the
+     first row of every stacked table was hidden on a phone: the first
+     CommPeak account simply was not on the sync page. The kit is vendored
+     unmodified, so the correction belongs here. */
+  .tw.stack thead{display:none}
+  .tw.stack tbody tr:first-child{display:block}
+}
+
+@media (max-width:420px){
+  /* At this width the strapline costs a line of the title and says nothing
+     the page does not. */
+  .brand span{display:none}
+  .brand{padding-right:104px;font-size:15px}
 }
 
 /* Range input ------------------------------------------------------------

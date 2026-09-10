@@ -219,3 +219,63 @@ class TestRenderedInlineStyles:
         context["prefs"] = {"font_px": 24}
         html = _env().get_template("base.html").render(**context)
         assert "font-size: 24px" in html
+
+
+class TestTheMobileOverrides:
+    """The phone-width corrections, asserted on the stylesheet.
+
+    A screenshot showed the sync page scrolled sideways with the clock drawn
+    on top of the title and content clipped. Three separate causes, and each
+    is corrected in `app.css` rather than in the kit -- `ui-kit/` is vendored
+    from the customer unmodified, and `VENDORED.md` says so.
+    """
+
+    @staticmethod
+    def _css() -> str:
+        return (STATIC / "app.css").read_text()
+
+    def test_the_stacked_heading_row_is_hidden_by_thead_not_first_child(self):
+        """The kit's `tr:first-child` also matched the first row of tbody.
+
+        `thead > tr` and `tbody > tr` are both first children of their own
+        parent, so the rule hid the first *data* row of every stacked table --
+        the first CommPeak account was missing from the sync page on a phone.
+        """
+        css = self._css()
+        assert ".tw.stack thead{display:none}" in css
+        assert ".tw.stack tbody tr:first-child{display:block}" in css
+
+    def test_the_brand_reserves_room_for_the_pinned_controls(self):
+        """The clock and account button are absolutely positioned over it."""
+        css = self._css()
+        assert ".brand{padding-right:150px" in css
+
+    def test_the_header_children_cannot_set_the_page_width(self):
+        """A flex item's `min-width:auto` is its content's min-content width.
+
+        A nav that does not wrap then decides the header's width, the page
+        scrolls sideways, and `overflow-x:clip` on body cannot prevent it
+        because the width is settled before the clipping happens.
+        """
+        assert "header.top>*{min-width:0;max-width:100%}" in self._css()
+
+    def test_the_kit_is_not_edited(self):
+        """VENDORED.md: copied unmodified, change app.css instead.
+
+        Asserted because the tempting fix for each of the above was a one-line
+        edit to narrow.css, and the next kit update would have silently
+        reverted all three.
+        """
+        import shutil
+        import subprocess
+
+        git = shutil.which("git")
+        if git is None:  # pragma: no cover - git is present in this project
+            pytest.skip("git is not available")
+        changed = subprocess.run(  # noqa: S603 - fixed args, resolved binary
+            [git, "diff", "--name-only", "HEAD", "--", "src/c2w/web/static/ui-kit/"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        assert not changed, f"vendored kit modified: {changed}"
