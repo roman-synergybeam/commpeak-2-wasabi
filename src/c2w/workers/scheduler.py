@@ -38,6 +38,7 @@ class Scheduler:
         self._last_inventory = 0.0
         self._last_watch = 0.0
         self._last_summary = 0.0
+        self._last_cdr = 0.0
         self._last_retention = 0.0
         self._last_sms = 0.0
         self._last_transcribe = 0.0
@@ -64,6 +65,16 @@ class Scheduler:
         if loop_now - self._last_inventory >= poll:
             self._last_inventory = loop_now
             await self._run_incremental_inventory()
+
+        # Call records. Its own interval and its own pass: the CDR API is a
+        # different service from the recordings bucket, reachable when that one
+        # is not, and a call's row is finalised when the call ends rather than
+        # when it starts -- so this re-reads an overlapping window.
+        async with platform_session() as session:
+            cdr_minutes = await settings_service.get_int(session, "commpeak.cdr_poll_minutes")
+        if cdr_minutes and loop_now - self._last_cdr >= cdr_minutes * 60:
+            self._last_cdr = loop_now
+            await _poll_call_records()
 
         # Accounts that are not working get re-checked here and nowhere else,
         # one at a time. See _watch_access.
@@ -701,6 +712,141 @@ async def _transcribe_pending() -> None:
                     segments=len(result.segments),
                     language=result.language_detected,
                 )
+
+
+async def _poll_call_records() -> None:
+    """Fetch call records for every account that has an address and a key.
+
+    **This did not exist.** The module docstring said "CDR polling", the client
+    and `ingest_page` were both written and tested, and nothing ever called
+    them -- so `cdrs` stayed empty no matter what was configured, and every
+    recording stayed an orphan because there was nothing to correlate against.
+    A component that is built, documented and unwired is indistinguishable
+    from one that is broken.
+
+    Per account rather than per organisation, because PBX Stats issues its key
+    per user per instance: Go4Rex has two Cloud PBX instances and they have
+    different keys. The cursor lives on the connection for the same reason.
+
+    Failure is per account. One instance with a lapsed key must not stop the
+    others, which is the same rule the inventory pass follows.
+    """
+    from c2w.commpeak.cdr_client import (
+        AuthScheme,
+        CdrApiConfig,
+        CdrClient,
+        ingest_page,
+        poll_window,
+    )
+
+    async with platform_session() as session:
+        connections = list(
+            (
+                await session.execute(
+                    select(CommPeakConnection)
+                    .where(CommPeakConnection.is_enabled.is_(True))
+                    .order_by(CommPeakConnection.name)
+                )
+            ).scalars().all()
+        )
+
+    for conn in connections:
+        async with platform_session() as session:
+            fresh = (
+                await session.execute(
+                    select(CommPeakConnection).where(CommPeakConnection.id == conn.id)
+                )
+            ).scalar_one()
+            if not fresh.cdr_api_base:
+                continue
+            token = await _open_cdr_key(session, fresh)
+            if not token:
+                log.debug("cdr.skipped", connection_id=fresh.id, reason="no api key")
+                continue
+
+            overlap = await settings_service.get_int(
+                session, "commpeak.cdr_overlap_minutes", brand_id=fresh.brand_id
+            )
+            page_size = await settings_service.get_int(
+                session, "commpeak.cdr_page_size", brand_id=fresh.brand_id
+            )
+            mode = await settings_service.get_str(
+                session, "commpeak.cdr_auth_scheme", brand_id=fresh.brand_id
+            )
+            path = await settings_service.get_str(
+                session, "commpeak.cdr_api_path", brand_id=fresh.brand_id
+            )
+
+            start, end = poll_window(
+                fresh.last_cdr_cursor, overlap_minutes=max(overlap, 1)
+            )
+            config = CdrApiConfig(
+                base_url=fresh.cdr_api_base,
+                path=path or "/api/cdrs",
+                auth=AuthScheme(mode or "header"),
+                token=token,
+                username=fresh.cdr_api_user or "",
+                page_size=page_size or 500,
+            )
+
+            inserted = updated = 0
+            try:
+                async for records in CdrClient(config).fetch_range(start, end):
+                    got_in, got_up = await ingest_page(
+                        session,
+                        brand_id=fresh.brand_id,
+                        connection_id=fresh.id,
+                        tenant_id=fresh.tenant_id,
+                        records=records,
+                    )
+                    inserted += got_in
+                    updated += got_up
+            except Exception as exc:
+                log.warning(
+                    "cdr.poll_failed",
+                    connection_id=fresh.id,
+                    account=fresh.name,
+                    error=str(exc)[:200],
+                )
+                continue
+
+            # Advanced only after the rows are stored, so a failure mid-run
+            # re-reads the window rather than skipping past it.
+            fresh.last_cdr_cursor = end
+            await session.commit()
+
+        if inserted or updated:
+            log.info(
+                "cdr.polled",
+                connection_id=conn.id,
+                account=conn.name,
+                inserted=inserted,
+                updated=updated,
+            )
+
+
+async def _open_cdr_key(session, connection) -> str:
+    """Unseal one account's CDR API key, or return empty.
+
+    Falls back to the organisation-level `cdr.api_key` setting, so an estate
+    where one key covers every instance can be configured once.
+    """
+    if connection.cdr_api_key_sealed:
+        from c2w.storage.factory import open_cdr_api_key
+
+        try:
+            return await open_cdr_api_key(session, connection)
+        except Exception as exc:
+            # A key sealed under a master key that no longer matches is a
+            # configuration problem for a person, not something to retry
+            # silently every poll -- but it must not stop the other accounts.
+            log.warning(
+                "cdr.key_unavailable", connection_id=connection.id, error=str(exc)[:120]
+            )
+            return ""
+    return await settings_service.get_secret(
+        session, "commpeak.cdr_api_token", brand_id=connection.brand_id
+    )
 
 
 async def _poll_text_messages() -> None:

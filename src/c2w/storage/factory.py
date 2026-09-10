@@ -157,3 +157,22 @@ async def reveal_connection_credentials(
             label="the S3 secret",
         ),
     )
+
+
+async def open_cdr_api_key(session: AsyncSession, connection: Any) -> str:
+    """Unseal one account's CDR API key.
+
+    Here rather than in the scheduler because this module is the only place
+    credentials are unsealed, and that property is worth keeping even when it
+    means a one-line function in a different file.
+    """
+    if not connection.cdr_api_key_sealed:
+        return ""
+    key_id, wrapped = await _brand_keys(session, connection.brand_id)
+    return _unseal(
+        connection.cdr_api_key_sealed,
+        key_id=key_id,
+        wrapped=wrapped,
+        aad=f"connection:{connection.id}:cdr_api_key",
+        label="the call records API key",
+    )
