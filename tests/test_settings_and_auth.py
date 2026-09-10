@@ -680,3 +680,141 @@ class TestTranscriptionSettings:
         for key in ("transcribe.enabled", "transcribe.primary_language",
                     "transcribe.model", "analysis.keywords"):
             assert SETTINGS[key].brand_overridable
+
+
+class TestTelegramHasTwoAudiences:
+    """An organisation chat and a platform chat are not the same reader.
+
+    The organisation chat must see that company and nothing else -- showing it
+    another company's name is the isolation rule this platform is built on.
+    The platform chat watches everything and needs each message attributed.
+    """
+
+    @staticmethod
+    def _fake_settings(values: dict[str, str]):
+        async def get_secret(_s, key, brand_id=None):
+            return values.get(key, "")
+
+        async def get_str(_s, key, brand_id=None):
+            return values.get(key, "")
+
+        return get_secret, get_str
+
+    async def _send(self, monkeypatch, values, alert):
+        from c2w.alerts import telegram
+
+        posted: list[tuple[str, str, str]] = []
+
+        async def _post(token, chat_id, text):
+            posted.append((token, chat_id, text))
+            return True
+
+        get_secret, get_str = self._fake_settings(values)
+        monkeypatch.setattr(telegram.settings_service, "get_secret", get_secret)
+        monkeypatch.setattr(telegram.settings_service, "get_str", get_str)
+        monkeypatch.setattr(telegram, "_post", _post)
+        await telegram.send(None, alert)
+        return posted
+
+    async def test_both_chats_receive_it_when_they_differ(self, monkeypatch):
+        from c2w.alerts.base import Alert
+
+        posted = await self._send(
+            monkeypatch,
+            {
+                "alerts.telegram_bot_token": "bot",
+                "alerts.telegram_chat_id": "-100org",
+                "alerts.telegram_platform_chat_id": "-100platform",
+                "alerts.telegram_platform_min_severity": "INFO",
+            },
+            Alert(title="x", body="y", brand_id=1, brand_name="Go4Rex"),
+        )
+        assert {chat for _t, chat, _b in posted} == {"-100org", "-100platform"}
+
+    async def test_one_chat_serving_both_roles_is_posted_to_once(self, monkeypatch):
+        """The common setup: one chat set globally and used for both.
+
+        Without de-duplication that arrangement delivers everything twice,
+        which is how a monitoring channel becomes unreadable.
+        """
+        from c2w.alerts.base import Alert
+
+        posted = await self._send(
+            monkeypatch,
+            {
+                "alerts.telegram_bot_token": "bot",
+                "alerts.telegram_chat_id": "-100same",
+                "alerts.telegram_platform_chat_id": "-100same",
+                "alerts.telegram_platform_min_severity": "INFO",
+            },
+            Alert(title="x", body="y", brand_id=1, brand_name="Go4Rex"),
+        )
+        assert len(posted) == 1, posted
+
+    async def test_the_platform_chat_can_ask_for_problems_only(self, monkeypatch):
+        from c2w.alerts.base import Alert, Severity
+
+        values = {
+            "alerts.telegram_bot_token": "bot",
+            "alerts.telegram_chat_id": "-100org",
+            "alerts.telegram_platform_chat_id": "-100platform",
+            "alerts.telegram_platform_min_severity": "WARNING",
+        }
+        routine = await self._send(
+            monkeypatch,
+            values,
+            Alert(title="summary", body="", severity=Severity.INFO, brand_id=1,
+                  brand_name="Go4Rex"),
+        )
+        assert [c for _t, c, _b in routine] == ["-100org"], routine
+
+        problem = await self._send(
+            monkeypatch,
+            values,
+            Alert(title="failed", body="", severity=Severity.CRITICAL, brand_id=1,
+                  brand_name="Go4Rex"),
+        )
+        assert "-100platform" in [c for _t, c, _b in problem]
+
+    async def test_the_platform_bot_falls_back_to_the_organisation_bot(self, monkeypatch):
+        """One bot can post to many chats; demanding two would be an obstacle."""
+        from c2w.alerts.base import Alert
+
+        posted = await self._send(
+            monkeypatch,
+            {
+                "alerts.telegram_bot_token": "bot",
+                "alerts.telegram_chat_id": "-100org",
+                "alerts.telegram_platform_chat_id": "-100platform",
+                "alerts.telegram_platform_min_severity": "INFO",
+            },
+            Alert(title="x", body="y", brand_id=1, brand_name="Go4Rex"),
+        )
+        assert all(token == "bot" for token, _c, _b in posted)
+
+    async def test_an_unattributed_alert_is_labelled_for_the_platform_reader(
+        self, monkeypatch
+    ):
+        from c2w.alerts.base import Alert
+
+        posted = await self._send(
+            monkeypatch,
+            {
+                "alerts.telegram_platform_chat_id": "-100platform",
+                "alerts.telegram_platform_bot_token": "pbot",
+                "alerts.telegram_platform_min_severity": "INFO",
+            },
+            Alert(title="disk nearly full", body=""),
+        )
+        assert posted and posted[0][2].startswith("Platform-wide")
+
+    def test_the_platform_channel_cannot_be_set_per_organisation(self):
+        """It carries other companies' names, so one company cannot claim it."""
+        from c2w.settings_spec import SETTINGS
+
+        for key in (
+            "alerts.telegram_platform_chat_id",
+            "alerts.telegram_platform_bot_token",
+            "alerts.telegram_platform_min_severity",
+        ):
+            assert SETTINGS[key].brand_overridable is False, key

@@ -500,7 +500,7 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         type=SettingType.SECRET,
         default="",
         category="Alerts",
-        label="Telegram bot token",
+        label="Organisation bot token",
         description="From @BotFather. Stored encrypted and never shown again.",
         sensitive=True,
         brand_overridable=True,
@@ -510,8 +510,11 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         type=SettingType.STRING,
         default="",
         category="Alerts",
-        label="Telegram chat",
-        description="The group or channel that alerts are posted to.",
+        label="Organisation chat id (this organisation only)",
+        description="The group or channel this organisation's alerts go to. "
+        "Its own calls, its own accounts, its own failures -- and nothing from "
+        "any other company. Set it per organisation; a value set globally is "
+        "inherited by every organisation that has not set its own.",
         brand_overridable=True,
     ),
     SettingSpec(
@@ -524,6 +527,45 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         "Stored encrypted and never shown again.",
         sensitive=True,
         brand_overridable=True,
+    ),
+    SettingSpec(
+        key="alerts.telegram_platform_chat_id",
+        type=SettingType.SECRET,
+        default="",
+        category="Alerts",
+        label="Platform chat id (everything, all organisations)",
+        description="The chat that watches the whole system. It receives every "
+        "alert from every organisation, each one naming which. Set this for "
+        "whoever is responsible for the platform rather than for one company's "
+        "calls. Global only — an organisation cannot point the platform "
+        "channel at its own chat, because that channel carries other "
+        "companies' names.",
+        sensitive=True,
+        brand_overridable=False,
+    ),
+    SettingSpec(
+        key="alerts.telegram_platform_bot_token",
+        type=SettingType.SECRET,
+        default="",
+        category="Alerts",
+        label="Platform bot token",
+        description="Leave empty to use the same bot as the organisation "
+        "channels; set it only if the platform chat is served by a different "
+        "bot.",
+        sensitive=True,
+        brand_overridable=False,
+    ),
+    SettingSpec(
+        key="alerts.telegram_platform_min_severity",
+        choices=('INFO', 'WARNING', 'CRITICAL'),
+        type=SettingType.STRING,
+        default="INFO",
+        category="Alerts",
+        label="Platform chat receives",
+        description="How much reaches the platform chat. INFO is everything, "
+        "including the routine sync summaries; WARNING drops those and keeps "
+        "problems; CRITICAL keeps only what has stopped working.",
+        brand_overridable=False,
     ),
     SettingSpec(
         key="alerts.sync_summary_minutes",
