@@ -17,6 +17,19 @@
    save handler can return you to the card you were editing. #}
 <div class="settings-layout">
   <nav class="railnav" aria-label="Settings sections">
+    {# A search box above the rail. 112 settings in 17 sections is more than
+       anyone holds in their head, and the rail only helps if you already know
+       which section a thing is filed under. A plain GET form, so a search is a
+       link you can paste and the back button behaves. #}
+    <form method="get" action="/admin/settings" class="railsearch" role="search">
+      <label for="settings-q" class="sr-only">Search settings</label>
+      <input id="settings-q" type="search" name="q" value="{{ settings_query }}"
+             placeholder="Search settings…" autocomplete="off">
+      {% if settings_query %}
+        <a href="/admin/settings?section={{ active_slug }}" class="clear"
+           title="Clear the search">&times;</a>
+      {% endif %}
+    </form>
     {% for group in section_groups %}
       <p class="railgroup">{{ group.title }}</p>
       <ul>
@@ -35,7 +48,51 @@
   </nav>
 
   <div class="settings-pane">
-    {% if active_section == setup_section %}
+    {% if settings_query %}
+      {# Results replace the section, rather than sitting beside it: a search
+         is a different question from "show me this card". #}
+      <h2>
+        {{ settings_matches | length }}
+        setting{{ '' if settings_matches | length == 1 else 's' }}
+        matching &ldquo;{{ settings_query }}&rdquo;
+      </h2>
+      {% if settings_query | length < 2 %}
+        <p class="hint">Type at least two characters.</p>
+      {% elif not settings_matches %}
+        <div class="note">
+          <h3>Nothing matched</h3>
+          <p>Searched every setting&rsquo;s name, its key, its section and its
+             description. Try a shorter word, or the dotted key if you have it
+             from a log line.</p>
+        </div>
+      {% else %}
+        <div class="tw stack">
+          <table>
+            <thead>
+              <tr><th>Setting</th><th>Section</th><th>Key</th></tr>
+            </thead>
+            <tbody>
+            {% for m in settings_matches %}
+              <tr>
+                <td data-label="Setting">
+                  <a href="/admin/settings?section={{ m.slug }}#f-{{ m.key }}">
+                    {{ m.label }}</a>{% if m.unit %}
+                    <span class="hint" style="display:inline">({{ m.unit }})</span>
+                  {% endif %}
+                  {% if m.sensitive %}<span class="pill idle">secret</span>{% endif %}
+                  <div class="det wrap">{{ m.description }}</div>
+                </td>
+                <td data-label="Section">
+                  <a href="/admin/settings?section={{ m.slug }}">{{ m.category }}</a>
+                </td>
+                <td class="mono" data-label="Key">{{ m.key }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
+    {% elif active_section == setup_section %}
       {# The gap between "installed" and "working", each step remembering
          whether it is done. The landing view, because "what still needs
          doing" is the question a half-configured install raises. #}

@@ -981,3 +981,83 @@ class TestForeverIsOfferedForArchiveRetention:
         assert page.status_code == 200
         assert '<option value="0"' in page.text
         assert "forever" in page.text
+
+
+class TestSettingsSearch:
+    """112 settings in 17 sections is more than the rail alone can serve.
+
+    The rail only helps if you already know which section a thing is filed
+    under. Somebody looking for "telegram" should not have to guess "Alerts".
+    """
+
+    async def test_it_finds_a_setting_by_its_name(self, app_client, scenario):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/admin/settings?q=telegram")
+        assert page.status_code == 200
+        assert "alerts.telegram_chat_id" in page.text
+        # And links to the section it lives in.
+        assert "section=alerts" in page.text
+
+    async def test_it_finds_a_setting_by_its_dotted_key(self, app_client, scenario):
+        """A log line or a support message names the key, not the label."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/admin/settings?q=source.key_root_prefix")
+        assert "Where recordings start in the bucket" in page.text
+
+    async def test_a_single_character_is_not_a_search(self, app_client, scenario):
+        """It would match most of the registry: the whole list, with steps."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/admin/settings?q=a")
+        assert "at least two characters" in page.text
+
+    async def test_no_match_says_what_it_searched(self, app_client, scenario):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/admin/settings?q=zzzznotathing")
+        assert "Nothing matched" in page.text
+
+    async def test_a_label_match_outranks_a_description_mention(self):
+        from c2w.auth.rbac import permissions_for
+        from c2w.db.models.auth import Role
+        from c2w.web.routes import _search_settings
+
+        found = _search_settings("retention", permissions_for(Role.SUPER_ADMIN))
+        assert found, "expected matches for 'retention'"
+        # The first hit must be something actually named for it, not a setting
+        # that merely mentions it in prose.
+        assert "retention" in found[0]["label"].lower() or found[0]["key"].startswith(
+            "retention."
+        ), found[0]
+
+    async def test_the_search_does_not_leak_a_secret_value(self, app_client, scenario, db):
+        """Searching for a credential setting must show the field, not the value."""
+        from c2w.settings import settings_service
+
+        async with db() as s:
+            await settings_service.set(
+                s,
+                "alerts.telegram_bot_token",
+                "SEARCHLEAKCANARY123456",
+                brand_id=None,
+                changed_by="test@example.com",
+            )
+            await s.commit()
+
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/admin/settings?q=telegram")
+        assert "SEARCHLEAKCANARY123456" not in page.text
+        assert "secret" in page.text     # labelled as one
+
+    async def test_a_role_without_a_section_does_not_see_its_settings(
+        self, app_client, scenario, db
+    ):
+        """The rail hides permission-gated sections; search must agree.
+
+        A search that returned what the rail refuses to show would be a way
+        round the gate.
+        """
+        from c2w.auth.rbac import permissions_for
+        from c2w.db.models.auth import Role
+        from c2w.web.routes import _search_settings
+
+        admin_only = _search_settings("organisation", permissions_for(Role.ADMIN))
+        assert all(m["category"] != "Organisations" for m in admin_only)

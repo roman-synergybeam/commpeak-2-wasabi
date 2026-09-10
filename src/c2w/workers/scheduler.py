@@ -264,15 +264,60 @@ class Scheduler:
                     )
                 ).mappings().all()
 
-                per_account = "\n".join(
-                    f"{row['name']}: {row['status'].lower()}"
+                # A tick per account, so the shape of the message tells you
+                # whether anything is wrong before you read any of it. The four
+                # pill meanings of the console UI, in the one form a chat has.
+                marks = {"OK": "\u2705", "ERROR": "\u274c", "DISABLED": "\u23f8"}
+                lines = [
+                    f"{row['name']} \u2014 {marks.get(row['status'], '\u2753')} "
                     + (
-                        f", scanned to {row['scanned_to']}"
+                        f"scanned to {row['scanned_to']}"
                         if row["scanned_to"]
-                        else ", not scanned"
+                        else "not scanned yet"
                     )
                     for row in accounts
-                ) or "no accounts configured"
+                ]
+                per_account = "*CommPeak*\n" + (
+                    "\n".join(lines) or "no accounts configured"
+                )
+
+                # The archive side. "Copied 536" answers what moved; it does
+                # not answer what is actually *in* the archive, which is the
+                # question somebody asks when deciding whether the migration
+                # is working. Read per destination, because a brand may have
+                # more than one bucket.
+                archives = (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT d.name, d.bucket, d.region, d.status::text AS status,
+                                   count(r.id)                       AS objects,
+                                   coalesce(sum(r.destination_size), 0) AS bytes
+                            FROM storage_destinations d
+                            LEFT JOIN recordings r
+                                   ON r.destination_id = d.id
+                                  AND r.brand_id = d.brand_id
+                                  AND r.verified_at IS NOT NULL
+                            WHERE d.brand_id = :b
+                            GROUP BY d.name, d.bucket, d.region, d.status
+                            ORDER BY d.name
+                            """
+                        ),
+                        {"b": brand.id},
+                    )
+                ).mappings().all()
+
+                if archives:
+                    archive_lines = [
+                        f"{a['bucket']} ({a['region']}) "
+                        f"{marks.get(a['status'], '\u2753')} "
+                        f"{int(a['objects'] or 0):,} objects, "
+                        f"{int(a['bytes'] or 0) / 1e9:.2f} GB"
+                        for a in archives
+                    ]
+                    per_account += "\n\n*Wasabi*\n" + "\n".join(archive_lines)
+                else:
+                    per_account += "\n\n*Wasabi*\nno archive bucket configured"
 
                 # `sum()` over a bigint column comes back as Decimal, which
                 # will not divide by a float.

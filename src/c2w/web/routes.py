@@ -1610,6 +1610,65 @@ def _settings_sections(
     return groups
 
 
+def _search_settings(
+    query: str | None, permissions: frozenset[Permission]
+) -> list[dict[str, Any]]:
+    """Find settings by label, key, description or category.
+
+    112 settings across 17 sections is more than anyone can hold in their head,
+    and the rail only helps if you already know which section a thing lives in.
+    Somebody looking for "telegram" should not have to guess that it is filed
+    under Alerts.
+
+    Matches on the **key** as well as the prose, because a support conversation
+    or a log line names the key (`alerts.telegram_chat_id`) and pasting that in
+    should land you on it.
+
+    Ranked so the useful answer is first: a label match beats a key match beats
+    a mention somewhere in the description. Within a rank, alphabetical -- a
+    stable order matters when somebody is comparing two searches.
+    """
+    term = (query or "").strip().lower()
+    if len(term) < 2:
+        # One character matches most of the registry, which is not a search
+        # result, it is the whole list with extra steps.
+        return []
+
+    matches: list[tuple[int, str, dict[str, Any]]] = []
+    for spec in SETTINGS.values():
+        needed = _SECTION_PERMISSION.get(spec.category)
+        if needed is not None and needed not in permissions:
+            continue
+        label = spec.label.lower()
+        if term in label:
+            rank = 0
+        elif term in spec.key.lower():
+            rank = 1
+        elif term in spec.category.lower():
+            rank = 2
+        elif term in spec.description.lower():
+            rank = 3
+        else:
+            continue
+        matches.append(
+            (
+                rank,
+                spec.label,
+                {
+                    "key": spec.key,
+                    "label": spec.label,
+                    "category": spec.category,
+                    "slug": _section_slug(spec.category),
+                    "description": spec.description,
+                    "sensitive": spec.sensitive,
+                    "unit": spec.unit,
+                },
+            )
+        )
+    matches.sort(key=lambda row: (row[0], row[1]))
+    return [row[2] for row in matches]
+
+
 @router.get("/admin/settings", response_class=HTMLResponse)
 async def admin_settings(
     request: Request,
@@ -1621,6 +1680,7 @@ async def admin_settings(
     error: str | None = None,
     tested: str | None = None,
     probe_id: int | None = None,
+    q: str | None = None,
 ) -> Response:
     """One section at a time, chosen from the rail on the left.
 
@@ -1714,6 +1774,8 @@ async def admin_settings(
             ),
             organisations_section=ORGANISATIONS_SECTION,
             users_section=USERS_SECTION,
+            settings_query=(q or "").strip(),
+            settings_matches=_search_settings(q, permissions),
             section_tests=tests_for(active_section),
             test_result=_SECTION_TESTS.pop(f"{user.id}:{tested}", None) if tested else None,
             saved=saved,

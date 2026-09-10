@@ -51,6 +51,11 @@ class Alert:
     #: usually the right granularity: one alert per problem per brand.
     dedupe_key: str | None = None
     fields: dict[str, str] = field(default_factory=dict)
+    #: Which installation sent this. Filled in by :func:`dispatch` from
+    #: `core.platform_name`, so every channel carries it without each caller
+    #: having to remember. A chat can watch more than one system, and a message
+    #: that does not say which one it came from is a message you cannot act on.
+    system_name: str = ""
 
     def key(self) -> str:
         raw = self.dedupe_key or f"{self.severity}:{self.title}:{self.brand_id}"
@@ -58,6 +63,8 @@ class Alert:
 
     def as_text(self) -> str:
         lines = [f"{self.severity.emoji} *{self.title}*"]
+        if self.system_name:
+            lines.append(self.system_name)
         if self.brand_name:
             lines.append(f"Brand: {self.brand_name}")
         if self.body:
@@ -83,6 +90,11 @@ async def dispatch(session: AsyncSession, alert: Alert) -> list[str]:
     """
     if not await settings_service.get_bool(session, "alerts.enabled"):
         return []
+
+    # Stamped here rather than at every call site: one place to read it, and
+    # no alert can be sent without it.
+    if not alert.system_name:
+        alert.system_name = await settings_service.get_str(session, "core.platform_name")
 
     window = await settings_service.get_int(session, "alerts.dedupe_window_seconds")
     key = alert.key()
