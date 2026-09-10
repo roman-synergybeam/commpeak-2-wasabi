@@ -225,7 +225,12 @@ async def scan_day(
             file_ext=parsed.file_ext,
             key_parsed_ok=parsed.parsed_ok,
             cdr_id=match.cdr_id,
-            call_uuid=match.call_uuid,
+            # The correlator's answer when it found one; otherwise the uuid the
+            # object is named with, if it is. A Dialer recording is named with
+            # the call's own uuid, which is the Dialer CDR's `call_uuid` -- so
+            # keeping it is what lets the two be joined exactly once the CDRs
+            # arrive, rather than never.
+            call_uuid=match.call_uuid or parsed.call_uuid,
             match_method=str(match.method),
             match_confidence=match.confidence,
             match_ambiguous=match.ambiguous,

@@ -67,6 +67,11 @@ _NON_DIGITS: Final[re.Pattern[str]] = re.compile(r"\D+")
 
 
 class MatchMethod(enum.StrEnum):
+    #: The recording is named with the call's uuid and a CDR carries the same
+    #: one. Not a heuristic and not a window -- an identity, so it outranks
+    #: everything below it and takes full confidence.
+    UUID_EXACT = "uuid_exact"
+
     """How a recording was tied to a CDR, best first."""
 
     EPOCH_EXACT = "epoch_exact"
@@ -86,6 +91,7 @@ class MatchMethod(enum.StrEnum):
 
 
 _CONFIDENCE: Final[dict[MatchMethod, float]] = {
+    MatchMethod.UUID_EXACT: 1.0,
     MatchMethod.EPOCH_EXACT: 0.99,
     MatchMethod.EPOCH_ONLY: 0.90,
     MatchMethod.TIME_NUMBER: 0.75,
@@ -94,6 +100,7 @@ _CONFIDENCE: Final[dict[MatchMethod, float]] = {
 }
 
 _RANK: Final[dict[MatchMethod, int]] = {
+    MatchMethod.UUID_EXACT: -1,
     MatchMethod.EPOCH_EXACT: 0,
     MatchMethod.EPOCH_ONLY: 1,
     MatchMethod.TIME_NUMBER: 2,
@@ -196,6 +203,13 @@ def _reference_times(parsed: ParsedKey) -> list[datetime]:
 
 def _classify(parsed: ParsedKey, cdr: CdrCandidate) -> tuple[MatchMethod, float] | None:
     """Best tier for one (recording, CDR) pair, or None if they cannot match."""
+    # An identity beats every tolerance below. A Dialer recording is named with
+    # the call's own uuid and the Dialer CDR carries the same value, so when
+    # both are present and equal there is nothing to weigh up -- and no time
+    # window can improve on it.
+    if parsed.call_uuid and cdr.call_uuid and parsed.call_uuid == cdr.call_uuid.lower():
+        return (MatchMethod.UUID_EXACT, 0.0)
+
     number_ok = _recording_number_matches(parsed, cdr)
     start = cdr.start_at.astimezone(UTC)
 

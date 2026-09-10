@@ -314,3 +314,139 @@ class TestTheTwoLayoutsThatAreActuallyLive:
         assert parse_key(self.GO4REX).prefix_hour == datetime(2022, 12, 26, tzinfo=UTC)
         # And the documented four-component form keeps its hour.
         assert parse_key(self.DOCUMENTED).prefix_hour == datetime(2025, 11, 11, 2, tzinfo=UTC)
+
+
+class TestTheDialerNamesRecordingsWithAUuid:
+    """`3de0cd70-91be-4b95-8242-1028016138b4.flac` — and nothing else.
+
+    A UUID is 32 hex characters, and hex contains digits. The salvage path
+    found `1028016138` inside `8242-1028016138b4`, read it as a FreeSWITCH
+    epoch, and produced a start time of 2002-07-30; the same digits then became
+    the phone number. Across the four Dialer accounts -- 100,000 recordings,
+    two thirds of the archive -- every row carried a confidently wrong
+    timestamp scattered between 2001 and 2032, a wrong number, and no
+    direction.
+
+    Wrong metadata is worse than none: it correlates against real CDRs and puts
+    recordings decades away from the call that made them.
+    """
+
+    KEY = "recordings/2026/09/08/3de0cd70-91be-4b95-8242-1028016138b4.flac"
+
+    def test_no_epoch_is_invented_out_of_hex(self):
+        from c2w.commpeak.keyparse import parse_key
+
+        parsed = parse_key(self.KEY)
+        assert parsed.uniqueid is None, parsed.uniqueid
+        assert parsed.number is None, parsed.number
+
+    def test_the_start_time_comes_from_the_folder(self):
+        """Real, and the only date in the key."""
+        from datetime import UTC, datetime
+
+        from c2w.commpeak.keyparse import parse_key
+
+        assert parse_key(self.KEY).started_at == datetime(2026, 9, 8, tzinfo=UTC)
+
+    def test_the_uuid_is_kept(self):
+        """It is the Dialer CDR's `call_uuid`, so it is the join key."""
+        from c2w.commpeak.keyparse import parse_key
+
+        parsed = parse_key(self.KEY)
+        assert parsed.call_uuid == "3de0cd70-91be-4b95-8242-1028016138b4"
+        assert parsed.parsed_ok, "a known shape, not a salvage"
+        assert parsed.is_audio
+
+    def test_a_matching_uuid_outranks_every_time_window(self):
+        from datetime import UTC, datetime
+
+        from c2w.commpeak.correlate import CdrCandidate, MatchMethod, correlate
+        from c2w.commpeak.keyparse import parse_key
+
+        parsed = parse_key(self.KEY)
+        # A CDR with the same uuid but a start time hours from the folder date,
+        # and a decoy that is temporally closer. The uuid must still win.
+        same_uuid = CdrCandidate(
+            cdr_id=1,
+            call_uuid="3DE0CD70-91BE-4B95-8242-1028016138B4",
+            start_at=datetime(2026, 9, 8, 17, 30, tzinfo=UTC),
+        )
+        decoy = CdrCandidate(
+            cdr_id=2,
+            call_uuid="99999999-9999-9999-9999-999999999999",
+            start_at=datetime(2026, 9, 8, 0, 0, 30, tzinfo=UTC),
+        )
+        result = correlate(parsed, [decoy, same_uuid])
+        assert result.method == MatchMethod.UUID_EXACT, result.method
+        assert result.cdr_id == 1
+        assert result.confidence == 1.0
+
+    def test_the_other_two_layouts_are_untouched(self):
+        """Adding a pattern must not cost the ones that already worked."""
+        from c2w.commpeak.keyparse import parse_key
+
+        pbx = parse_key(
+            "recordings/2022/12/26/"
+            "in-99150321131757-503-20221226-152523-1672068323.9.flac"
+        )
+        assert pbx.number == "99150321131757"
+        assert pbx.call_uuid is None
+
+        first = parse_key(
+            "recordings/2026/09/08/12/"
+            "1788871734.100994-out-005551999752466-201-20260908-124856.flac"
+        )
+        assert first.number == "005551999752466"
+        assert first.call_uuid is None
+
+    TRANSFER = (
+        "recordings/2026/09/04/"
+        "7b8d594d-11b4-450a-bd7f-1409311445bc_transfer4_1788800177.flac"
+    )
+
+    def test_a_transferred_leg_uses_its_trailing_epoch(self):
+        """The fourth layout, and the same trap a second time.
+
+        `<uuid>_transfer4_<epoch>.flac`. The salvage read `1409311445` out of
+        `bd7f-1409311445bc` -- inside the uuid -- and dated the recording to
+        2014, while the real channel epoch sat at the end of the name. 2,557
+        rows carried that.
+        """
+        from datetime import UTC, datetime
+
+        from c2w.commpeak.keyparse import parse_key
+
+        parsed = parse_key(self.TRANSFER)
+        assert parsed.call_uuid == "7b8d594d-11b4-450a-bd7f-1409311445bc"
+        assert parsed.uniqueid == 1788800177
+        assert parsed.started_at == datetime(2026, 9, 7, 16, 56, 17, tzinfo=UTC)
+        # Not the decoy inside the uuid.
+        assert parsed.uniqueid != 1409311445
+        assert parsed.started_at.year == 2026
+
+    def test_the_transfer_leg_is_kept(self):
+        """Legs of one call must be distinguishable, or they look duplicate."""
+        from c2w.commpeak.keyparse import parse_key
+
+        assert parse_key(self.TRANSFER).extension == "transfer4"
+
+    def test_no_layout_dates_a_recording_outside_the_plausible_range(self):
+        """A guard on the class of bug rather than on its four instances.
+
+        Every one of these was a plausible ten-digit run found somewhere it
+        did not belong. The cheapest way to catch the next one is to assert
+        that no known layout produces a date the business cannot have.
+        """
+        from c2w.commpeak.keyparse import parse_key
+
+        for key in (self.KEY, self.TRANSFER):
+            parsed = parse_key(key)
+            assert parsed.started_at is not None, key
+            assert 2018 <= parsed.started_at.year <= 2035, (key, parsed.started_at)
+
+    def test_an_uppercase_uuid_is_still_recognised(self):
+        from c2w.commpeak.keyparse import parse_key
+
+        parsed = parse_key("recordings/2026/09/08/3DE0CD70-91BE-4B95-8242-1028016138B4.FLAC")
+        assert parsed.call_uuid == "3de0cd70-91be-4b95-8242-1028016138b4"
+        assert parsed.is_audio

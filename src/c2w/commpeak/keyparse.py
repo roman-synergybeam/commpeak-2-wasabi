@@ -62,7 +62,7 @@ _FULL: Final[re.Pattern[str]] = re.compile(
     ^
     (?P<direction>[a-z]+)          -
     (?P<number>\+?\d{1,20})        -
-    (?P<extension>[A-Za-z0-9_]{1,32}) -
+    (?P<extension>[A-Za-z0-9_+]{1,32}) -
     (?P<date>\d{8})                -
     (?P<time>\d{6})                -
     (?P<uniqueid>\d{9,12})
@@ -108,13 +108,58 @@ _UNIQUEID_FIRST: Final[re.Pattern[str]] = re.compile(
     (?:\.(?P<seq>\d{1,8}))?       -
     (?P<direction>[a-z]+)          -
     (?P<number>\+?\d{1,20})        -
-    (?P<extension>[A-Za-z0-9_]{1,32}) -
+    (?P<extension>[A-Za-z0-9_+]{1,32}) -
     (?P<date>\d{8})                -
     (?P<time>\d{6})
     \.(?P<ext>[A-Za-z0-9]{1,8})
     $
     """,
     re.VERBOSE,
+)
+
+# 3de0cd70-91be-4b95-8242-1028016138b4.flac
+#
+# CommPeak's **Dialer** names recordings with the call's UUID and nothing else.
+# It must be recognised before the salvage below, because a UUID is 32 hex
+# characters and hex contains digits: the salvage found `1028016138` inside
+# `8242-1028016138b4`, read it as a FreeSWITCH epoch and produced a start time
+# of 2002-07-30, then read the same digits as the phone number. Across the four
+# Dialer accounts -- 100,000 recordings, two thirds of the archive -- that gave
+# every row a confidently wrong timestamp scattered between 2001 and 2032, a
+# wrong number, and no direction. Wrong metadata is worse than none: it
+# correlates against real CDRs and puts recordings decades from the call.
+#
+# The uuid itself is the useful part. A Dialer CDR carries `call_uuid`, so this
+# is an exact join rather than a tolerance window.
+# Two Dialer shapes, both led by the uuid:
+#
+#     3de0cd70-91be-4b95-8242-1028016138b4.flac
+#     7b8d594d-11b4-450a-bd7f-1409311445bc_transfer4_1788800177.flac
+#
+# The second is a transferred leg: the uuid, a label for the leg, and the
+# channel epoch. Both were mis-salvaged from the uuid's own hex -- the first
+# gave 2002, the second 2014, because `bd7f-1409311445bc` contains a plausible
+# ten-digit epoch. The real one, when there is one, is the trailing group.
+#: `<uuid>` optionally followed by a leg label and the channel epoch.
+#:
+#: The epoch is **required** in this one so that it is always captured when
+#: present. Making it optional in a single pattern lets the label group -- which
+#: has to allow underscores, because `bridge_user_ext4` is a real label --
+#: swallow the epoch as part of its own text, and the recording then falls back
+#: to the folder date and loses the time of day for no reason.
+_UUID_WITH_EPOCH: Final[re.Pattern[str]] = re.compile(
+    r"^(?P<uuid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    r"(?:_(?P<label>[A-Za-z][A-Za-z0-9_]*?))?"
+    r"_(?P<uniqueid>\d{9,12})"
+    r"\.(?P<ext>[A-Za-z0-9]{1,8})$",
+    re.IGNORECASE,
+)
+
+#: `<uuid>.<ext>` and nothing else. The start time comes from the folder.
+_UUID_ONLY: Final[re.Pattern[str]] = re.compile(
+    r"^(?P<uuid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    r"\.(?P<ext>[A-Za-z0-9]{1,8})$",
+    re.IGNORECASE,
 )
 
 # Last-resort salvage: pull out whatever recognisable tokens exist anywhere in
@@ -161,6 +206,10 @@ class ParsedKey:
     uniqueid: int | None = None
     seq: int = 0
     file_ext: str | None = None
+    #: The call's own UUID, when the object is named with one. CommPeak's
+    #: Dialer names recordings `<uuid>.flac`, and that uuid is the Dialer
+    #: CDR's `call_uuid` -- an exact join key, far better than any heuristic.
+    call_uuid: str | None = None
     prefix_hour: datetime | None = None
     is_audio: bool = False
     is_sidecar: bool = False
@@ -259,25 +308,50 @@ def parse_key(key: str) -> ParsedKey:
             result.confidence_inputs.add("started_at")
         break
     else:
-        # Structured match failed -- salvage individual tokens so the object is
-        # still correlatable on time and/or number.
-        stem, _, ext = basename.rpartition(".")
-        if ext:
-            result.file_ext = ext.lower()
-        head = basename.split("-", 1)[0].lower()
-        if head in _DIRECTION_ALIASES:
-            result.direction = _DIRECTION_ALIASES[head]
-            result.confidence_inputs.add("direction")
-        if uid := _ANY_UNIQUEID.search(stem or basename):
-            result.uniqueid = int(uid["uniqueid"])
-            result.confidence_inputs.add("uniqueid")
-        if dt := _ANY_DATETIME.search(stem or basename):
-            result.started_at = _to_datetime(dt["date"], dt["time"])
+        uuid_match = _UUID_WITH_EPOCH.match(basename) or _UUID_ONLY.match(basename)
+        if uuid_match:
+            # A known shape, so this counts as parsed. The start time comes
+            # from the trailing channel epoch when the name carries one, and
+            # otherwise from the folder the object sits in -- both are real,
+            # unlike digits taken out of the uuid's hex.
+            result.parsed_ok = True
+            result.call_uuid = uuid_match["uuid"].lower()
+            result.file_ext = uuid_match["ext"].lower()
+            result.confidence_inputs.add("call_uuid")
+            groups = uuid_match.groupdict()
+            if raw_uid := groups.get("uniqueid"):
+                result.uniqueid = int(raw_uid)
+                result.confidence_inputs.add("uniqueid")
+            # `transfer4` and friends: which leg of a transferred call this is.
+            # Kept as the extension field, which is where the other layouts put
+            # the one thing that distinguishes legs of the same call.
+            if label := groups.get("label"):
+                result.extension = label.lower()
+            result.started_at = result.uniqueid_time or result.prefix_hour
             if result.started_at:
-                result.confidence_inputs.add("started_at")
-        if num := _ANY_NUMBER.search(stem or basename):
-            result.number = _normalise_number(num["number"])
-            result.confidence_inputs.add("number")
+                result.confidence_inputs.add(
+                    "uniqueid" if result.uniqueid else "prefix_hour"
+                )
+        else:
+            # Structured match failed -- salvage individual tokens so the
+            # object is still correlatable on time and/or number.
+            stem, _, ext = basename.rpartition(".")
+            if ext:
+                result.file_ext = ext.lower()
+            head = basename.split("-", 1)[0].lower()
+            if head in _DIRECTION_ALIASES:
+                result.direction = _DIRECTION_ALIASES[head]
+                result.confidence_inputs.add("direction")
+            if uid := _ANY_UNIQUEID.search(stem or basename):
+                result.uniqueid = int(uid["uniqueid"])
+                result.confidence_inputs.add("uniqueid")
+            if dt := _ANY_DATETIME.search(stem or basename):
+                result.started_at = _to_datetime(dt["date"], dt["time"])
+                if result.started_at:
+                    result.confidence_inputs.add("started_at")
+            if num := _ANY_NUMBER.search(stem or basename):
+                result.number = _normalise_number(num["number"])
+                result.confidence_inputs.add("number")
 
     if result.file_ext:
         result.is_audio = result.file_ext in _AUDIO_EXTENSIONS
