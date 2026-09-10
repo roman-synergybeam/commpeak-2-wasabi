@@ -1420,3 +1420,73 @@ class TestFilteringLeavesAUsableUrl:
         await _login(app_client, scenario["admin_email"], scenario["password"])
         response = await app_client.get("/calls/rows", headers={"HX-Request": "true"})
         assert response.headers.get("hx-push-url") == "/calls"
+
+
+class TestAnEmptyFilterBoxIsNotAnError:
+    """The actual reason the filters "did not work".
+
+    A browser submits every field in a form, including the ones nobody
+    touched: an untouched `<input type=number>` and a `<select>` sitting on
+    its `value=""` option are both sent as empty strings. The routes declared
+    those parameters as `int | None`, so FastAPI answered the whole request
+    with **422** -- htmx swapped nothing in, and the table went on showing the
+    previous unfiltered result while the form displayed the filters the
+    operator had just chosen. Nothing looked broken; the filters had simply
+    never been asked for. The plain form submission failed the same way, so
+    there was no fallback either.
+    """
+
+    #: Exactly what the calls form puts on the wire with only two boxes filled.
+    BROWSER_QUERY = (
+        "media=&number=&date_from=2026-08-01T12:54&date_to=2026-08-31T12:55"
+        "&direction=&agent=&country=Benin&queue=&call_type="
+        "&min_duration=&connection_id=&limit=50"
+    )
+
+    async def test_the_fragment_accepts_what_the_form_sends(
+        self, app_client, scenario
+    ):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        response = await app_client.get(
+            f"/calls/rows?{self.BROWSER_QUERY}", headers={"HX-Request": "true"}
+        )
+        assert response.status_code == 200, response.status_code
+
+    async def test_the_page_accepts_what_the_form_sends(self, app_client, scenario):
+        """The non-htmx path, which was the only fallback and also 422'd."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        response = await app_client.get(f"/calls?{self.BROWSER_QUERY}")
+        assert response.status_code == 200, response.status_code
+
+    @pytest.mark.parametrize("field", ["min_duration", "connection_id", "limit", "offset"])
+    async def test_each_numeric_filter_tolerates_an_empty_value(
+        self, app_client, scenario, field
+    ):
+        """Named individually, because one of them being strict is enough."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        response = await app_client.get(f"/calls/rows?{field}=")
+        assert response.status_code == 200, f"{field} rejected an empty value"
+
+    async def test_rubbish_in_a_numeric_filter_does_not_break_the_page(
+        self, app_client, scenario
+    ):
+        """A hand-edited or stale URL should degrade, not fail."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        response = await app_client.get("/calls?limit=lots&min_duration=ages")
+        assert response.status_code == 200
+
+    async def test_a_filled_numeric_filter_is_still_honoured(self, app_client, scenario):
+        """Tolerating empty must not mean ignoring a real value."""
+        from c2w.web.routes import _parse_query
+
+        query = _parse_query(min_duration="600", connection_id="7", limit="25")
+        assert query.min_duration == 600
+        assert query.connection_id == 7
+        assert query.limit == 25
+
+    async def test_the_messages_list_tolerates_it_too(self, app_client, scenario):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        response = await app_client.get("/messages/rows?limit=&offset=")
+        if response.status_code == 404:
+            pytest.skip("messages are not enabled in this scenario")
+        assert response.status_code == 200

@@ -823,18 +823,27 @@ def _parse_query(
     direction: str | None = None,
     agent: str | None = None,
     media: str | None = None,
-    connection_id: int | None = None,
+    connection_id: str | int | None = None,
     status_filter: str | None = None,
-    min_duration: int | None = None,
+    min_duration: str | int | None = None,
     country: str | None = None,
     queue: str | None = None,
     call_type: str | None = None,
     sort: str = "started",
     desc: str = "1",
-    limit: int = 50,
-    offset: int = 0,
+    limit: str | int | None = 50,
+    offset: str | int | None = 0,
 ) -> CdrQuery:
     """Turn query-string strings into a validated :class:`CdrQuery`.
+
+    **Every numeric parameter is taken as text**, because a browser submits an
+    untouched number box and a `value=""` menu option as an empty string, and
+    an empty string is not an integer. Declared as `int | None`, FastAPI
+    answered the form with 422 -- so htmx swapped nothing in and the table kept
+    showing the previous, unfiltered result while the form displayed the
+    filters the operator had just chosen. That is what "the filters do not
+    work" looked like: they were never asked for. A plain form submission got
+    an error page for the same reason, so there was no fallback either.
 
     Keyword-only: this had thirteen positional parameters of which eight were
     ``str | None``, called from three places. Adding one in the middle would
@@ -851,6 +860,15 @@ def _parse_query(
                 continue
         return None
 
+    def _int(value: str | int | None, default: int | None = None) -> int | None:
+        """An empty box means "no filter", not "reject this request"."""
+        if value is None or value == "":
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     try:
         sort_field = SortField(sort)
     except ValueError:
@@ -863,16 +881,16 @@ def _parse_query(
         direction=direction or None,
         agent=agent or None,
         media=media or None,
-        connection_id=connection_id,
+        connection_id=_int(connection_id),
         status=status_filter or None,
-        min_duration=min_duration or None,
+        min_duration=_int(min_duration),
         country=country or None,
         queue=queue or None,
         call_type=call_type or None,
         sort=sort_field,
         descending=desc in ("1", "true", ""),
-        limit=limit,
-        offset=offset,
+        limit=_int(limit, 50) or 50,
+        offset=_int(offset, 0) or 0,
     )
 
 
@@ -954,16 +972,19 @@ async def calls(
     direction: str | None = None,
     agent: str | None = None,
     media: str | None = None,
-    connection_id: int | None = None,
+    # Text, not int: a browser sends an untouched number box and an
+    # unselected menu as "", which is not an integer and was answered with a
+    # 422 -- so the filters were never applied. _parse_query coerces.
+    connection_id: str | None = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
-    min_duration: int | None = None,
+    min_duration: str | None = None,
     country: str | None = None,
     queue: str | None = None,
     call_type: str | None = None,
     sort: str = "started",
     desc: str = "1",
-    limit: int = 50,
-    offset: int = 0,
+    limit: str | None = None,
+    offset: str | None = None,
 ) -> Response:
     query = _parse_query(
         number=number, date_from=date_from, date_to=date_to, direction=direction,
@@ -989,16 +1010,19 @@ async def calls_rows(
     direction: str | None = None,
     agent: str | None = None,
     media: str | None = None,
-    connection_id: int | None = None,
+    # Text, not int: a browser sends an untouched number box and an
+    # unselected menu as "", which is not an integer and was answered with a
+    # 422 -- so the filters were never applied. _parse_query coerces.
+    connection_id: str | None = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
-    min_duration: int | None = None,
+    min_duration: str | None = None,
     country: str | None = None,
     queue: str | None = None,
     call_type: str | None = None,
     sort: str = "started",
     desc: str = "1",
-    limit: int = 50,
-    offset: int = 0,
+    limit: str | None = None,
+    offset: str | None = None,
 ) -> Response:
     """The table fragment htmx swaps in."""
     query = _parse_query(
@@ -3577,8 +3601,8 @@ def _parse_message_query(
     body: str | None = None,
     sort: str = "occurred",
     desc: str = "1",
-    limit: int = 50,
-    offset: int = 0,
+    limit: str | int | None = 50,
+    offset: str | int | None = 0,
 ) -> MessageQuery:
     def _dt(value: str | None) -> datetime | None:
         if not value:
@@ -3595,6 +3619,15 @@ def _parse_message_query(
     except ValueError:
         sort_field = MessageSort.OCCURRED
 
+    def _int(value: str | int | None, default: int) -> int:
+        """An empty box means the default, not a rejected request."""
+        if value is None or value == "":
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     return MessageQuery(
         date_from=_dt(date_from),
         date_to=_dt(date_to),
@@ -3607,8 +3640,8 @@ def _parse_message_query(
         body=body or None,
         sort=sort_field,
         descending=desc in ("1", "true", ""),
-        limit=limit,
-        offset=offset,
+        limit=_int(limit, 50),
+        offset=_int(offset, 0),
     )
 
 
@@ -3655,8 +3688,11 @@ async def messages(
     body: str | None = None,
     sort: str = "occurred",
     desc: str = "1",
-    limit: int = 50,
-    offset: int = 0,
+    # Text for the same reason as the calls list: an empty box is not an
+    # integer, and rejecting the request was how filtering appeared to do
+    # nothing.
+    limit: str | None = None,
+    offset: str | None = None,
 ) -> Response:
     """Text messages, both directions, with delivery status and timestamps."""
     query = _parse_message_query(
@@ -3686,8 +3722,11 @@ async def messages_rows(
     body: str | None = None,
     sort: str = "occurred",
     desc: str = "1",
-    limit: int = 50,
-    offset: int = 0,
+    # Text for the same reason as the calls list: an empty box is not an
+    # integer, and rejecting the request was how filtering appeared to do
+    # nothing.
+    limit: str | None = None,
+    offset: str | None = None,
 ) -> Response:
     """The table only, for htmx to swap in."""
     query = _parse_message_query(
