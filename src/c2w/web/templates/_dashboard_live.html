@@ -1,0 +1,81 @@
+{# The live part of the dashboard: figures that change while you watch.
+
+   Its own partial because it is polled -- htmx replaces this fragment every
+   few seconds and leaves the rest of the page, its notes and the activity
+   table below, alone. Re-rendering the whole page on a timer would fight the
+   scroll position and re-run the shell's work for nothing.
+
+   Rendered server-side on first paint too, so the dashboard is complete
+   before any polling happens and stays correct with scripting unavailable. #}
+
+{# The caption is not optional: a bare "16,832" reads as a size as readily as
+   a count, and here the two differ by orders of magnitude. #}
+<div class="stats">
+  <div>
+    <p class="hint">Calls today</p>
+    <strong>{{ "{:,}".format(stats.calls_today) }}</strong>
+  </div>
+  <div>
+    <p class="hint">Recordings today</p>
+    <strong>{{ "{:,}".format(stats.recordings_today) }}</strong>
+  </div>
+  <div>
+    <p class="hint">Recordings known</p>
+    <strong>{{ "{:,}".format(stats.recordings_total) }}</strong>
+  </div>
+  <div>
+    <p class="hint">Held at CommPeak</p>
+    <strong>{{ stats.bytes_source | filesize }}</strong>
+  </div>
+  <div>
+    <p class="hint">Copied to archive</p>
+    <strong>{{ stats.bytes_archived | filesize }}</strong>
+  </div>
+  <div>
+    <p class="hint">Awaiting copy</p>
+    <strong>{{ "{:,}".format(stats.pending) }}</strong>
+  </div>
+  <div>
+    <p class="hint">Failed</p>
+    <strong {% if stats.failed %}class="bad"{% endif %}>{{ "{:,}".format(stats.failed) }}</strong>
+  </div>
+  <div>
+    <p class="hint">No matching call</p>
+    <strong>{{ "{:,}".format(stats.orphans) }}</strong>
+  </div>
+</div>
+
+<h2>Archive progress</h2>
+<div class="card">
+  <div class="bar"><span style="width: {{ stats.progress_pct }}%"></span></div>
+  <div class="barline">
+    <span><strong>{{ "{:,}".format(stats.archived) }}</strong> verified in the archive</span>
+    <span><strong>{{ "{:,}".format(stats.pending) }}</strong> still to copy</span>
+    <span><strong>{{ stats.progress_pct }}%</strong> of {{ "{:,}".format(stats.recordings_total) }} recordings</span>
+  </div>
+</div>
+
+<h2>Recording states</h2>
+<div class="tw">
+  <table>
+    <thead>
+      <tr><th>State</th><th class="right">Recordings</th><th>What it means</th></tr>
+    </thead>
+    <tbody>
+    {% for state, count in state_rows %}
+      <tr>
+        <td data-label="State"><span class="pill {{ state | state_class }}">{{ state | state_label }}</span></td>
+        <td class="right" data-label="Recordings">{{ "{:,}".format(count) }}</td>
+        <td data-label="Meaning"><span class="det">{{ state | state_help }}</span></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="3" class="empty">Nothing discovered yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<p class="hint" id="live-stamp">
+  Updated {{ live_at }} &middot; refreshing every {{ live_every }}s
+</p>
+

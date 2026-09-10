@@ -1061,3 +1061,68 @@ class TestSettingsSearch:
 
         admin_only = _search_settings("organisation", permissions_for(Role.ADMIN))
         assert all(m["category"] != "Organisations" for m in admin_only)
+
+
+class TestTheDashboardUpdatesLive:
+    """The figures refresh without a page reload.
+
+    A backfill that takes days is the case this is for: the dashboard is the
+    thing left open on a second screen, and a number that only moves when
+    somebody presses F5 is not a monitor.
+    """
+
+    async def test_the_page_asks_for_the_fragment_on_a_timer(
+        self, app_client, scenario
+    ):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/")
+        assert page.status_code == 200
+        assert 'hx-get="/dashboard/live"' in page.text
+        assert "every 10s" in page.text
+
+    async def test_the_figures_are_present_before_any_polling(
+        self, app_client, scenario
+    ):
+        """Server-rendered first: correct with scripting unavailable."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/")
+        assert "Archive progress" in page.text
+        assert "Recordings known" in page.text
+
+    async def test_the_fragment_is_only_the_figures(self, app_client, scenario):
+        """No shell, or every poll would swap the navigation into the page."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        fragment = await app_client.get("/dashboard/live")
+        assert fragment.status_code == 200
+        assert "Archive progress" in fragment.text
+        assert "<nav class=\"top\">" not in fragment.text
+        assert "<!doctype html>" not in fragment.text.lower()
+
+    async def test_the_fragment_says_when_it_was_produced(self, app_client, scenario):
+        """The question a stale-looking dashboard raises."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        fragment = await app_client.get("/dashboard/live")
+        assert "Updated" in fragment.text
+        assert "live-stamp" in fragment.text
+
+    async def test_the_poll_needs_a_session(self, app_client):
+        """It carries figures, so it is not public."""
+        refused = await app_client.get("/dashboard/live", follow_redirects=False)
+        assert refused.status_code in (401, 302, 303, 307)
+
+    async def test_the_poll_is_scoped_to_the_selected_organisation(
+        self, app_client, scenario, db
+    ):
+        """A fragment that saw across organisations would be a hole.
+
+        The page it comes from is brand-scoped; the poll must be too, or the
+        cheap route becomes the way round the boundary.
+        """
+        import inspect
+
+        from c2w.web.routes import dashboard_live
+
+        # ScopedSession, not a bare session: the dependency is what applies the
+        # RLS scope, so asserting on the signature is asserting on the control.
+        annotations = inspect.get_annotations(dashboard_live, eval_str=False)
+        assert "ScopedSession" in str(annotations["session"])

@@ -650,15 +650,17 @@ async def switch_brand(
 # ------------------------------------------------------------------- dashboard
 
 
-@router.get("/", response_class=HTMLResponse)
-async def dashboard(
-    request: Request,
-    user: CurrentUser,
-    session: ScopedSession,
-) -> Response:
+#: How often the dashboard's figures refresh, in seconds.
+#:
+#: Ten is short enough that a running backfill visibly moves and long enough
+#: that a page left open all day is not a load problem: the fragment is three
+#: aggregate queries, and it replaces only the numbers rather than the page.
+_DASHBOARD_REFRESH_SECONDS: Final[int] = 10
+
+
+async def _dashboard_live_context(session: AsyncSession) -> dict[str, Any]:
+    """The figures the dashboard refreshes, and nothing else."""
     stats = await dashboard_stats(session)
-    destinations = (await session.execute(select(StorageDestination))).scalars().all()
-    transfers_enabled = await settings_service.get_bool(session, "transfer.enabled")
     order = [
         "AVAILABLE",
         "VERIFIED",
@@ -671,7 +673,43 @@ async def dashboard(
         "SOURCE_DELETED",
     ]
     known = stats["recording_states"]
-    state_rows = [(name, known[name]) for name in order if name in known]
+    return {
+        "stats": stats,
+        "state_rows": [(name, known[name]) for name in order if name in known],
+        # Rendered rather than done in the browser, so it says when the server
+        # produced these numbers -- which is the question a stale-looking
+        # dashboard raises -- and not merely when the tab last drew.
+        "live_at": f"{datetime.now(UTC):%H:%M:%S}Z",
+        "live_every": _DASHBOARD_REFRESH_SECONDS,
+    }
+
+
+@router.get("/dashboard/live", response_class=HTMLResponse)
+async def dashboard_live(
+    request: Request,
+    user: CurrentUser,
+    session: ScopedSession,
+) -> Response:
+    """Just the figures, for the poll. No shell, no navigation.
+
+    Brand-scoped like every other request, so a poll cannot see across
+    organisations any more than the page it came from can.
+    """
+    return templates.TemplateResponse(
+        request,
+        "_dashboard_live.html",
+        await _dashboard_live_context(session),
+    )
+
+
+@router.get("/", response_class=HTMLResponse)
+async def dashboard(
+    request: Request,
+    user: CurrentUser,
+    session: ScopedSession,
+) -> Response:
+    destinations = (await session.execute(select(StorageDestination))).scalars().all()
+    transfers_enabled = await settings_service.get_bool(session, "transfer.enabled")
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -680,10 +718,9 @@ async def dashboard(
             session,
             user,
             "dashboard",
-            stats=stats,
-            state_rows=state_rows,
             has_destination=bool(destinations),
             transfers_enabled=transfers_enabled,
+            **await _dashboard_live_context(session),
         ),
     )
 
