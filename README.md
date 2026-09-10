@@ -25,8 +25,8 @@ already bitten.
 
 ## How it is configured
 
-There are no configuration files. Every setting lives in the database (46 of
-them, 9 categories) and is edited in the web UI under **Settings** or with
+There are no configuration files. Every setting lives in the database (112 of
+them, 17 categories) and is edited in the web UI under **Settings** or with
 `c2w-admin settings set`. Changes apply across every process within seconds.
 
 Exactly two values come from the environment, because they are what a process
@@ -48,12 +48,12 @@ All credential settings ship empty, to be filled in by an operator.
 | Schema + brand isolation | done — RLS with `FORCE`, LIST partitioning, append-only audit |
 | Settings in the database | done — registry, validation, brand overrides, sealed secrets, history |
 | Local auth + roles | done — Argon2id, revocable sessions, lockout. Three roles: platform admin, admin (the only one that can delete), operator (search, listen, export) |
-| Inventory scanner | done — hour-prefix, resumable, idempotent, works with no archive configured |
+| Inventory scanner | **being corrected** — resumable and idempotent, but keyed to the wrong prefix shape. See *The object layout* below |
 | Job queue | done — PostgreSQL `SKIP LOCKED`, leases, classified retry ladder |
 | Transfer + verification | done — stream, verify, sidecar metadata, re-queue on archive loss |
 | Workers | done — worker pool, scheduler, nightly reconciler (both singleton-locked) |
 | Media delivery | done — presigned URLs, separate play/download permissions, full audit |
-| CDR API client | done — against the documented PBX Stats API: form-encoded POST, `page`/`cdrs_per_page`, `from`/`till`. Accepts both CDR shapes CommPeak returns |
+| CDR API client | done — against the documented PBX Stats API: form-encoded POST, `page`/`cdrs_per_page`, `from`/`till`, key in `X-API-KEY`. Accepts both CDR shapes CommPeak returns |
 | Text messages (SMS) | done — both TextPeak endpoints (sent and received), delivery status, late-receipt handling, search, export |
 | Two-factor | done — authenticator app (RFC 6238), single-use codes, recovery codes, forced enrolment, administrator reset |
 | People administration | done — create accounts from the console, enable/disable, only a platform admin can create another |
@@ -87,6 +87,105 @@ each setting says so where it could be mistaken for working:
 
 **Still out of scope:** FXRide CRM and Zendesk.
 
+## The object layout
+
+Measured against all eight live buckets, not taken from the documentation:
+
+```
+recordings/2022/12/26/in-99150321131757-5031470050247407092-20221226-152523-1672068323.91098.flac
+└────────┘ └──┘ └┘ └┘ └┘ └────────────┘ └─────────────────┘ └──────┘ └────┘ └────────┘ └───┘
+   root    year mo dy dir   number            extension        date    time   channel-id  seq
+```
+
+Two differences from the documented shape, and both matter:
+
+* **There is a `recordings/` root prefix.** The docs show keys starting at the
+  year.
+* **There is no hour level.** Files sit directly under the day. The docs show
+  `/{year}/{month}/{day}/{hour}/`.
+
+`hour_prefix()` builds `2025/11/11/02/`, which matches nothing in any of these
+buckets, so a scan lists empty prefix after empty prefix and reports **zero
+recordings found with no error** — the worst kind of failure, because access
+looks fine and nothing appears. Correcting this is the open work in the status
+table above.
+
+Also found while measuring, and worth knowing before trusting a parse:
+
+* `go4rex.pbx` has a non-date branch, `recordings/default/997/tmp/`. Year
+  enumeration has to skip it rather than fail on it.
+* The **extension** field is not always a short extension — one real key
+  carries a 19-digit identifier there.
+* The **sequence** is not always `0`/`1`/`2`; `91098` occurs.
+* History is deeper than assumed. Per account, the years actually present are:
+
+  | Account | Years held |
+  |---|---|
+  | go4rex.pbx | 2022–2026 (+ `default/`) |
+  | go4rex.td | 2022–2026 |
+  | go4rexsv.pbx | 2025–2026 |
+  | go4rexnew.td | 2026 |
+  | verificationgo4rex.td | 2026 |
+  | intermagnum.pbx | 2025–2026 |
+  | intermagnumretention.pbx | 2023–2026 |
+  | intermagnum.td | 2026 |
+
+## The access incident of 9 September 2026
+
+All eight accounts returned nginx `403 Forbidden` for about four hours. It is
+written up here because the diagnosis was wrong twice before it was right, and
+both wrong turns are easy to repeat.
+
+**What it was not.** Not the credentials: one account completed a full signed,
+authenticated bucket listing at 19:51 BST with the same sealed token and secret
+still in use. Not the per-account IP ACL either — the decisive test was setting
+one account's ACL to `0.0.0.0/0`, *allow every address on the internet*, and
+still being refused, sixteen times over twenty minutes. If allow-all does not
+admit you, no narrower entry can, so adding address ranges was provably not the
+lever. Not our egress address: one interface, one gateway, no proxy, and seven
+independent echo services agreeing on `145.239.102.215`.
+
+**What it almost certainly was.** A rate limit or automatic ban at CommPeak,
+above the per-account ACL and invisible from this side. The timing fits: about
+twenty account tests were run between 19:20 and 19:51 BST while the integration
+was being set up; access failed from 19:52; the last confirmed failure was
+22:55 UTC and the first recovery 23:27 UTC — roughly four hours after the
+burst. Nothing on our side changed in between. **This has not been confirmed by
+CommPeak**, and the only place that could confirm it is the account's *Access
+Summary* tab, which logs the source IP, time and error of every refusal.
+
+**Why it was hard to see.** CommPeak's nginx answers a refused request with its
+own HTML 403 and no S3 XML, and it answers *identically* whether the address is
+missing from the ACL or blocked for some other reason. So the response cannot
+distinguish the two, and the hint that used to say "your IP is probably missing
+from the Access Control List" sent an operator round the portal re-checking
+lists that were already correct. It now names both causes and points at the
+Access Summary tab as the only thing that can settle it.
+
+**One trap worth stating plainly:** an *unsigned* request to the recordings host
+returns nginx 403 whether or not access works — it still does today, with
+everything working. An unsigned request carries no account, so there is no ACL
+to consult and it can never succeed. It is not a reachability test. Only a
+signed request tells you anything.
+
+**What changed as a result.**
+
+* `test_connection` enforces a cooldown (`PROBE_COOLDOWN_SECONDS`) using the
+  row's own `last_probe_at`, so it holds across processes and restarts. A burst
+  of tests can no longer manufacture the failure it is trying to diagnose.
+* Inventory no longer scans an account that is in `ERROR`. Eight refused
+  accounts on a five-minute timer produced about ninety-six failed requests an
+  hour, indefinitely — which, against a source that rate-limits, is not a retry
+  policy but a way of keeping a block alive.
+* Those accounts are retried by a watch instead: one account per turn, least
+  recently checked first, a single cheap listing, and an alert **on the
+  transition** rather than on the state. It detected all eight recoveries on
+  its own and sent eight Telegram messages, which is how the outage ended
+  without anybody sitting on the settings page pressing Test.
+* `status` on `commpeak_connections` is the last probe's verdict, not a live
+  reading. Read `last_probe_at` beside it; a row can say `OK` long after access
+  stopped, and did.
+
 ## Organisations, accounts and people
 
 An **organisation** is a customer company, and the hard isolation boundary —
@@ -107,9 +206,18 @@ Three roles, each describable in a sentence:
 | Admin | One organisation, everything there — the only role that can delete a recording |
 | Operator | Search calls, listen, download and export |
 
-Transfers stay disabled until an archive destination exists — no Wasabi buckets
-are provisioned yet. Inventory, correlation and CDR search all work without one,
-so the UI is useful in the meantime and nothing needs re-scanning later.
+Transfers stay disabled until an archive destination exists. Both
+organisations now have one — Wasabi, `eu-central-1`, both verified by writing
+an object, reading it back and removing it — and every CommPeak account is
+linked to the bucket belonging to **its own** organisation, enforced by a
+brand-matched join rather than a hand-entered id.
+
+Transfers are switched on and deliberately throttled: 4 concurrent globally,
+2 per bucket, 2 per organisation, a 25 Mbps ceiling, 2 jobs claimed at a time.
+That is well inside CommPeak's documented ~5 per account, and every figure is a
+setting to raise from the UI once it has been proven steady. Inventory,
+correlation and CDR search all work without an archive anyway, so the UI is
+useful before any bytes move and nothing needs re-scanning later.
 
 ## Development
 
@@ -216,24 +324,35 @@ today:
 | Master key | `/home/c2w/.config/c2w/master.key` (0600) |
 | Services | `systemctl --user` units in `~/.config/systemd/user` |
 | Backups | `/home/c2w/backups` |
+| Survives a reboot | yes — `loginctl enable-linger c2w` is enabled |
+
+Six units run: `c2w-postgres`, `c2w-api`, `c2w-worker@1`, `c2w-scheduler`,
+`c2w-reconciler` and `c2w-tunnel`. The three worker units live in
+`deploy/systemd/user/` and are **not** the ones in `deploy/systemd/` — those
+describe a root install under `/opt/c2w` and cannot start here at all, which is
+why they were never installed and why nothing inventoried, polled or copied
+anything for a while. See that directory's README.
 
 ```bash
-systemctl --user status c2w-postgres c2w-api
+systemctl --user status 'c2w-*'
 systemctl --user restart c2w-api
-journalctl --user -u c2w-api -n 50
+journalctl --user -u c2w-scheduler -n 50
 ```
 
-Three things this arrangement still needs, and none can be done without root:
+The workers additionally need `C2W_PLATFORM_DATABASE_URL` pointing at the
+`c2w_platform` role, which holds `BYPASSRLS`. Without it they fall back to the
+ordinary role, whose RLS is forced with no brand set, and every tenant-scoped
+table reads as **empty** — the scheduler, worker and reconciler then do nothing
+at all and report nothing. That role also needs table privileges; `BYPASSRLS`
+alone is not access.
 
-1. **`sudo loginctl enable-linger c2w`.** Without it, `systemctl --user`
-   services stop when the last session for the account ends, and do not start
-   at boot. This is the single command that makes the console survive a
-   reboot.
-2. **TLS.** The API currently binds `0.0.0.0:8000` directly because there is no
+Two things this arrangement still needs, and neither can be done without root:
+
+1. **TLS.** The API currently binds `0.0.0.0:8000` directly because there is no
    reverse proxy, so sign-ins and recordings cross the network in clear. Put
    nginx (`deploy/nginx/`) in front, then change the unit back to
    `--host 127.0.0.1`.
-3. **`pg_trgm`.** Searching for *part* of a phone number works but scans
+2. **`pg_trgm`.** Searching for *part* of a phone number works but scans
    instead of using an index. `apt-get install postgresql-contrib`, then
    `CREATE EXTENSION pg_trgm;` and the two GIN indexes named in migration 0001.
 
