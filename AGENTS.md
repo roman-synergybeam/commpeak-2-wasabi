@@ -728,6 +728,38 @@ Counting only the column missed everyone who works across organisations, which
 is the whole point of `user_brands` -- an organisation staffed entirely by
 shared users read as having nobody in it.
 
+## Tuning the copy, and the cap that is not what it looks like
+
+Measured on the live estate, and the shape of the answer is the point: the
+average recording is **0.73 MB**, so copying is bound by round trips, not by
+bandwidth. At the first settings 8.8 Mbit/s of a 25 Mbit/s cap was in use --
+raising the cap would have done nothing. Parallelism is the lever.
+
+What one evening of tuning actually produced:
+
+| Setting | Rate | Achieved | Remaining |
+|---|---|---|---|
+| 4 global, 2/brand, 1 worker | 69/min | 8.8 Mbit/s | ~35 h |
+| 32 global, 16/brand, 1 worker | 129/min | 23.2 Mbit/s | ~19 h |
+| + a second worker | 181/min | 23.8 Mbit/s | ~13 h |
+| + two more workers | 232/min | 18.7 Mbit/s | ~10 h |
+
+**`source.concurrency_per_connection` is enforced per worker *process*, not
+across the platform.** It gates each connection group inside
+`Worker._run_batch`, so N workers at that value give N times as many
+concurrent requests against a single CommPeak account. CommPeak documents ~5
+per account, so scaling out means dividing this down: four workers run it at
+**1**, which is four per account. Leaving it at 5 while adding workers would
+have put 20 concurrent requests on one account -- and the punishment for that,
+as this project has already learned once, is a rate-limited 403 that looks
+exactly like a missing ACL entry.
+
+The single-process ceiling is CPU, not the network: one worker saturates about
+0.8 of a core, because verification hashes every byte in flight with SHA-256
+and that is not optional. So throughput past that point comes from more
+processes, and `c2w-worker@N` is a template for exactly this reason. Four
+processes use around 1.3 of the 4 cores here.
+
 ## Out of scope for v1
 
 Voice transcription and analysis, FXRide CRM, Zendesk. Do not build these; do
