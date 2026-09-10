@@ -1126,3 +1126,135 @@ class TestTheDashboardUpdatesLive:
         # RLS scope, so asserting on the signature is asserting on the control.
         annotations = inspect.get_annotations(dashboard_live, eval_str=False)
         assert "ScopedSession" in str(annotations["session"])
+
+
+class TestSignInAlerts:
+    """Every sign-in, and every refusal, is announced.
+
+    This console holds two companies' call recordings, so who opened it and
+    from where is worth knowing as it happens rather than in a log somebody
+    reads afterwards.
+    """
+
+    @staticmethod
+    def _capture(monkeypatch):
+        from c2w.web import routes
+
+        sent = []
+
+        async def _spy(_session, alert):
+            sent.append(alert)
+            return ["telegram"]
+
+        monkeypatch.setattr(routes, "dispatch", _spy)
+        return sent
+
+    async def test_a_successful_sign_in_is_announced(
+        self, app_client, scenario, monkeypatch
+    ):
+        sent = self._capture(monkeypatch)
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        titles = [a.title for a in sent]
+        assert "Signed in" in titles, titles
+        alert = next(a for a in sent if a.title == "Signed in")
+        assert alert.fields["Who"] == scenario["admin_email"]
+        assert "From" in alert.fields and "Method" in alert.fields
+
+    async def test_a_refused_sign_in_is_announced_as_a_warning(
+        self, app_client, scenario, monkeypatch
+    ):
+        from c2w.alerts.base import Severity
+
+        sent = self._capture(monkeypatch)
+        await app_client.post(
+            "/login",
+            data={"email": scenario["admin_email"], "password": "wrong-password-here"},
+            follow_redirects=False,
+        )
+        refused = [a for a in sent if a.title == "Sign-in refused"]
+        assert refused, [a.title for a in sent]
+        assert refused[0].severity == Severity.WARNING
+
+    async def test_no_password_ever_reaches_the_alert(
+        self, app_client, scenario, monkeypatch
+    ):
+        """The obvious way to get this wrong."""
+        sent = self._capture(monkeypatch)
+        await app_client.post(
+            "/login",
+            data={"email": scenario["admin_email"], "password": "ALERTLEAKCANARY99"},
+            follow_redirects=False,
+        )
+        for alert in sent:
+            blob = alert.as_text() + repr(alert.fields)
+            assert "ALERTLEAKCANARY99" not in blob
+
+    async def test_a_refusal_does_not_say_whether_the_account_exists(
+        self, app_client, monkeypatch
+    ):
+        """Otherwise the chat answers "is this a real user here?" for anyone.
+
+        Both a wrong password on a real address and an address that does not
+        exist must produce the same shape of message.
+        """
+        sent = self._capture(monkeypatch)
+        await app_client.post(
+            "/login",
+            data={"email": "nobody-here@example.com", "password": "whatever-long-enough"},
+            follow_redirects=False,
+        )
+        refused = [a for a in sent if a.title == "Sign-in refused"]
+        assert refused
+        text_ = refused[0].as_text().lower()
+        for giveaway in ("no such user", "unknown user", "does not exist", "not found"):
+            assert giveaway not in text_, text_
+
+    async def test_it_is_a_platform_event_not_an_organisation_one(
+        self, app_client, scenario, monkeypatch
+    ):
+        """A super admin has no organisation, and this is not one company's business."""
+        sent = self._capture(monkeypatch)
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        alert = next(a for a in sent if a.title == "Signed in")
+        assert alert.brand_id is None
+
+    async def test_a_burst_from_one_address_collapses(
+        self, app_client, scenario, monkeypatch
+    ):
+        """Otherwise an attack floods the chat and hides everything else."""
+        sent = self._capture(monkeypatch)
+        for _ in range(3):
+            await app_client.post(
+                "/login",
+                data={"email": "attacker@example.com", "password": "guess-a-password"},
+                follow_redirects=False,
+            )
+        refused = [a for a in sent if a.title == "Sign-in refused"]
+        assert refused
+        # One dedupe key for the lot, so `dispatch` suppresses the repeats.
+        assert len({a.dedupe_key for a in refused}) == 1
+
+    async def test_alerting_failure_never_blocks_a_sign_in(
+        self, app_client, scenario, monkeypatch
+    ):
+        """Observability failing must not take the thing it observes with it."""
+        from c2w.web import routes
+
+        async def _explode(_session, _alert):
+            raise RuntimeError("telegram is down")
+
+        monkeypatch.setattr(routes, "dispatch", _explode)
+        response = await app_client.post(
+            "/login",
+            data={"email": scenario["admin_email"], "password": scenario["password"]},
+            follow_redirects=False,
+        )
+        assert response.status_code in (302, 303)
+        assert response.cookies.get("c2w_session") or "set-cookie" in response.headers
+
+    async def test_both_switches_exist_and_are_platform_wide(self):
+        from c2w.settings_spec import SETTINGS
+
+        for key in ("alerts.on_signin", "alerts.on_failed_signin"):
+            assert SETTINGS[key].brand_overridable is False, key
+            assert SETTINGS[key].default is True, key

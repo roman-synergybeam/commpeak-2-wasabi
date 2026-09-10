@@ -29,6 +29,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from c2w.alerts.base import Alert, Severity, dispatch
 from c2w.api.deps import (
     BRAND_COOKIE,
     MFA_COOKIE,
@@ -97,6 +98,7 @@ from c2w.web.accounts import (
     update_destination,
     wasabi_region_choices,
 )
+from c2w.web.filters import _auth_label, _role_label
 from c2w.web.filters import register as register_filters
 from c2w.web.settings_tests import run_section_test, tests_for
 
@@ -334,7 +336,89 @@ async def _sign_in(
         response.set_cookie(BRAND_COOKIE, str(initial_brand), samesite="lax")
     response.delete_cookie(MFA_COOKIE)
     log.info("login.ok", user_id=user.id, role=str(user.role))
+    await _alert_signin(request, session, user, ok=True)
     return response
+
+
+async def _alert_signin(
+    request: Request,
+    session: AsyncSession,
+    user: User | None,
+    *,
+    ok: bool,
+    email: str | None = None,
+    reason: str | None = None,
+) -> None:
+    """Tell somebody that a sign-in happened, or was refused.
+
+    Placed at the single point every method finishes at -- password, second
+    factor, forced enrolment, Microsoft, Google, directory -- rather than at
+    each of them. A sign-in path that quietly did not alert would be the one
+    worth alerting on.
+
+    Sent to the **platform** channel, not an organisation's: who opened the
+    console is a platform fact, and a super admin has no organisation to
+    attribute it to. `dispatch` sends an alert with no brand to the platform
+    chat and prefixes it accordingly.
+
+    Never raises. Alerting is observability, and a chat being unreachable must
+    not stop somebody signing in.
+    """
+    try:
+        wanted = await settings_service.get_bool(
+            session, "alerts.on_signin" if ok else "alerts.on_failed_signin"
+        )
+        if not wanted:
+            return
+
+        who = user.email if user else (email or "an unknown address")
+        where = client_ip(request) or "an unknown address"
+        agent = (request.headers.get("user-agent") or "")[:120]
+
+        if ok and user is not None:
+            title = "Signed in"
+            severity = Severity.INFO
+            fields = {
+                "Who": who,
+                "Role": _role_label(user.role),
+                "Method": _auth_label(user.auth_source),
+                "From": where,
+            }
+        else:
+            title = "Sign-in refused"
+            severity = Severity.WARNING
+            fields = {
+                # The address as typed, because a refused attempt on an
+                # address that does not exist is exactly as interesting as one
+                # on an address that does -- and saying which it was here
+                # would answer "does this account exist" for anybody who can
+                # read the chat.
+                "Attempted": who,
+                "From": where,
+                "Reason": reason or "refused",
+            }
+        if agent:
+            fields["Browser"] = agent
+
+        await dispatch(
+            session,
+            Alert(
+                title=title,
+                body="",
+                severity=severity,
+                # No brand: this is a platform event. A super admin has no
+                # organisation, and "who opened the console" is not one
+                # company's business.
+                brand_id=None,
+                # Per address and per outcome, so a burst of refusals from one
+                # address collapses into one message rather than flooding the
+                # chat -- which is what an attack would otherwise do to it.
+                dedupe_key=f"signin:{title}:{who}:{where}",
+                fields=fields,
+            ),
+        )
+    except Exception as exc:
+        log.warning("alert.signin_failed", error=str(exc)[:160])
 
 
 def _set_ticket(response: Response, request: Request, user: User) -> Response:
@@ -382,6 +466,9 @@ async def login_submit(
             user = await authenticate(session, email, password)
     except AuthError as exc:
         log.info("login.failed", email=email[:64], reason=str(exc))
+        await _alert_signin(
+            request, session, None, ok=False, email=email[:120], reason=str(exc)[:120]
+        )
         return templates.TemplateResponse(
             request,
             "login.html",

@@ -568,6 +568,30 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         brand_overridable=False,
     ),
     SettingSpec(
+        key="alerts.on_signin",
+        type=SettingType.BOOL,
+        default=True,
+        category="Alerts",
+        label="Alert on every sign-in",
+        description="A message for each successful sign-in: who, when, from "
+        "which address, and by which method. This console holds two "
+        "companies' call recordings, so who opened it and from where is worth "
+        "knowing as it happens rather than in a log somebody reads later.",
+        brand_overridable=False,
+    ),
+    SettingSpec(
+        key="alerts.on_failed_signin",
+        type=SettingType.BOOL,
+        default=True,
+        category="Alerts",
+        label="Alert on a refused sign-in",
+        description="A refused attempt is the one worth interrupting somebody "
+        "for -- a handful in a row from an address nobody recognises is what "
+        "an attack looks like from here. Never includes the password or "
+        "whether the address exists.",
+        brand_overridable=False,
+    ),
+    SettingSpec(
         key="alerts.sync_summary_minutes",
         choices=('0', '15', '30', '60', '180', '360', '720', '1440'),
         choice_labels={'0': 'off'},
