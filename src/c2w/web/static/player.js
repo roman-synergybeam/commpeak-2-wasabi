@@ -32,13 +32,54 @@
     return CTX;
   }
 
+  /* Can this element legally go through a Web Audio graph?
+   *
+   * Only if the media is same-origin. Routing cross-origin media through
+   * createMediaElementSource does not fail loudly -- the spec taints the graph
+   * and it outputs **silence**. So the element played, the progress bar moved,
+   * and nothing came out; downloading the same file and opening it in another
+   * application worked perfectly, which is a maddening pair of symptoms.
+   *
+   * `/api/v1/recordings/<id>/stream` is same-origin but 302s to a presigned
+   * archive URL, so `src` is the wrong thing to test. `currentSrc` is the URL
+   * actually loaded, after redirects, which is the one that decides.
+   */
+  function sameOrigin(audio) {
+    var url = audio.currentSrc || audio.src;
+    if (!url) return false;              // not loaded yet: assume it is not
+    try {
+      return new URL(url, location.href).origin === location.origin;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /* Cross-origin media may go through the graph only if it was fetched with
+     CORS and the fetch succeeded. There is no API that reports "CORS was
+     approved", but there does not need to be one: with crossOrigin set, a
+     media element that failed CORS never reaches readyState >= 1 at all. So
+     having metadata *is* the proof. */
+  function corsApproved(audio) {
+    return audio.crossOrigin === "anonymous" && audio.readyState >= 1;
+  }
+
+  function canAmplify(audio) {
+    return sameOrigin(audio) || corsApproved(audio);
+  }
+
   /* Route an element through a GainNode so it can exceed unity.
-     Returns the node, or null when Web Audio is unavailable -- in which case
-     the caller falls back to element.volume and simply cannot go past 100%. */
+     Returns the node, or null when that cannot be done safely -- in which
+     case the caller falls back to element.volume and cannot go past 100%. */
   function amplifier(audio) {
     if (wired.has(audio)) return wired.get(audio);
     var ctx = context();
     if (!ctx) return null;
+    if (!canAmplify(audio)) {
+      // Silence is worse than quiet. Remembered so the check is not repeated
+      // on every timeupdate.
+      wired.set(audio, null);
+      return null;
+    }
     try {
       var src = ctx.createMediaElementSource(audio);
       var gain = ctx.createGain();
@@ -47,10 +88,7 @@
       wired.set(audio, gain);
       return gain;
     } catch (e) {
-      // createMediaElementSource throws if the element is already routed, or
-      // if the media is cross-origin without CORS. Presigned Wasabi URLs are
-      // another origin, so this is a real path, not a theoretical one: fall
-      // back to element volume rather than losing audio altogether.
+      // Already routed, or the browser refused. Either way, keep the audio.
       wired.set(audio, null);
       return null;
     }
@@ -81,6 +119,25 @@
     audio.addEventListener("play", function () {
       if (CTX && CTX.state === "suspended") CTX.resume();
       apply(audio, pref());
+    });
+    // By this point `currentSrc` is the post-redirect URL, so the same-origin
+    // question can finally be answered. Before it, the graph would have been
+    // built on a guess.
+    audio.addEventListener("loadedmetadata", function () {
+      wired.delete(audio);
+      apply(audio, pref());
+    });
+    /* If asking for CORS is what stopped the media loading, drop the request
+       and load it again without. Quiet audio beats no audio, and a bucket
+       whose CORS policy has been changed or removed must not silence
+       playback -- which is exactly the failure this whole file exists to
+       stop happening a second time. */
+    audio.addEventListener("error", function () {
+      if (audio.crossOrigin !== "anonymous" || audio.dataset.c2wRetried === "1") return;
+      audio.dataset.c2wRetried = "1";
+      audio.removeAttribute("crossorigin");
+      wired.delete(audio);
+      audio.load();
     });
   }
 

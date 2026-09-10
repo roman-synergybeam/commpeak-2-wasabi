@@ -1362,3 +1362,61 @@ class TestTheAccountPanelsAreLaidOutProperly:
         for state in ConnectionStatus:
             assert str(state) in _CONNECTION_LABEL, state
             assert _CONNECTION_LABEL[str(state)] != str(state)
+
+
+class TestFilteringLeavesAUsableUrl:
+    """Filtering a list must not leave the fragment's address in the bar.
+
+    `hx-push-url="true"` pushes the URL htmx requested, and for these tables
+    that is the fragment endpoint -- so filtering left
+    `/calls/rows?country=Mexico` in the address bar. Reloading it, sharing it,
+    or going back and forward rendered a bare `<table>` with no page around
+    it: no filter form, no navigation. To an operator that reads as "the
+    filters do not work", because the filters were the last thing they
+    touched.
+    """
+
+    async def test_the_calls_fragment_pushes_the_page_url(self, app_client, scenario):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        response = await app_client.get(
+            "/calls/rows?direction=out&limit=10", headers={"HX-Request": "true"}
+        )
+        assert response.status_code == 200
+        pushed = response.headers.get("hx-push-url")
+        assert pushed is not None, "nothing corrected the pushed URL"
+        assert pushed.startswith("/calls?"), pushed
+        assert "/calls/rows" not in pushed
+        # The filter has to survive into the pushed address, or a reload drops it.
+        assert "direction=out" in pushed
+
+    async def test_the_messages_fragment_pushes_the_page_url(
+        self, app_client, scenario
+    ):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        response = await app_client.get(
+            "/messages/rows?limit=10", headers={"HX-Request": "true"}
+        )
+        if response.status_code == 404:
+            pytest.skip("messages are not enabled in this scenario")
+        pushed = response.headers.get("hx-push-url")
+        assert pushed and pushed.startswith("/messages"), pushed
+        assert "/messages/rows" not in pushed
+
+    async def test_the_pushed_url_renders_a_whole_page(self, app_client, scenario):
+        """The point of the fix: that address must survive a reload."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        fragment = await app_client.get(
+            "/calls/rows?direction=out", headers={"HX-Request": "true"}
+        )
+        page = await app_client.get(fragment.headers["hx-push-url"])
+        assert page.status_code == 200
+        assert '<nav class="top">' in page.text
+        assert 'id="rows"' in page.text
+
+    async def test_a_fragment_with_no_query_still_pushes_the_page(
+        self, app_client, scenario
+    ):
+        """No trailing `?`, which would be an ugly and pointless URL."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        response = await app_client.get("/calls/rows", headers={"HX-Request": "true"})
+        assert response.headers.get("hx-push-url") == "/calls"

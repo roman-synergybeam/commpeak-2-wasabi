@@ -52,7 +52,16 @@
       {% if 'recordings.play' in permissions %}
         {# The src is a short-lived redirect to storage: the browser never sees
            storage credentials, and the audio does not pass through here. #}
-        <audio controls preload="none" src="/api/v1/recordings/{{ rec.id }}/stream"></audio>
+        {# crossorigin so the browser fetches the archived object with CORS.
+           The stream address is ours but redirects to the archive, so the
+           media is cross-origin -- and cross-origin media cannot go through
+           a Web Audio graph without CORS: the graph is tainted and outputs
+           silence rather than failing. That is what made a recording play
+           with no sound while the same file downloaded and played fine
+           elsewhere. player.js drops this attribute and reloads if asking
+           for CORS is what stopped the media loading. #}
+        <audio controls preload="none" crossorigin="anonymous"
+               src="/api/v1/recordings/{{ rec.id }}/stream"></audio>
         {% if 'recordings.download' in permissions %}
           <div class="actions">
             <a class="btn ghost" href="/api/v1/recordings/{{ rec.id }}/download">Download</a>

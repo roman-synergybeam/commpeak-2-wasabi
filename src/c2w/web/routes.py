@@ -879,6 +879,34 @@ def _parse_query(
 _QueryParams = dict[str, Any]
 
 
+def _fragment_response(
+    request: Request,
+    name: str,
+    context: dict[str, Any],
+    *,
+    page_path: str,
+) -> Response:
+    """Render an htmx fragment and tell the browser to show the page's URL.
+
+    `hx-push-url="true"` pushes the URL htmx *requested*, which for these
+    tables is the fragment endpoint -- so filtering a list left
+    `/calls/rows?country=Mexico` in the address bar. Reloading that, or sharing
+    it, or going back and forward, rendered a bare `<table>` with no page
+    around it: no filter form, no navigation, nothing. Which reads to an
+    operator as "the filters do not work", because the filters were the last
+    thing they touched.
+
+    `HX-Push-Url` overrides that with the address of the real page carrying the
+    same query, so the URL stays shareable and survives a reload -- and both
+    routes accept exactly the same parameters, so the page renders the same
+    filtered list the fragment just showed.
+    """
+    query = request.url.query
+    response = templates.TemplateResponse(request, name, context)
+    response.headers["HX-Push-Url"] = f"{page_path}?{query}" if query else page_path
+    return response
+
+
 async def _calls_context(
     request: Request, session: AsyncSession, query: CdrQuery
 ) -> _QueryParams:
@@ -981,7 +1009,7 @@ async def calls_rows(
         sort=sort, desc=desc, limit=limit, offset=offset,
     )
     context = await _calls_context(request, session, query)
-    return templates.TemplateResponse(
+    return _fragment_response(
         request,
         "_calls_rows.html",
         {
@@ -989,6 +1017,7 @@ async def calls_rows(
             "request": request,
             "permissions": {str(p) for p in permissions_for(user.role)},
         },
+        page_path="/calls",
     )
 
 
@@ -3667,7 +3696,12 @@ async def messages_rows(
         body=body, sort=sort, desc=desc, limit=limit, offset=offset,
     )
     context = await _messages_context(request, session, query)
-    return templates.TemplateResponse(request, "_messages_rows.html", context)
+    # Same fix as the calls list: the messages table filters through a
+    # fragment too, so the address bar must hold /messages rather than
+    # /messages/rows.
+    return _fragment_response(
+        request, "_messages_rows.html", context, page_path="/messages"
+    )
 
 
 @router.get("/messages/export.csv")
