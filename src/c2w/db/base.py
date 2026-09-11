@@ -103,3 +103,21 @@ class ConnectionStatus(enum.StrEnum):
     DEGRADED = "DEGRADED"
     ERROR = "ERROR"
     DISABLED = "DISABLED"
+
+#: Autovacuum settings for a brand partition, matching migration 0013.
+#:
+#: The defaults are wrong for these tables and the consequence is not subtle.
+#: Every recording is UPDATEd several times as it moves through the transfer
+#: states, and each UPDATE leaves a dead tuple; at the default
+#: `autovacuum_vacuum_scale_factor` of 0.2 nothing is reclaimed until a fifth
+#: of the table is dead, and then one throttled pass cannot catch up.
+#: `recordings_brand_1` was found with 8.3 million dead tuples against 7.6
+#: million live -- which made a state count read 5.2 GB and, because the
+#: visibility map was stale, stopped the planner using the index that would
+#: have answered it. Set on the partition, not the parent: autovacuum works on
+#: physical tables and a partitioned parent holds no rows.
+PARTITION_AUTOVACUUM = (
+    "autovacuum_vacuum_scale_factor = 0.02, "
+    "autovacuum_analyze_scale_factor = 0.02, "
+    "autovacuum_vacuum_cost_delay = 0"
+)

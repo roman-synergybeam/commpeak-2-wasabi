@@ -20,6 +20,7 @@ from c2w.alerts.base import Alert, Severity, dispatch
 from c2w.db.base import ConnectionStatus, JobKind, RecordingState, SyncRunKind
 from c2w.db.models.core import Brand, CommPeakConnection, Recording, SyncRun
 from c2w.db.session import dispose_engine, get_platform_engine, platform_session
+from c2w.db.size import as_gb, brand_bytes, database_bytes
 from c2w.logging import configure_logging, get_logger, reconfigure_from_settings
 from c2w.settings import settings_service
 from c2w.storage.errors import TransferError, classify_exception
@@ -40,6 +41,7 @@ class Scheduler:
         self._last_summary = 0.0
         self._last_cdr = 0.0
         self._last_retention = 0.0
+        self._last_archive_totals = 0.0
         self._last_sms = 0.0
         self._last_transcribe = 0.0
 
@@ -61,6 +63,18 @@ class Scheduler:
         loop_now = asyncio.get_running_loop().time()
         async with platform_session() as session:
             poll = await settings_service.get_int(session, "source.incremental_poll_seconds")
+
+        # Before the inventory, deliberately. `_tick` runs its steps in
+        # sequence, and an incremental inventory can hold the tick for a long
+        # time -- it walks a day prefix at a time across every account, and on
+        # this estate that has run for hours. Anything sequenced after it is
+        # therefore not "every minute" but "whenever the scan happens to
+        # finish", which is how this refresh came to sit thirteen minutes stale
+        # with the counters a hundred and fifty thousand objects out. Cheap
+        # work that must actually happen on a schedule goes first.
+        if loop_now - self._last_archive_totals >= 60:
+            self._last_archive_totals = loop_now
+            await self._refresh_archive_totals()
 
         if loop_now - self._last_inventory >= poll:
             self._last_inventory = loop_now
@@ -124,6 +138,49 @@ class Scheduler:
             self._last_retention = loop_now
             await self._queue_eligible_recordings()
 
+
+    async def _refresh_archive_totals(self) -> None:
+        """Recompute what each archive destination holds.
+
+        The workers used to keep these counters up to date by incrementing
+        them as each object landed. That serialised every transfer behind one
+        row lock -- forty concurrent transfers, one `storage_destinations`
+        row -- and, because the increment was applied to a value read earlier
+        in the session, two workers finishing together lost one of the two
+        increments. So the counters were contended *and* drifting.
+
+        `recordings` already holds the truth, one row per object with the size
+        that was actually verified, so the totals are derived from it here
+        instead. Set outright rather than added to, which means a run of this
+        also *repairs* whatever the old increments had drifted to.
+        """
+        async with platform_session() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE storage_destinations d
+                       SET objects_stored = t.objects,
+                           bytes_stored   = t.bytes,
+                           updated_at     = now()
+                      FROM (
+                          SELECT d2.id,
+                                 count(r.id)                          AS objects,
+                                 coalesce(sum(r.destination_size), 0) AS bytes
+                          FROM storage_destinations d2
+                          LEFT JOIN recordings r
+                                 ON r.destination_id = d2.id
+                                AND r.brand_id = d2.brand_id
+                                AND r.verified_at IS NOT NULL
+                          GROUP BY d2.id
+                      ) t
+                     WHERE d.id = t.id
+                       AND (d.objects_stored, d.bytes_stored) IS DISTINCT FROM
+                           (t.objects, t.bytes)
+                    """
+                )
+            )
+            await session.commit()
+
     async def _run_incremental_inventory(self) -> None:
         """Scan every account that is currently working.
 
@@ -186,6 +243,10 @@ class Scheduler:
             brands = (
                 (await session.execute(select(Brand).order_by(Brand.name))).scalars().all()
             )
+            # Read once for the whole summary rather than per organisation:
+            # it is the same number either way, and it is the platform reader's
+            # figure, not a company's.
+            db_total = await database_bytes(session)
 
             for brand in brands:
                 moved = (
@@ -251,6 +312,8 @@ class Scheduler:
                         {"b": brand.id},
                     )
                 ).mappings().one()
+
+                db_brand = await brand_bytes(session, brand.id)
 
                 if quiet_when_idle and not (
                     int(moved["discovered"] or 0)
@@ -364,6 +427,15 @@ class Scheduler:
                             + (f", {bad} failed" if bad else ""),
                             "Waiting to copy": f"{state['waiting']:,}",
                             "In the archive": f"{state['archived']:,} of {state['total']:,}",
+                            # This organisation's own rows. The index is the
+                            # thing that has to be complete before anything is
+                            # deleted at the source, so how fast it is growing
+                            # is worth watching -- and it is the figure that
+                            # decides when this host needs more disk.
+                            "Database": as_gb(db_brand),
+                        },
+                        platform_fields={
+                            "Database total": as_gb(db_total),
                         },
                     ),
                 )

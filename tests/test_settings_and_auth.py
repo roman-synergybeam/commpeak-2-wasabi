@@ -731,6 +731,70 @@ class TestTelegramHasTwoAudiences:
         )
         assert {chat for _t, chat, _b in posted} == {"-100org", "-100platform"}
 
+    async def test_the_platform_total_never_reaches_an_organisation(self, monkeypatch):
+        """The size of the whole database is not a company's business.
+
+        It says roughly how much data the *other* company holds, which is the
+        one thing the isolation rule exists to prevent. So it rides in
+        `platform_fields` and only the platform copy renders them.
+        """
+        from c2w.alerts.base import Alert
+
+        posted = await self._send(
+            monkeypatch,
+            {
+                "alerts.telegram_bot_token": "bot",
+                "alerts.telegram_chat_id": "-100org",
+                "alerts.telegram_platform_chat_id": "-100platform",
+                "alerts.telegram_platform_min_severity": "INFO",
+            },
+            Alert(
+                title="Sync summary",
+                body="",
+                brand_id=1,
+                brand_name="Go4Rex",
+                fields={"Database": "6.69 GB"},
+                platform_fields={"Database total": "10.79 GB"},
+            ),
+        )
+        by_chat = {chat: body for _t, chat, body in posted}
+        assert "Database total" not in by_chat["-100org"], by_chat["-100org"]
+        assert "Database total" in by_chat["-100platform"]
+        # The organisation's own figure goes to both: the platform reader needs
+        # it to make sense of the total.
+        assert "6.69 GB" in by_chat["-100org"]
+        assert "6.69 GB" in by_chat["-100platform"]
+
+    async def test_a_shared_chat_still_gets_the_platform_fields(self, monkeypatch):
+        """One chat serving both roles is the common setup.
+
+        It is posted to once, and that once must be the platform rendering --
+        otherwise configuring a single chat silently loses the platform-only
+        figures. The de-duplication drops the *second* post, and the
+        organisation copy is sent first, so this is the case that would
+        regress unnoticed.
+        """
+        from c2w.alerts.base import Alert
+
+        posted = await self._send(
+            monkeypatch,
+            {
+                "alerts.telegram_bot_token": "bot",
+                "alerts.telegram_chat_id": "-100same",
+                "alerts.telegram_platform_chat_id": "-100same",
+                "alerts.telegram_platform_min_severity": "INFO",
+            },
+            Alert(
+                title="Sync summary",
+                body="",
+                brand_id=1,
+                brand_name="Go4Rex",
+                platform_fields={"Database total": "10.79 GB"},
+            ),
+        )
+        assert len(posted) == 1, posted
+        assert "Database total" in posted[0][2], posted[0][2]
+
     async def test_one_chat_serving_both_roles_is_posted_to_once(self, monkeypatch):
         """The common setup: one chat set globally and used for both.
 

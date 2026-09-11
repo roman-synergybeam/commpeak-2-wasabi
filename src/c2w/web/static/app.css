@@ -413,3 +413,24 @@ main > .note p,
 .sso{margin-top:18px;text-align:center}
 .sso .hint{margin:0 0 10px}
 .sso .btn{margin:0 4px}
+
+/* ---- numbered pages -----------------------------------------------------
+   The kit's pager already lays this row out and already styles a numbered
+   page and an elided `.gap` -- as `button`, because its pager slices a table
+   that is whole in the page. Ours navigates: a page of 19 million calls is a
+   different request, so each number has to be a real link that survives a
+   right-click, a middle-click and a browser with no JavaScript. Hence the
+   same look applied to an `a`, which is all this adds.
+
+   The current page is a `span`, not a link, because there is nowhere to go.
+   It takes the accent wash rather than the kit's solid accent so that no
+   literal colour is needed for legible text on it -- `--accent-ink` is the
+   accent *as* an ink, not an ink for use on the accent. */
+.pager .pagebtns .pagenum{display:inline-flex;align-items:center;justify-content:center;
+  min-width:2.1em;padding:4px 8px;font:600 13px var(--sans);
+  background:var(--surface);border:1px solid var(--rule-strong);
+  border-radius:var(--radius-sm);color:var(--ink-2);text-decoration:none;
+  font-variant-numeric:tabular-nums}
+.pager .pagebtns a.pagenum:hover{background:var(--surface-2);color:var(--ink)}
+.pager .pagebtns .pagenum.here{background:var(--accent-wash);border-color:var(--accent);
+  color:var(--ink);cursor:default}

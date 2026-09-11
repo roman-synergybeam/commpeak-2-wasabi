@@ -783,11 +783,219 @@ have put 20 concurrent requests on one account -- and the punishment for that,
 as this project has already learned once, is a rate-limited 403 that looks
 exactly like a missing ACL entry.
 
-The single-process ceiling is CPU, not the network: one worker saturates about
-0.8 of a core, because verification hashes every byte in flight with SHA-256
-and that is not optional. So throughput past that point comes from more
-processes, and `c2w-worker@N` is a template for exactly this reason. Four
-processes use around 1.3 of the 4 cores here.
+The single-process ceiling is CPU, not the network. **But the reason given here
+was wrong, and it mattered.** This said a worker saturates 0.8 of a core
+"because verification hashes every byte in flight with SHA-256 and that is not
+optional". Arithmetic disproves it: at 485 objects a minute averaging 0.73 MB
+the workers were hashing 5.9 MB/s, and SHA-256 on this CPU does that in well
+under a hundredth of a core. The claim was plausible, load-bearing for the
+"add more processes" conclusion, and never checked -- and it sent a later
+attempt to reduce CPU looking at the wrong thing.
+
+Where the CPU actually went, measured with `time.process_time` around the calls:
+
+| Per object copied | CPU |
+|---|---|
+| unsealing the source credentials | 14 ms |
+| creating the source botocore client | 99 ms |
+| unsealing the destination credentials | 14 ms |
+| creating the destination botocore client | 87 ms |
+| **setup subtotal** | **~214 ms** |
+
+`_run_job` opened both clients per job and closed them again, so **over half the
+worker CPU was spent building clients identical to the ones discarded a moment
+earlier** -- for files averaging 0.73 MB, where the setup cost far exceeded the
+copy. Each object also paid for fresh TLS handshakes, because the discarded
+client took its connection pool with it.
+
+`Worker._client_for` caches them per account and per destination, keyed on
+`updated_at` so an edited credential still produces a new client. Worker CPU
+fell from 3.28 cores to 0.67 and throughput rose from 485/min to over 1,300 --
+the same change did both, because the setup was crowding out the copying.
+
+**Caching a shared client has one trap, and it bit immediately.** A cached
+client serves every concurrent transfer against that account, and
+`S3Client.__aexit__` clears the object's internal client -- so closing one the
+instant a job hit a network error made every other in-flight transfer on that
+account fail with `S3Client used outside its async context manager`, classified
+`CONFIG_ERROR` and reported with a hint about endpoint addressing that had
+nothing to do with it. Seventeen jobs failed for a reason that was never real.
+Eviction therefore only *removes* a client from the cache; `_close_retired`
+does the closing after the batch's `gather` has returned, when nothing can
+still hold it. `TestTheWorkerReusesItsS3Clients` pins this.
+
+## Where the database CPU went
+
+PostgreSQL was using four of this host's eight cores. None of it was the
+workers -- all five together used 0.82 -- and none of it was unavoidable.
+Four causes, all measured, all fixed, and none of them cost any throughput:
+
+| Query | Before | After |
+|---|---|---|
+| the queue claim, 40x per cycle | 4,216 ms | **9.8 ms** |
+| `error_class` count on the sync page | 576 ms, 1.2 GB read to return 0 rows | **0.05 ms** |
+| "which accounts have work", per worker per pass | 968 ms, 7.1 GB touched | **44 ms** |
+| dashboard totals, per organisation per 10s refresh | 11.6 GB read | cached |
+
+**The claim had no index that matched it.** Per-account claiming was added for
+throughput and the indexes were never rechecked: none of them led with
+`connection_id`. `pg_stat_user_tables` had recorded **165,591 sequential scans
+of `transfer_jobs` totalling 351 billion rows read**. Migration 0012 adds
+`(connection_id, priority, next_attempt_at) WHERE state = 'PENDING'`.
+
+**And the index alone was not enough, because of `= ANY`.** With
+`connection_id = ANY(:ids)` PostgreSQL will use an index to *find* rows but
+cannot take the `ORDER BY` from it, so it sorted five million rows with an
+external merge that spilled **210 MB to disk** -- 4,216 ms to return eight
+rows. `claim_batch` now emits plain equality when there is exactly one account,
+which is the case every worker uses. **A bare `SELECT` with `= :id` measured
+8 ms and looked fine**; the fault only appears in the array form, so the first
+measurement exonerated the query it was not actually running. Measure the
+statement the code sends, not a paraphrase of it.
+
+**`_connections_with_work` had a docstring asserting it was cheap.** It said
+"it is an index scan over PENDING and there are eight accounts"; it was
+`GROUP BY connection_id ORDER BY count(*)` over nine million rows, five times a
+minute per worker. Written by inspection rather than measurement, which is how
+it survived review. It is an `EXISTS` probe per account now, and fairness is a
+rotation rather than a count -- see `TestTheClaimSpreadsAcrossAccounts`, whose
+"fewest queued first" assertion was replaced by the guarantee it existed to
+protect.
+
+**Autovacuum's defaults are wrong for these tables.** Every recording is
+UPDATEd several times through its state machine, so `recordings_brand_1` held
+**8,340,617 dead tuples against 7,620,918 live**. The cost is not disk: a
+sequential scan reads the bloat too, and a stale visibility map stops the
+planner using indexes that would otherwise serve. Migration 0013 sets 2% scale
+factors with no cost delay on every partition, and both partition-creation
+sites apply the same so a new organisation is not born with the defaults.
+
+**Exact per-state counts over millions of rows cannot be indexed away.** An
+index-only scan was measured and is *worse* (a bitmap heap scan touching 32 GB);
+the sequential scan is the right plan. So the fix is frequency, not shape:
+`ui.stats_cache_seconds` caches the three whole-table aggregates behind the
+dashboard, the live figures beside them stay uncached, and the panel says how
+old the totals are. A ten-second refresh asking per organisation was reading
+23 GB every ten seconds.
+
+**One lesson about the method, not the code.** The first instinct was that
+CPU meant the workers, and the first lever considered was running fewer of
+them -- which would have traded throughput for CPU and fixed nothing. Every
+gain here came from `pg_stat_user_tables`, `pg_stat_activity` sampled as the
+role that can actually see other backends' queries, and `EXPLAIN (ANALYZE,
+BUFFERS)` on the real statement. Sampling `pg_stat_activity` as `c2w` shows
+*nothing* for other roles' backends, which briefly read as "no queries are
+running" while four cores were busy.
+
+## What a platform administrator sees across organisations
+
+The dashboard, the sync page and the call search span **every** organisation for
+`SUPER_ADMIN`, and only for `SUPER_ADMIN`. "How is the platform doing" is the
+question that role exists to answer, and answering it by switching organisation
+once per company is not an answer.
+
+`_readable_brand_ids` is the single place that decides, and it is the thing to
+keep single. Everyone else gets `[active_brand.id]` -- one element, from the
+same `_brand_scope` the rest of the request already uses -- so a route that
+widens its view has to go through this function to do it.
+
+**The scope is moved per organisation, never switched off.** `_scoped_to` sets
+`c2w.brand_id` to one brand, yields, and restores the previous value in a
+`finally`; the merge happens in Python over the per-brand answers. The
+alternative -- read everything on an unscoped session and filter in the query --
+would make RLS advisory for precisely the role most able to do damage with it,
+and this is a user request, not a job, so there is no reason to reach for the
+BYPASSRLS role. The restore is load-bearing: the caller goes on to read settings
+for the organisation the operator actually selected. Same pattern, same reason,
+as `_organisations_pane` and `record_admin_event`.
+
+Two things the merge gets right and a naive one does not:
+
+- **`progress_pct` is recomputed from the summed totals, not averaged.**
+  Averaging percentages weights an organisation with a hundred recordings the
+  same as one with a million: 50% of 1,000,000 and 100% of 100 would report
+  75%, when the true figure is 50%. `test_merged_progress_is_recomputed_not_averaged`
+  pins it with exactly those numbers.
+- **A single organisation is passed straight through**, by identity. One brand
+  is the overwhelmingly common case, and a merge that runs anyway is a merge
+  that can change one organisation's numbers.
+
+Search cannot merge a page, so `_search_across` asks **each** organisation for
+`offset + limit` rows, merges, re-sorts on the requested field and slices. Asking
+each for `limit` and concatenating would be wrong on page two onwards -- the
+second organisation's rows for offset 50 are not the platform's rows for offset
+50. The cost is per-brand work proportional to the page depth, which is
+acceptable for two organisations and is the reason the deep pages stay honest.
+
+The per-organisation breakdown on the dashboard, the Organisation column on the
+sync page and the Organisation column on the calls list appear only when more
+than one organisation is in view, so a brand-scoped admin's page is
+byte-for-byte what it was. The calls list needs that column and not just the
+rows: "SIP account" names a PBX, not the company that owns it, so two
+companies' calls interleaved without it are unattributable.
+
+**Widening a list means widening what the list links to.** Missing this was a
+real bug: with every organisation's calls on the page, `/calls/9526` answered
+`call not found` for a call that plainly existed, because the detail route ran
+under the selected organisation's scope. A 404 that means "wrong scope" reads
+as data loss. `_scoped_to_owner` is the fix and the pattern -- it probes the
+readable organisations for the one holding the row and runs the body under that
+scope, so for every other role it is a no-op and the 404 still stands.
+
+It applies to **every** row-addressed route, not only the page you noticed:
+`/calls/<id>` and both media routes were affected. The media routes need the
+*whole* body inside the scope rather than just the lookup, because the presign
+uses that organisation's archive credentials and the audit row `playback_url`
+writes is subject to the RLS `WITH CHECK` -- under the wrong scope the insert is
+rejected and the record of a playback that really happened is lost.
+
+**The CSV export is deliberately not widened.** Go4Rex and InterMagnum are
+separate companies and one file holding both is the thing the isolation rule
+exists to prevent, so the export stays scoped to the selected organisation --
+and says so next to the button, because an export that silently returns fewer
+rows than the page just showed is its own trap.
+
+## The two alert audiences, and the size figures
+
+An alert has two readers and one of them is entitled to less. The organisation
+chat sees that company's figures; the platform chat sees everything, attributed.
+`Alert.platform_fields` carries the lines only the platform reader gets, and
+`as_text(for_platform=True)` renders them -- one alert, two renderings, rather
+than two alerts to keep in step.
+
+**The size of the whole database is a platform figure, not a company's.** It
+says roughly how much data the *other* company holds, so it rides in
+`platform_fields`; each organisation's own footprint is an ordinary field and
+goes to both, because the platform reader needs it to make sense of the total.
+Slack has one webhook per organisation and renders `fields` only, so it needs
+nothing added.
+
+**A single chat serving both roles must get the platform rendering.** This was
+a real bug in the first cut, caught by the test written for it: the
+de-duplication drops the *second* post and the organisation copy goes first, so
+one chat configured globally -- the commonest setup there is -- received the
+organisation rendering and silently lost every platform-only field. Whoever
+configures one chat for both roles *is* the platform reader; the fields are
+withheld from a separate, company-facing chat, which is the case the isolation
+rule is actually about.
+
+`c2w.db.size` holds both queries, because the sync summary and the Alerts test
+button both need them and a test message shaped nothing like a real one proves
+only the token and the chat id. Two details in there are load-bearing:
+
+- **Partitions are found by their bound, not their name.** `recordings_brand_2`
+  is this codebase's convention; the bound is what decides which rows land
+  there.
+- **The bound text is normalised to digits.** PostgreSQL renders a bigint bound
+  quoted -- `FOR VALUES IN ('2')` -- and that rendering is not a documented
+  contract. Comparing the literal string matched nothing and reported
+  `0.00 GB` for every organisation, which is the kind of wrong that looks like
+  a fact.
+
+The whole database is larger than the sum of the organisations -- the transfer
+queue, the change log and every unpartitioned table are in it too, about a
+fifth of the total on this estate -- so the two figures will never add up, and
+that is correct rather than a discrepancy to chase.
 
 ## Out of scope for v1
 

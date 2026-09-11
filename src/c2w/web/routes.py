@@ -11,7 +11,10 @@ bookmark or paste to a colleague -- which is most of what a CDR search is for.
 
 from __future__ import annotations
 
+import contextlib
 import re
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Final
@@ -26,7 +29,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import RowMapping, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from c2w.alerts.base import Alert, Severity, dispatch
@@ -44,6 +47,9 @@ from c2w.api.deps import (
     selectable_brands,
 )
 from c2w.api.v1.cdrs import (
+    COUNT_CAP,
+    MAX_MERGE_ROWS,
+    CdrPage,
     CdrQuery,
     SortField,
     count_cdrs,
@@ -75,6 +81,7 @@ from c2w.auth.local import (
 )
 from c2w.auth.rbac import Permission, permissions_for
 from c2w.crypto import CryptoError, generate_data_key
+from c2w.db.base import PARTITION_AUTOVACUUM
 from c2w.db.models.auth import AuthSource, Role, User, UserBrand
 from c2w.db.models.core import Brand, CommPeakConnection, StorageDestination, Tenant
 from c2w.logging import get_logger
@@ -737,17 +744,154 @@ async def switch_brand(
 # ------------------------------------------------------------------- dashboard
 
 
+#: Which organisations a request may read across.
+#:
+#: One, normally: RLS is keyed to a single `c2w.brand_id` and that is the
+#: control, not a convenience. A **platform administrator** is the exception,
+#: because "every organisation" is the job that role exists for -- and because
+#: `brands.manage` is held by `SUPER_ADMIN` alone, so this cannot widen anyone
+#: else's view.
+#:
+#: The scope is still moved per organisation rather than switched off. Reading
+#: across brands by handing the request an unscoped session would make RLS
+#: advisory for the one role most able to do damage with it; a loop keeps the
+#: database as the thing that decides, and costs one round trip per
+#: organisation on a page that renders a handful of them.
+async def _readable_brand_ids(
+    request: Request, session: AsyncSession, user: User
+) -> list[int]:
+    if not user.is_super_admin:
+        _, active = await _brand_scope(request, session, user)
+        return [active.id] if active else []
+    return [
+        int(b)
+        for b in (
+            await session.execute(text("SELECT id FROM brands WHERE is_active ORDER BY id"))
+        ).scalars().all()
+    ]
+
+
+@contextlib.asynccontextmanager
+async def _scoped_to(session: AsyncSession, brand_id: int) -> AsyncIterator[None]:
+    """Run a block with the RLS scope set to one organisation, then restore it.
+
+    `set_config(..., true)` is transaction-local, so the restore matters only
+    within this transaction -- but it matters, because the caller usually goes
+    on to read something for the brand the operator actually selected.
+    """
+    was = (
+        await session.execute(text("SELECT current_setting('c2w.brand_id', true)"))
+    ).scalar_one() or ""
+    await session.execute(
+        text("SELECT set_config('c2w.brand_id', :b, true)"), {"b": str(brand_id)}
+    )
+    try:
+        yield
+    finally:
+        await session.execute(
+            text("SELECT set_config('c2w.brand_id', :b, true)"), {"b": was}
+        )
+
+
+def _merge_dashboard_stats(parts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Add up one organisation's headline numbers per organisation.
+
+    Written out rather than looped over the keys because the right way to
+    combine them differs: counts add, the two state maps add per key,
+    `progress_pct` has to be recomputed from the totals -- averaging
+    percentages would weight a organisation with 300 recordings the same as one
+    with a million -- and `recent_runs` is a list that has to be re-sorted and
+    re-trimmed.
+    """
+    if not parts:
+        return {
+            "recording_states": {}, "job_states": {}, "recordings_total": 0,
+            "recordings_today": 0, "calls_today": 0, "bytes_source": 0,
+            "bytes_archived": 0, "orphans": 0, "archived": 0, "pending": 0,
+            "failed": 0, "progress_pct": 0.0, "recent_runs": [],
+            "counted_at": None,
+        }
+    if len(parts) == 1:
+        return parts[0]
+
+    merged: dict[str, Any] = {"recording_states": {}, "job_states": {}}
+    for key in (
+        "recordings_total", "recordings_today", "calls_today", "bytes_source",
+        "bytes_archived", "orphans", "archived", "pending", "failed",
+    ):
+        merged[key] = sum(int(p.get(key) or 0) for p in parts)
+    for key in ("recording_states", "job_states"):
+        for part in parts:
+            for name, count in (part.get(key) or {}).items():
+                merged[key][name] = merged[key].get(name, 0) + int(count)
+
+    total = merged["recordings_total"]
+    merged["progress_pct"] = round(100 * merged["archived"] / total, 1) if total else 0.0
+
+    runs = [run for part in parts for run in (part.get("recent_runs") or [])]
+    runs.sort(key=lambda r: (r.get("started_at") is not None, r.get("started_at")), reverse=True)
+    merged["recent_runs"] = runs[:20]
+
+    # The *oldest* of the organisations' count times, not the newest: the page
+    # says "as of", and quoting the freshest would understate how stale the
+    # slowest-refreshing organisation's numbers are.
+    stamps = [p.get("counted_at") for p in parts if p.get("counted_at")]
+    merged["counted_at"] = min(stamps) if stamps else None
+    return merged
+
+
 #: How often the dashboard's figures refresh, in seconds.
 #:
-#: Ten is short enough that a running backfill visibly moves and long enough
-#: that a page left open all day is not a load problem: the fragment is three
-#: aggregate queries, and it replaces only the numbers rather than the page.
+#: Ten is short enough that a running backfill visibly moves. It is only
+#: affordable because the three whole-table counts behind it are cached --
+#: `ui.stats_cache_seconds` -- so a page left open all day costs a handful of
+#: indexed queries per refresh rather than twelve gigabytes of scanning per
+#: organisation. Shortening this without checking that setting is how the
+#: database server ended up using three of eight cores.
 _DASHBOARD_REFRESH_SECONDS: Final[int] = 10
 
 
-async def _dashboard_live_context(session: AsyncSession) -> dict[str, Any]:
-    """The figures the dashboard refreshes, and nothing else."""
-    stats = await dashboard_stats(session)
+async def _dashboard_live_context(
+    request: Request, session: AsyncSession, user: User
+) -> dict[str, Any]:
+    """The figures the dashboard refreshes, and nothing else.
+
+    A platform administrator sees every organisation added together, with the
+    per-organisation split beside it, because "how is the platform doing" is
+    that role's question and switching brands to answer it four times is not
+    an answer. Everyone else sees exactly their own organisation, unchanged.
+    """
+    brand_ids = await _readable_brand_ids(request, session, user)
+    parts: list[dict[str, Any]] = []
+    per_brand: list[dict[str, Any]] = []
+    names: dict[int, str] = dict(
+        (
+            await session.execute(text("SELECT id, name FROM brands"))
+        ).all()  # type: ignore[arg-type]
+    )
+    # The three whole-table counts inside are cached for this long. The
+    # dashboard refreshes every ten seconds and a platform administrator asks
+    # once per organisation, so without this the page recounts twelve gigabytes
+    # per organisation every ten seconds -- which was most of the database
+    # server's load. Zero means recount every time, for anyone who wants that.
+    cache_seconds = await settings_service.get_int(session, "ui.stats_cache_seconds")
+    for brand_id in brand_ids:
+        async with _scoped_to(session, brand_id):
+            one = await dashboard_stats(session, cache_seconds=cache_seconds)
+        parts.append(one)
+        per_brand.append(
+            {
+                "id": brand_id,
+                "name": names.get(brand_id, f"organisation {brand_id}"),
+                "recordings_total": one["recordings_total"],
+                "archived": one["archived"],
+                "pending": one["pending"],
+                "failed": one["failed"],
+                "bytes_archived": one["bytes_archived"],
+                "progress_pct": one["progress_pct"],
+            }
+        )
+    stats = _merge_dashboard_stats(parts)
     order = [
         "AVAILABLE",
         "VERIFIED",
@@ -763,6 +907,8 @@ async def _dashboard_live_context(session: AsyncSession) -> dict[str, Any]:
     return {
         "stats": stats,
         "state_rows": [(name, known[name]) for name in order if name in known],
+        # Only worth showing when there is more than one to compare.
+        "per_brand": per_brand if len(per_brand) > 1 else [],
         # Rendered rather than done in the browser, so it says when the server
         # produced these numbers -- which is the question a stale-looking
         # dashboard raises -- and not merely when the tab last drew.
@@ -785,7 +931,7 @@ async def dashboard_live(
     return templates.TemplateResponse(
         request,
         "_dashboard_live.html",
-        await _dashboard_live_context(session),
+        await _dashboard_live_context(request, session, user),
     )
 
 
@@ -807,7 +953,7 @@ async def dashboard(
             "dashboard",
             has_destination=bool(destinations),
             transfers_enabled=transfers_enabled,
-            **await _dashboard_live_context(session),
+            **await _dashboard_live_context(request, session, user),
         ),
     )
 
@@ -925,18 +1071,159 @@ def _fragment_response(
     return response
 
 
+#: Probes for "which organisation holds this row". Module constants rather
+#: than an argument built by a caller, so nothing shapes this SQL at runtime.
+_CALL_OWNER = "SELECT 1 FROM cdrs WHERE id = :id"
+_RECORDING_OWNER = "SELECT 1 FROM recordings WHERE id = :id"
+
+
+@contextlib.asynccontextmanager
+async def _scoped_to_owner(
+    request: Request,
+    session: AsyncSession,
+    user: User,
+    probe: str,
+    row_id: int,
+    missing: str,
+) -> AsyncIterator[None]:
+    """Run the body under the scope of whichever readable organisation holds a row.
+
+    The list and the thing the list links to have to agree about what exists.
+    Once a platform administrator's calls page shows every organisation, a row
+    belonging to the organisation that is not currently selected still opens
+    from that page -- and it answered "call not found", which reads as data
+    loss rather than as a scope. The same applied to playing the recording
+    attached to it.
+
+    For every other role this changes nothing: `_readable_brand_ids` returns
+    the one selected organisation, so the probe either finds the row under
+    their own scope or the 404 stands. The isolation rule is untouched -- what
+    a role may read is still decided in one place, and the body still runs
+    under an RLS scope rather than on an unscoped session.
+    """
+    for brand_id in await _readable_brand_ids(request, session, user):
+        async with _scoped_to(session, brand_id):
+            if (await session.execute(text(probe), {"id": row_id})).first() is not None:
+                yield
+                return
+    raise HTTPException(status.HTTP_404_NOT_FOUND, missing)
+
+
+async def _search_across(
+    session: AsyncSession, query: CdrQuery, brand_ids: list[int]
+) -> tuple[CdrPage, int]:
+    """Run a CDR search across several organisations and merge the pages.
+
+    One query per organisation, each under its own RLS scope, then merged and
+    re-sorted here. Not one query with the brand filter widened, because that
+    would mean giving the request a session that can see across brands -- and
+    RLS being the control rather than a convenience is the thing this platform
+    is built on. A loop keeps the database deciding.
+
+    Each organisation is asked for ``offset + limit`` rows rather than
+    ``limit``: the page the operator wants is a slice of the merged order, and
+    a row on page one for one company can sort behind thirty rows from
+    another. Asking each for only ``limit`` would drop rows that belong on the
+    page.
+
+    ``offset + limit`` is exactly enough and not a guess: at most ``offset`` of
+    an organisation's rows can sort before the window, so its next row lands at
+    merged position ``offset + limit`` or later -- outside the page. What does
+    bound this is how many rows one organisation may be asked for, and that cap
+    is `MAX_MERGE_ROWS`, not `MAX_PAGE_SIZE`. Using the response cap here
+    limited the over-read to 200 rows and so dropped rows from page three
+    onwards, silently and only when more than one organisation was in view.
+    """
+    if len(brand_ids) == 1:
+        async with _scoped_to(session, brand_ids[0]):
+            page = await search_cdrs(session, query)
+            page.total = await count_cdrs(session, query)
+            page.count_capped = page.total >= COUNT_CAP
+            return page, page.total
+
+    want = query.offset + query.limit
+    deep = replace(query, limit=min(want, MAX_MERGE_ROWS), offset=0)
+    names: dict[int, str] = dict(
+        (await session.execute(text("SELECT id, name FROM brands"))).all()  # type: ignore[arg-type]
+    )
+    rows: list[dict[str, Any]] = []
+    total = 0
+    # Whether the total is exact has to be decided per organisation. Each count
+    # stops at COUNT_CAP, so summing them can pass the cap with nothing having
+    # saturated -- nine thousand plus two thousand is eleven thousand and every
+    # row of it was counted. Testing the sum against the cap would report a
+    # floor where there is an exact answer.
+    capped = False
+    for brand_id in brand_ids:
+        async with _scoped_to(session, brand_id):
+            part = await search_cdrs(session, deep, cap=MAX_MERGE_ROWS)
+            part_total = await count_cdrs(session, query)
+        capped = capped or part_total >= COUNT_CAP
+        total += part_total
+        # Which company each row belongs to. Two organisations' calls
+        # interleaved with nothing saying which is worse than not showing
+        # them: the list is read down, and the SIP account column names a
+        # PBX, not the company that owns it. The name is stamped here because
+        # this loop is the only place that knows the answer -- the row itself
+        # carries `brand_id` only implicitly, through the scope it was read
+        # under.
+        for row in part.rows:
+            row["brand_name"] = names.get(brand_id, "")
+        rows.extend(part.rows)
+
+    # Re-sorted on the field that was asked for, since each organisation only
+    # ordered its own rows. `started_at` is the default and the only one every
+    # row is guaranteed to carry.
+    key = {
+        SortField.STARTED: "start_at",
+        SortField.DURATION: "call_duration",
+    }.get(query.sort, "start_at")
+    rows.sort(
+        key=lambda r: (r.get(key) is not None, r.get(key)),
+        reverse=query.descending,
+    )
+    window = rows[query.offset : query.offset + query.limit]
+    return (
+        CdrPage(
+            rows=window,
+            total=total,
+            limit=query.limit,
+            offset=query.offset,
+            # Truncated when the over-read could not cover the requested
+            # depth -- not when the merged list happens to be long, which it
+            # always is with several organisations and which reported "too deep
+            # to page further" on page one.
+            truncated=want > MAX_MERGE_ROWS,
+            count_capped=capped,
+        ),
+        total,
+    )
+
+
 async def _calls_context(
-    request: Request, session: AsyncSession, query: CdrQuery
+    request: Request, session: AsyncSession, query: CdrQuery, user: User | None = None
 ) -> _QueryParams:
-    page = await search_cdrs(session, query)
-    total = await count_cdrs(session, query)
+    brand_ids = (
+        await _readable_brand_ids(request, session, user) if user is not None else []
+    )
+    if not brand_ids:
+        page = await search_cdrs(session, query)
+        total = await count_cdrs(session, query)
+        page.total = total
+        page.count_capped = total >= COUNT_CAP
+    else:
+        page, total = await _search_across(session, query, brand_ids)
     any_cdrs = (await session.execute(text("SELECT EXISTS (SELECT 1 FROM cdrs)"))).scalar_one()
     connections = (
         (await session.execute(select(CommPeakConnection).order_by(CommPeakConnection.name)))
         .scalars()
         .all()
     )
-    count_label = f"{total:,}+ calls" if total >= 10_000 else f"{total:,} calls"
+    # `page.count_capped` is already set by the search paths above, which are
+    # the only ones that know whether any single count saturated. The page list
+    # needs it, because a page count derived from a floor would present a guess
+    # as the end of the list.
+    count_label = f"{total:,}+ calls" if page.count_capped else f"{total:,} calls"
     # The chip row: which slice of the list you are looking at. Server-rendered
     # links rather than client-side filtering, because at these row counts the
     # server has to do the paging anyway.
@@ -954,6 +1241,10 @@ async def _calls_context(
         "options": await filter_options(session),
         "any_cdrs": any_cdrs,
         "count_label": count_label,
+        # Whether this list spans organisations. Only a platform administrator
+        # ever sees more than one, and the page has to say so where it matters
+        # -- the export is one organisation by design.
+        "cross_brand": len(brand_ids) > 1,
         "media_chips": media_chips,
         "query_string": urlencode(
             {k: v for k, v in request.query_params.items() if v}, doseq=True
@@ -993,7 +1284,7 @@ async def calls(
         country=country, queue=queue, call_type=call_type,
         sort=sort, desc=desc, limit=limit, offset=offset,
     )
-    context = await _calls_context(request, session, query)
+    context = await _calls_context(request, session, query, user)
     return templates.TemplateResponse(
         request, "calls.html", await _shell(request, session, user, "calls", **context)
     )
@@ -1032,7 +1323,7 @@ async def calls_rows(
         country=country, queue=queue, call_type=call_type,
         sort=sort, desc=desc, limit=limit, offset=offset,
     )
-    context = await _calls_context(request, session, query)
+    context = await _calls_context(request, session, query, user)
     return _fragment_response(
         request,
         "_calls_rows.html",
@@ -1142,7 +1433,12 @@ async def export_calls(
 async def call_detail(
     request: Request, user: CurrentUser, session: ScopedSession, cdr_id: int
 ) -> Response:
-    call = await get_call(session, cdr_id)
+    # Read the call under its own organisation's scope; render the shell after
+    # it, under the operator's selected organisation, so the header and the
+    # brand switcher still describe what the operator chose rather than
+    # whichever organisation happened to own this call.
+    async with _scoped_to_owner(request, session, user, _CALL_OWNER, cdr_id, "call not found"):
+        call = await get_call(session, cdr_id)
     if call is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "call not found")
     return templates.TemplateResponse(
@@ -1153,8 +1449,56 @@ async def call_detail(
 # ------------------------------------------------------------------------ sync
 
 
-async def _sync_context(session: AsyncSession) -> _QueryParams:
-    jobs = await queue.queue_depth(session)
+async def _sync_context(
+    request: Request, session: AsyncSession, user: User
+) -> _QueryParams:
+    """What the sync page shows.
+
+    Across every organisation for a platform administrator: the accounts, the
+    queue depth and the failure causes are all things that role is responsible
+    for as a whole, and there is no reading of "why is nothing copying" that is
+    improved by seeing five of the eight accounts.
+
+    Nothing here filters by brand itself -- RLS does -- so the same queries
+    give the platform-wide answer simply by being run under each scope and
+    added up.
+    """
+    brand_ids = await _readable_brand_ids(request, session, user)
+    jobs: dict[str, int] = {}
+    rows: list[dict[str, Any]] = []
+    causes: dict[str, int] = {}
+    brand_of: dict[int, str] = {}
+    names: dict[int, str] = dict(
+        (await session.execute(text("SELECT id, name FROM brands"))).all()  # type: ignore[arg-type]
+    )
+
+    for brand_id in brand_ids:
+        async with _scoped_to(session, brand_id):
+            for state, count in (await queue.queue_depth(session)).items():
+                jobs[state] = jobs.get(state, 0) + count
+            got, hints = await _sync_rows(session)
+        for row in got:
+            brand_of[row["id"]] = names.get(brand_id, "")
+            rows.append(row)
+        for cause, count in hints.items():
+            causes[cause] = causes.get(cause, 0) + count
+
+    return {
+        "jobs": jobs,
+        "per_connection": rows,
+        # The organisation each account belongs to, so a platform-wide list of
+        # eight accounts from two companies is readable.
+        "brand_of": brand_of,
+        "show_brand": len(brand_ids) > 1,
+        "error_classes": [
+            (cause, count, _error_hint(cause))
+            for cause, count in sorted(causes.items(), key=lambda kv: -kv[1])
+        ],
+    }
+
+
+async def _sync_rows(session: AsyncSession) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """One organisation's accounts and failure causes, under the current scope."""
     rows = (
         await session.execute(
             text(
@@ -1188,15 +1532,15 @@ async def _sync_context(session: AsyncSession) -> _QueryParams:
             )
         )
     ).all()
-    hints = []
-    for cause, count in causes:
-        try:
-            hint = ErrorClass(cause).__class__ and _cause_hint(ErrorClass(cause))
-        except ValueError:
-            hint = ""
-        hints.append((cause, count, hint))
+    return [dict(r) for r in rows], {cause: count for cause, count in causes}
 
-    return {"jobs": jobs, "per_connection": [dict(r) for r in rows], "error_classes": hints}
+
+def _error_hint(cause: str) -> str:
+    """The operator-facing next step for a failure class, by name."""
+    try:
+        return _cause_hint(ErrorClass(cause))
+    except ValueError:
+        return ""
 
 
 def _cause_hint(cause: ErrorClass) -> str:
@@ -1218,7 +1562,7 @@ def _cause_hint(cause: ErrorClass) -> str:
 
 @router.get("/sync", response_class=HTMLResponse)
 async def sync_page(request: Request, user: CurrentUser, session: ScopedSession) -> Response:
-    context = await _sync_context(session)
+    context = await _sync_context(request, session, user)
     return templates.TemplateResponse(
         request, "sync.html", await _shell(request, session, user, "sync", **context)
     )
@@ -1227,14 +1571,16 @@ async def sync_page(request: Request, user: CurrentUser, session: ScopedSession)
 @router.get("/sync/panel", response_class=HTMLResponse)
 async def sync_panel(request: Request, user: CurrentUser, session: ScopedSession) -> Response:
     """The panel fragment, for a browser without JavaScript."""
-    context = await _sync_context(session)
+    context = await _sync_context(request, session, user)
     return templates.TemplateResponse(
         request, "_sync_panel.html", {**context, "request": request}
     )
 
 
 @router.get("/sync/status.json")
-async def sync_status(user: CurrentUser, session: ScopedSession) -> Response:
+async def sync_status(
+    request: Request, user: CurrentUser, session: ScopedSession
+) -> Response:
     """Counters for the kit's poll.js.
 
     ``active`` is what stops the page polling a system that is doing nothing:
@@ -1242,8 +1588,31 @@ async def sync_status(user: CurrentUser, session: ScopedSession) -> Response:
     treats the transition to inactive as completion and reloads once -- which
     is the honest way to show a dozen rows that have all changed.
     """
-    jobs = await queue.queue_depth(session)
-    rows = (
+    # Across every organisation for a platform administrator, so the polled
+    # counters agree with the page they are updating. Two views of the same
+    # thing disagreeing is worse than either being wrong on its own.
+    brand_ids = await _readable_brand_ids(request, session, user)
+    jobs: dict[str, int] = {}
+    rows: list[Any] = []
+    for brand_id in brand_ids:
+        async with _scoped_to(session, brand_id):
+            for state, count in (await queue.queue_depth(session)).items():
+                jobs[state] = jobs.get(state, 0) + count
+            rows.extend(await _sync_status_rows(session))
+
+    in_flight = jobs.get("PENDING", 0) + jobs.get("RUNNING", 0)
+    return JSONResponse(
+        {
+            "active": in_flight > 0,
+            "jobs": jobs,
+            "connections": [dict(r) for r in rows],
+        }
+    )
+
+
+async def _sync_status_rows(session: AsyncSession) -> Sequence[RowMapping]:
+    """Per-account counters under the current scope."""
+    return (
         await session.execute(
             text(
                 """
@@ -1264,15 +1633,6 @@ async def sync_status(user: CurrentUser, session: ScopedSession) -> Response:
             )
         )
     ).mappings().all()
-
-    in_flight = jobs.get("PENDING", 0) + jobs.get("RUNNING", 0)
-    return JSONResponse(
-        {
-            "active": in_flight > 0,
-            "jobs": jobs,
-            "connections": [dict(r) for r in rows],
-        }
-    )
 
 
 # ----------------------------------------------------------------------- admin
@@ -3451,6 +3811,13 @@ async def add_organisation(
                 f"PARTITION OF {table} FOR VALUES IN ({brand.id})"
             )
         )
+        # Or the new organisation inherits the defaults that buried the first
+        # two in dead tuples. See `PARTITION_AUTOVACUUM`.
+        await session.execute(
+            text(
+                f"ALTER TABLE {table}_brand_{brand.id} SET ({PARTITION_AUTOVACUUM})"
+            )
+        )
     await session.execute(
         text(
             "INSERT INTO retention_policies (brand_id) VALUES (:b) "
@@ -4161,28 +4528,36 @@ async def _media_redirect(
     from c2w.db.models.core import Recording
     from c2w.media.sdr import MediaAction, MediaDenied, playback_url
 
-    row = await get_recording(session, recording_id)
-    if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "recording not found")
-    recording = (
-        await session.execute(select(Recording).where(Recording.id == recording_id))
-    ).scalar_one()
+    # The whole body runs under the owning organisation's scope, not just the
+    # lookup. The archive credentials this presigns with belong to that
+    # organisation, and so does the audit row `playback_url` writes -- and an
+    # audit insert with the wrong scope is refused by the RLS check, silently
+    # losing the record of a playback that happened.
+    async with _scoped_to_owner(
+        request, session, user, _RECORDING_OWNER, recording_id, "recording not found"
+    ):
+        row = await get_recording(session, recording_id)
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "recording not found")
+        recording = (
+            await session.execute(select(Recording).where(Recording.id == recording_id))
+        ).scalar_one()
 
-    try:
-        access = await playback_url(
-            session,
-            user,
-            recording,
-            action=MediaAction.DOWNLOAD if download else MediaAction.PLAY,
-            ip=client_ip(request),
-            user_agent=request.headers.get("user-agent"),
-        )
-    except MediaDenied as denied:
-        code = (
-            status.HTTP_409_CONFLICT
-            if denied.reason in ("still_syncing", "no_archive_copy")
-            else status.HTTP_403_FORBIDDEN
-        )
-        raise HTTPException(code, denied.message) from denied
+        try:
+            access = await playback_url(
+                session,
+                user,
+                recording,
+                action=MediaAction.DOWNLOAD if download else MediaAction.PLAY,
+                ip=client_ip(request),
+                user_agent=request.headers.get("user-agent"),
+            )
+        except MediaDenied as denied:
+            code = (
+                status.HTTP_409_CONFLICT
+                if denied.reason in ("still_syncing", "no_archive_copy")
+                else status.HTTP_403_FORBIDDEN
+            )
+            raise HTTPException(code, denied.message) from denied
 
     return RedirectResponse(access.url or "", status_code=status.HTTP_307_TEMPORARY_REDIRECT)

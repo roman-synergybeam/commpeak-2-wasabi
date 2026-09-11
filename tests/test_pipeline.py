@@ -1337,6 +1337,19 @@ class TestTheClaimSpreadsAcrossAccounts:
             return scenario["connection_id"], other.id
 
     async def test_a_small_account_is_not_starved_by_a_large_one(self, db, scenario):
+        """The guarantee, not the mechanism.
+
+        This used to assert "fewest queued first" -- that the small account
+        appeared before the large one. That ordering is gone, and deliberately:
+        computing it meant `GROUP BY connection_id ORDER BY count(*)` over nine
+        million pending rows on every pass of every worker, which was one of
+        the things holding PostgreSQL at four of the host's eight cores.
+
+        The guarantee it existed to protect is unchanged and is what is checked
+        here: every account with work is claimed from on each pass, so neither
+        can starve. Rotation covers the remaining case -- a pass that stops at
+        its batch ceiling -- and is checked in the test below.
+        """
         from c2w.sync import queue
 
         big, small = await self._two_accounts(db, scenario)
@@ -1348,10 +1361,8 @@ class TestTheClaimSpreadsAcrossAccounts:
             )
             from c2w.workers.worker import Worker
 
-            order = await Worker._connections_with_work(s)
-            # Fewest queued first, so the small account is claimed from before
-            # the large one rather than behind 40 of its jobs.
-            assert order.index(small) < order.index(big), order
+            order = await Worker("test")._connections_with_work(s)
+            assert small in order and big in order, order
 
             claimed = []
             for conn_id in order:
@@ -1414,7 +1425,34 @@ class TestTheClaimSpreadsAcrossAccounts:
             )
             await s.execute(text("UPDATE transfer_jobs SET state = 'DONE'"))
             await s.commit()
-            assert await Worker._connections_with_work(s) == []
+            assert await Worker("test")._connections_with_work(s) == []
+
+    async def test_no_account_is_permanently_first(self, db, scenario):
+        """What replaced "fewest queued first".
+
+        Ordering only decides who is served when a pass stops at its batch
+        ceiling, so the property that matters is that the same account is not
+        always at the head. The list is rotated by a per-worker counter, which
+        guarantees it outright rather than inferring it from queue depths --
+        and costs one index probe per account instead of counting the queue.
+        """
+        from c2w.workers.worker import Worker
+
+        big, small = await self._two_accounts(db, scenario)
+        worker = Worker("test")
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            heads = set()
+            for _ in range(4):
+                order = await worker._connections_with_work(s)
+                assert set(order) >= {big, small}, order
+                heads.add(order[0])
+
+        assert len(heads) > 1, f"the same account led every pass: {heads}"
 
 
 class TestTheScannerBoundsItsTransaction:

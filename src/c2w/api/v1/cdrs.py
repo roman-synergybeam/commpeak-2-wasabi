@@ -18,6 +18,8 @@ correlated recording still appears -- a missing join must never hide a call.
 from __future__ import annotations
 
 import enum
+import math
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -28,11 +30,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from c2w.commpeak.correlate import normalise_msisdn
 
 __all__ = [
+    "COUNT_CAP",
+    "MAX_MERGE_ROWS",
+    "MAX_OFFSET",
+    "MAX_PAGE_SIZE",
     "CdrPage",
     "CdrQuery",
     "SortField",
     "dashboard_stats",
     "filter_options",
+    "forget_cached_stats",
     "get_call",
     "search_cdrs",
 ]
@@ -41,6 +48,23 @@ MAX_PAGE_SIZE = 200
 #: Beyond this, offset paging is too slow to be useful; the UI narrows the
 #: filters instead of walking further.
 MAX_OFFSET = 50_000
+#: How many rows a *merge* may pull from one organisation.
+#:
+#: Reading a page across several organisations means asking each for
+#: ``offset + limit`` rows and slicing the merged order (see `_search_across`),
+#: which needs more rows than a client is ever handed. `MAX_PAGE_SIZE` is a cap
+#: on a response, not on an internal read, and using it for both silently
+#: dropped rows from page three onwards. At 100 rows a page this is exact
+#: through page fifty; past that the page is marked truncated rather than
+#: quietly wrong.
+MAX_MERGE_ROWS = 5_000
+#: Where the match count stops being exact.
+#:
+#: `count_cdrs` counts to here and no further, so a total at this value means
+#: "at least this many". That is why the page list stops offering a jump to the
+#: last page once it is reached -- there is no known last page, and a numbered
+#: link to one would be a guess presented as a fact.
+COUNT_CAP = 10_000
 DEFAULT_RANGE_DAYS = 7
 
 
@@ -89,6 +113,22 @@ class CdrQuery:
         return start, end
 
 
+def _with_gaps(pages: list[int], *, open_ended: bool) -> list[int | None]:
+    """Insert a None wherever the sequence skips a page."""
+    out: list[int | None] = []
+    previous: int | None = None
+    for number in pages:
+        if previous is not None and number > previous + 1:
+            out.append(None)
+        out.append(number)
+        previous = number
+    if open_ended:
+        # The list ends open, so a trailing gap says "there is more" without
+        # claiming a number for it.
+        out.append(None)
+    return out
+
+
 @dataclass(slots=True)
 class CdrPage:
     rows: list[dict[str, Any]] = field(default_factory=list)
@@ -96,10 +136,49 @@ class CdrPage:
     limit: int = 50
     offset: int = 0
     truncated: bool = False
+    #: True when `total` is a floor rather than a count -- see `COUNT_CAP`.
+    count_capped: bool = False
 
     @property
     def has_more(self) -> bool:
         return len(self.rows) == self.limit
+
+    @property
+    def page_number(self) -> int:
+        """Which page this is, counting from 1."""
+        return self.offset // max(1, self.limit) + 1
+
+    @property
+    def page_count(self) -> int | None:
+        """How many pages there are, or None when that is not known.
+
+        None is the honest answer whenever the total is capped: the operator can
+        keep going, but nobody knows how far, and a page count derived from a
+        floor would read as the end of the list.
+        """
+        if self.total is None or self.count_capped:
+            return None
+        return max(1, math.ceil(self.total / max(1, self.limit)))
+
+    def page_links(self, span: int = 2) -> list[int | None]:
+        """The numbers to render, with None standing for a gap.
+
+        Two hundred numbered links is not navigation, so the list is the first
+        page, the last page, and `span` either side of the current one, with a
+        gap marker where numbers were left out. Built here rather than in the
+        template because it is the arithmetic that goes wrong at the edges --
+        page one, the last page, a total shorter than the window -- and those
+        cases are worth testing.
+        """
+        here = self.page_number
+        last = self.page_count
+        if last is None:
+            # Unknown length: offer the neighbourhood behind, and Next carries
+            # the operator forward.
+            wanted = {1, *range(max(1, here - span), here + 1)}
+            return _with_gaps(sorted(wanted), open_ended=True)
+        wanted = {1, last, *range(max(1, here - span), min(last, here + span) + 1)}
+        return _with_gaps(sorted(wanted), open_ended=False)
 
 
 def _build_filters(query: CdrQuery, params: dict[str, Any]) -> list[str]:
@@ -178,9 +257,18 @@ def _build_filters(query: CdrQuery, params: dict[str, Any]) -> list[str]:
     return clauses
 
 
-async def search_cdrs(session: AsyncSession, query: CdrQuery) -> CdrPage:
-    """Run a CDR search, with each call's recordings aggregated in."""
-    limit = max(1, min(query.limit, MAX_PAGE_SIZE))
+async def search_cdrs(
+    session: AsyncSession, query: CdrQuery, *, cap: int = MAX_PAGE_SIZE
+) -> CdrPage:
+    """Run a CDR search, with each call's recordings aggregated in.
+
+    `cap` is the ceiling on how many rows may come back. It defaults to
+    `MAX_PAGE_SIZE`, which is what any caller answering a client should use, so
+    the public API's guard is exactly what it was. Only the cross-organisation
+    merge raises it, because it has to over-read each organisation to slice a
+    merged page and is not handing those rows to anybody.
+    """
+    limit = max(1, min(query.limit, cap))
     offset = max(0, min(query.offset, MAX_OFFSET))
     params: dict[str, Any] = {"limit": limit, "offset": offset}
     clauses = _build_filters(query, params)
@@ -263,7 +351,7 @@ async def filter_options(session: AsyncSession, *, days: int = 90) -> dict[str, 
     }
 
 
-async def count_cdrs(session: AsyncSession, query: CdrQuery, *, cap: int = 10_000) -> int:
+async def count_cdrs(session: AsyncSession, query: CdrQuery, *, cap: int = COUNT_CAP) -> int:
     """Count matches, stopping at ``cap``.
 
     An exact count over a multi-million-row range costs as much as the search
@@ -332,15 +420,46 @@ async def get_recording(session: AsyncSession, recording_id: int) -> dict[str, A
     return dict(row) if row else None
 
 
-async def dashboard_stats(session: AsyncSession) -> dict[str, Any]:
-    """Headline numbers for the dashboard.
+#: Counts that cost a full table scan, remembered for a few seconds.
+#:
+#: Three of the queries below cannot avoid reading every row: counting four
+#: million recordings by state, summing their sizes, and counting nine million
+#: queue rows by state. There is no index that helps -- an index-only scan was
+#: measured and the planner is right to prefer the sequential one -- so the
+#: only lever is how often they run.
+#:
+#: They ran on **every** dashboard refresh, which is every ten seconds, once
+#: per organisation. Measured: 11.6 GB of buffer reads per organisation per
+#: refresh, 23 GB every ten seconds for two, which was three of this host's
+#: eight cores doing nothing but recounting numbers that had barely moved.
+#:
+#: Keyed by the RLS scope rather than by a brand argument, because the scope is
+#: what actually determines the answer -- so one organisation's counts can
+#: never be served to another even if a caller forgets to pass the brand.
+#: Process-local on purpose: it is a cache, not state, and a restart losing it
+#: costs one recount.
+_STATS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
-    Deliberately a handful of aggregate queries rather than one big one: they
-    each hit a different index, and a single query joining all of it would be
-    slower and far harder to reason about when it regresses.
-    """
+#: Cleared by the tests, and by anything that needs a recount now.
+def forget_cached_stats() -> None:
+    _STATS_CACHE.clear()
+
+
+async def _scan_counts(session: AsyncSession, cache_seconds: int) -> dict[str, Any]:
+    """The three full-table aggregates, cached for `cache_seconds`."""
+    scope = (
+        await session.execute(
+            text("SELECT coalesce(current_setting('c2w.brand_id', true), '')")
+        )
+    ).scalar_one() or "unscoped"
+
+    now = time.monotonic()
+    if cache_seconds > 0:
+        cached = _STATS_CACHE.get(scope)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+
     today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-
     recording_states = dict(
         (
             await session.execute(
@@ -371,6 +490,39 @@ async def dashboard_stats(session: AsyncSession) -> dict[str, Any]:
             {"today": today},
         )
     ).mappings().one()
+
+    counts = {
+        "recording_states": recording_states,
+        "job_states": job_states,
+        "totals": dict(totals),
+        "counted_at": datetime.now(UTC),
+    }
+    if cache_seconds > 0:
+        _STATS_CACHE[scope] = (now + cache_seconds, counts)
+    return counts
+
+
+async def dashboard_stats(
+    session: AsyncSession, *, cache_seconds: int = 0
+) -> dict[str, Any]:
+    """Headline numbers for the dashboard.
+
+    Deliberately a handful of aggregate queries rather than one big one: they
+    each hit a different index, and a single query joining all of it would be
+    slower and far harder to reason about when it regresses.
+
+    `cache_seconds` applies only to the three that read whole tables (see
+    `_scan_counts`). The genuinely live parts -- what scanned recently, how
+    many calls today -- are always fresh, because those are the ones somebody
+    watching the page is actually watching. Defaults to 0 so a caller that has
+    not thought about it gets exact numbers rather than silently stale ones.
+    """
+    today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    counts = await _scan_counts(session, cache_seconds)
+    recording_states = counts["recording_states"]
+    job_states = counts["job_states"]
+    totals = counts["totals"]
 
     calls_today = (
         await session.execute(
@@ -418,4 +570,7 @@ async def dashboard_stats(session: AsyncSession) -> dict[str, Any]:
         if totals["recordings"]
         else 0.0,
         "recent_runs": [dict(r) for r in recent_runs],
+        # So the page can say how old the totals are rather than implying they
+        # are as live as everything beside them.
+        "counted_at": counts["counted_at"],
     }

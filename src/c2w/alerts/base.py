@@ -51,6 +51,16 @@ class Alert:
     #: usually the right granularity: one alert per problem per brand.
     dedupe_key: str | None = None
     fields: dict[str, str] = field(default_factory=dict)
+    #: Extra lines that only the platform chat sees.
+    #:
+    #: The two audiences want different things and one of them is entitled to
+    #: less. A platform-wide figure -- the size of the whole database, say -- is
+    #: exactly what the platform reader needs and is not an organisation's
+    #: business: it tells one company roughly how much data the other holds.
+    #: Rather than sending two alerts, the platform copy carries these and the
+    #: organisation copy does not. Slack has one webhook per organisation, so
+    #: it never renders them at all.
+    platform_fields: dict[str, str] = field(default_factory=dict)
     #: Which installation sent this. Filled in by :func:`dispatch` from
     #: `core.platform_name`, so every channel carries it without each caller
     #: having to remember. A chat can watch more than one system, and a message
@@ -61,7 +71,8 @@ class Alert:
         raw = self.dedupe_key or f"{self.severity}:{self.title}:{self.brand_id}"
         return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
-    def as_text(self) -> str:
+    def as_text(self, *, for_platform: bool = False) -> str:
+        """Render for a chat. `for_platform` adds the platform-only fields."""
         lines = [f"{self.severity.emoji} *{self.title}*"]
         if self.system_name:
             lines.append(self.system_name)
@@ -73,6 +84,9 @@ class Alert:
         if self.fields:
             lines.append("")
             lines.extend(f"{k}: {v}" for k, v in self.fields.items())
+        if for_platform and self.platform_fields:
+            lines.append("")
+            lines.extend(f"{k}: {v}" for k, v in self.platform_fields.items())
         return "\n".join(lines)
 
 

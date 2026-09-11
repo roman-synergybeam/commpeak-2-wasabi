@@ -117,6 +117,14 @@
     <a class="btn ghost" href="/calls">Reset</a>
     {% if 'cdr.export' in permissions %}
       <a class="btn ghost" href="/calls/export.csv?{{ query_string }}">Export CSV</a>
+      {# The list can span organisations; the file deliberately does not.
+         Go4Rex and InterMagnum are separate companies, and a CSV holding
+         both would be the one thing this platform is built to prevent --
+         so the export covers the selected organisation and says so, rather
+         than quietly writing fewer rows than the page just showed. #}
+      {% if cross_brand %}
+        <span class="det">CSV covers {{ active_brand.name if active_brand }} only</span>
+      {% endif %}
     {% endif %}
   </div>
 </form>

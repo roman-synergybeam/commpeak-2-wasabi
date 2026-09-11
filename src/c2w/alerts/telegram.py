@@ -83,26 +83,37 @@ async def send(session, alert: Alert) -> bool:
         await settings_service.get_str(session, "alerts.telegram_platform_min_severity")
     ) or "INFO"
 
-    body = alert.as_text()
     delivered = False
     already: set[str] = set()
 
+    platform_wanted = bool(
+        platform_token and platform_chat and _passes(platform_minimum, alert.severity)
+    )
+
     if org_token and org_chat:
-        if await _post(org_token, org_chat, body):
+        # When the same chat is *also* the platform chat, it gets the platform
+        # rendering. The de-duplication below drops the second post, and the
+        # organisation copy goes first, so rendering this one as the
+        # organisation copy silently loses every platform-only field in the
+        # commonest setup there is -- one chat configured globally and
+        # inherited by everything. Whoever configured one chat for both roles
+        # *is* the platform reader; the fields are withheld from a separate,
+        # company-facing chat, which is the case the isolation rule is about.
+        both = platform_wanted and platform_chat == org_chat
+        if await _post(org_token, org_chat, alert.as_text(for_platform=both)):
             delivered = True
         already.add(org_chat)
 
-    if (
-        platform_token
-        and platform_chat
-        and platform_chat not in already
-        and _passes(platform_minimum, alert.severity)
-    ):
+    if platform_wanted and platform_chat not in already:
         # The platform reader is watching several companies at once, so the
         # message has to say which one this is even when the alert itself did
         # not bother -- an unattributed "3 transfers failed" is useless to them.
         prefix = "" if alert.brand_name else "Platform-wide\n"
-        if await _post(platform_token, platform_chat, prefix + body):
+        # The platform copy is rendered separately, not prefixed: it may carry
+        # fields the organisation copy must not (see `Alert.platform_fields`).
+        if await _post(
+            platform_token, platform_chat, prefix + alert.as_text(for_platform=True)
+        ):
             delivered = True
 
     return delivered

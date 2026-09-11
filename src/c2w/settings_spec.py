@@ -991,6 +991,24 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         validator=_commpeak_concurrency,
     ),
     SettingSpec(
+        key="ui.stats_cache_seconds",
+        choices=('0', '30', '60', '120', '300', '600'),
+        choice_labels={"0": "no caching — recount every time"},
+        type=SettingType.INT,
+        default=120,
+        category="Logs and monitoring",
+        label="Recount the dashboard totals every",
+        description="How long the dashboard may reuse its headline counts. "
+        "Counting four million recordings by state means reading the whole "
+        "table -- about 12 GB per organisation -- and the dashboard refreshes "
+        "every ten seconds, so recounting each time was using three of this "
+        "server's eight cores on its own. The live figures (recent scans, what "
+        "is copying now) are never cached; only the totals, and the panel says "
+        "how old they are. Nothing is lost by a couple of minutes here: the "
+        "archive does not fill up in seconds.",
+        unit="seconds",
+    ),
+    SettingSpec(
         key="source.list_page_size",
         choices=('100', '250', '500', '1000'),
         type=SettingType.INT,

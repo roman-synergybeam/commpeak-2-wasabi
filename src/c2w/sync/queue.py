@@ -147,8 +147,33 @@ async def claim_batch(
     # back with nothing. The skip has to happen during selection, which means
     # the selecting query stays exactly as it is.
     if connection_ids:
-        conditions.append("connection_id = ANY(:connection_ids)")
-        params["connection_ids"] = list(connection_ids)
+        ids = list(connection_ids)
+        if len(ids) == 1:
+            # Plain equality for the single-account case, which is the one the
+            # workers actually use -- and the difference is not cosmetic.
+            #
+            # `connection_id = ANY(array)` is an array-membership test, and
+            # PostgreSQL cannot use an index's ordering through one: it can
+            # still use the index to *find* rows, but the `ORDER BY priority,
+            # next_attempt_at` then has to be satisfied by sorting whatever
+            # comes back. With nine million pending jobs that meant a
+            # sequential scan of five million rows feeding an external merge
+            # sort that spilled 210 MB to disk, and the whole claim took
+            # **4,216 ms** -- to return eight rows.
+            #
+            # With `connection_id = :connection_id` the index
+            # `ix_transfer_jobs_claim (connection_id, priority,
+            # next_attempt_at)` supplies the order directly, so `LIMIT` stops
+            # after a handful of entries: **8 ms**, no sort, no spill.
+            #
+            # This is why the bare `SELECT` measured fine while the real claim
+            # did not -- the test used equality and the code used an array, and
+            # only the array form has the problem.
+            conditions.append("connection_id = :connection_id")
+            params["connection_id"] = ids[0]
+        else:
+            conditions.append("connection_id = ANY(:connection_ids)")
+            params["connection_ids"] = ids
 
     claimed_ids = (
         (

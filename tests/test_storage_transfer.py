@@ -286,3 +286,97 @@ class TestTheAclHintDoesNotPickAFavourite:
         way, which is worse than no check.
         """
         assert "curl" not in self._hint()
+
+
+class TestTheWorkerReusesItsS3Clients:
+    """Clients are cached per account, and retiring one must not close it.
+
+    Caching them at all is why this exists: building a client cost 14 ms to
+    unseal the credentials and another 87-99 ms inside botocore, which at eight
+    objects a second was over 1.5 cores spent constructing clients identical to
+    the ones discarded a moment earlier -- for files averaging 0.73 MB.
+
+    The bug this pins is the one that caching introduced. A cached client is
+    *shared* by every transfer against that account, and `__aexit__` clears its
+    internal client, so closing one the moment a job hit a network error made
+    every other in-flight transfer on that account fail with `S3Client used
+    outside its async context manager` -- surfaced as `CONFIG_ERROR` with a
+    hint about endpoint addressing that had nothing to do with it. One real
+    failure became several invented ones.
+    """
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def __aexit__(self, *exc: object) -> None:
+            self.closed = True
+
+    def _worker(self):
+        from c2w.workers.worker import Worker
+
+        return Worker("test")
+
+    async def test_eviction_does_not_close_a_client_other_transfers_may_hold(self):
+        worker = self._worker()
+        client = self._FakeClient()
+        worker._clients[("source", 7, "gen-1")] = client  # type: ignore[assignment]
+
+        worker._evict_clients(7)
+
+        assert client.closed is False, "closed while a concurrent transfer could hold it"
+        # Gone from the cache, so the next job builds a fresh one rather than
+        # being handed the client we have decided not to trust.
+        assert not [k for k in worker._clients if k[1] == 7]
+
+    async def test_the_retired_client_is_closed_once_the_batch_is_done(self):
+        worker = self._worker()
+        client = self._FakeClient()
+        worker._clients[("source", 7, "gen-1")] = client  # type: ignore[assignment]
+
+        worker._evict_clients(7)
+        await worker._close_retired()
+
+        assert client.closed is True, "a retired client must not leak its pool"
+
+    async def test_a_new_credential_generation_retires_the_old_client(self):
+        """The cache key includes `updated_at`, so editing a credential in the
+        UI produces a new client instead of one still using the old secret --
+        and the superseded one is retired rather than leaked or closed in
+        flight."""
+        worker = self._worker()
+        old = self._FakeClient()
+        worker._clients[("source", 7, "gen-1")] = old  # type: ignore[assignment]
+
+        # What `_client_for` does when it finds no entry for the new key.
+        for stale in [k for k in worker._clients if k[0] == "source" and k[1] == 7]:
+            worker._retire(worker._clients.pop(stale))
+
+        assert old.closed is False
+        assert worker._retired == [old]
+        await worker._close_retired()
+        assert old.closed is True
+
+    async def test_closing_everything_leaves_nothing_behind(self):
+        worker = self._worker()
+        a, b = self._FakeClient(), self._FakeClient()
+        worker._clients[("source", 1, "g")] = a  # type: ignore[assignment]
+        worker._clients[("dest", 2, "g")] = b  # type: ignore[assignment]
+
+        await worker._close_clients()
+
+        assert a.closed and b.closed
+        assert not worker._clients
+        assert not worker._retired
+
+    async def test_a_failure_to_close_does_not_propagate(self):
+        """Shutdown must not be derailed by a pool that is already broken."""
+        worker = self._worker()
+
+        class _Angry:
+            async def __aexit__(self, *exc: object) -> None:
+                raise OSError("connection already gone")
+
+        worker._clients[("source", 3, "g")] = _Angry()  # type: ignore[assignment]
+        await worker._close_clients()  # must not raise
+        assert not worker._clients

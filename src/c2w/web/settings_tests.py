@@ -247,11 +247,17 @@ async def _test_alerts(
     """
     from c2w.alerts import slack, telegram
     from c2w.alerts.base import Alert, Severity
+    from c2w.db.size import as_gb, brand_bytes, database_bytes
 
     out = SectionTest(True, "")
     platform = await settings_service.get_str(
         session, "core.platform_name", brand_id=brand_id
     )
+    # The test carries the same figures a real summary does. A test message
+    # shaped nothing like the real thing proves the token and the chat id and
+    # nothing else -- whether the numbers arrive readable is part of what is
+    # being tested, and it is the fastest way to see a change to them.
+    fields = {"Database": as_gb(await brand_bytes(session, brand_id))} if brand_id else {}
     alert = Alert(
         title=f"Test alert from {platform}",
         body=(
@@ -260,6 +266,8 @@ async def _test_alerts(
         ),
         severity=Severity.INFO,
         brand_id=brand_id,
+        fields=fields,
+        platform_fields={"Database total": as_gb(await database_bytes(session))},
     )
 
     telegram_token = await settings_service.get_secret(

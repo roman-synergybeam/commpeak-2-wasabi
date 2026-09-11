@@ -36,6 +36,7 @@
   <table>
     <thead>
       <tr>
+        {% if show_brand %}<th>Organisation</th>{% endif %}
         <th>Account</th><th>Last scan</th><th>Scanned up to</th>
         <th class="col-progress">Archived</th>
         <th class="right">Found</th><th class="right">Waiting</th><th class="right">Failed</th>
@@ -44,6 +45,9 @@
     <tbody>
     {% for row in per_connection %}
       <tr>
+        {% if show_brand %}
+          <td data-label="Organisation">{{ brand_of.get(row.id, '—') }}</td>
+        {% endif %}
         <td data-label="Account">{{ row.name }}</td>
         <td class="mono" data-label="Last scan">{{ row.last_inventory_at | dt }}</td>
         <td class="mono" data-label="Scanned up to">{{ row.inventory_cursor_day | dt }}</td>
@@ -65,7 +69,11 @@
         </td>
       </tr>
     {% else %}
-      <tr><td colspan="7" class="empty">No CommPeak accounts configured yet.</td></tr>
+      <tr>
+        <td colspan="{{ 8 if show_brand else 7 }}" class="empty">
+          No CommPeak accounts configured yet.
+        </td>
+      </tr>
     {% endfor %}
     </tbody>
   </table>

@@ -55,6 +55,42 @@
   </div>
 </div>
 
+{# The split, for a platform administrator looking at more than one
+   organisation. The totals above are the sum; this says where they came from,
+   which is the question the sum immediately raises. #}
+{% if per_brand %}
+  <h2>By organisation</h2>
+  <div class="tw stack">
+    <table>
+      <thead>
+        <tr>
+          <th>Organisation</th><th class="right">Recordings</th>
+          <th class="right">In the archive</th><th class="right">Waiting</th>
+          <th class="right">Failed</th><th class="right">Stored</th>
+          <th class="right">Progress</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for b in per_brand %}
+        <tr>
+          <td data-label="Organisation">
+            <a href="/calls?brand_id={{ b.id }}">{{ b.name }}</a>
+          </td>
+          <td class="right" data-label="Recordings">{{ "{:,}".format(b.recordings_total) }}</td>
+          <td class="right" data-label="In the archive">{{ "{:,}".format(b.archived) }}</td>
+          <td class="right" data-label="Waiting">{{ "{:,}".format(b.pending) }}</td>
+          <td class="right" data-label="Failed">
+            <span {% if b.failed %}class="bad"{% endif %}>{{ "{:,}".format(b.failed) }}</span>
+          </td>
+          <td class="right" data-label="Stored">{{ b.bytes_archived | filesize }}</td>
+          <td class="right" data-label="Progress">{{ b.progress_pct }}%</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+
 <h2>Recording states</h2>
 <div class="tw">
   <table>
@@ -77,5 +113,12 @@
 
 <p class="hint" id="live-stamp">
   Updated {{ live_at }} &middot; refreshing every {{ live_every }}s
+  {# The totals are counted less often than the panel refreshes, because
+     counting them reads every row of every recording. Saying so is the
+     difference between a cache and a page that quietly lies about how
+     current its biggest numbers are. #}
+  {% if stats.counted_at and stats.counted_at != live_at %}
+    &middot; totals counted {{ stats.counted_at | dt }}
+  {% endif %}
 </p>
 

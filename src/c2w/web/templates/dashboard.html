@@ -3,7 +3,13 @@
 {% block body %}
 
 <h1>Dashboard</h1>
-<p class="sub">{{ active_brand.name if active_brand }} &middot; recordings discovered, archived and outstanding.</p>
+<p class="sub">
+  {% if per_brand %}
+    Every organisation &middot; recordings discovered, archived and outstanding.
+  {% else %}
+    {{ active_brand.name if active_brand }} &middot; recordings discovered, archived and outstanding.
+  {% endif %}
+</p>
 
 {% if not has_destination %}
   {# An explainer, not an alarm: nothing has gone wrong, this is just the

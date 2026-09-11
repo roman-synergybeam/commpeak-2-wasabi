@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import signal
 from collections import defaultdict
+from typing import cast
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,9 +34,11 @@ from c2w.db.models.core import (
 from c2w.db.session import dispose_engine, platform_session
 from c2w.logging import configure_logging, get_logger, reconfigure_from_settings
 from c2w.settings import settings_service
-from c2w.storage.errors import TransferError, classify_exception
+from c2w.storage.commpeak import CommPeakSource
+from c2w.storage.errors import ErrorClass, TransferError, classify_exception
 from c2w.storage.factory import open_destination, open_source
-from c2w.storage.s3_adapter import RateLimiter
+from c2w.storage.s3_adapter import RateLimiter, S3Client
+from c2w.storage.wasabi import WasabiDestination
 from c2w.sync import queue
 from c2w.sync.transfer import transfer_recording
 
@@ -53,6 +56,13 @@ class Worker:
         # ceiling rather than a per-job allowance.
         self._limiter: RateLimiter | None = None
         self._limiter_mbps: float | None = None
+        #: Rotates which account is claimed from first. See
+        #: `_connections_with_work` for why this replaced an ORDER BY count(*).
+        self._pass = 0
+        #: Entered S3 clients, reused across jobs. See `_client_for`.
+        self._clients: dict[tuple[str, int, object], S3Client] = {}
+        #: Clients taken out of service but not yet closed. See `_retire`.
+        self._retired: list[S3Client] = []
 
     def request_stop(self) -> None:
         self._stopping.set()
@@ -77,6 +87,7 @@ class Worker:
                 slept = IDLE_SLEEP_SECONDS
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stopping.wait(), timeout=slept)
+        await self._close_clients()
         log.info("worker.stopped", worker=self.identity)
 
     async def _tick(self) -> float:
@@ -151,34 +162,58 @@ class Worker:
                 for group in by_connection.values()
             )
         )
+        # Every transfer in the batch has finished, so anything retired during
+        # it is genuinely unused now and can be closed.
+        await self._close_retired()
         return 0.0
 
-    @staticmethod
-    async def _connections_with_work(session: AsyncSession) -> list[int]:
-        """Accounts that have runnable jobs, fewest queued first.
+    async def _connections_with_work(self, session: AsyncSession) -> list[int]:
+        """Accounts that have runnable jobs, in a rotating order.
 
-        Fewest first so a small account is not permanently behind a large one:
-        `go4rex.td` has 52,000 queued and would otherwise be claimed from on
-        every pass while an account with 300 waited for it to finish.
+        Reading it fresh each pass is what lets a worker notice an account
+        whose access has just come back.
 
-        Cheap enough to run each pass -- it is an index scan over PENDING and
-        there are eight accounts -- and reading it fresh is what lets a worker
-        notice an account whose access has just come back.
+        **This used to order by `count(*)` and claimed to be cheap.** It was
+        not: `GROUP BY connection_id ORDER BY count(*)` over nine million
+        pending rows counts every one of them, so each worker ran a full
+        aggregate of the queue on every pass -- five workers, several times a
+        minute, and it was one of the two things keeping PostgreSQL at four of
+        this host's eight cores. The docstring asserting it was an index scan
+        was written by inspection rather than by measurement, which is how it
+        survived.
+
+        Fairness does not need those counts. Every account with work is
+        claimed from on every pass anyway, so the order only decides who is
+        served when a pass hits its batch ceiling -- and rotating the list by a
+        per-worker counter guarantees no account is systematically last, which
+        is a stronger guarantee than "fewest queued first" gave and costs
+        nothing. What remains in the database is one index probe per account
+        against `ix_transfer_jobs_claim`.
         """
         rows = (
             await session.execute(
                 text(
                     """
-                    SELECT connection_id
-                    FROM transfer_jobs
-                    WHERE state = 'PENDING' AND next_attempt_at <= now()
-                    GROUP BY connection_id
-                    ORDER BY count(*) ASC
+                    SELECT c.id
+                    FROM commpeak_connections c
+                    WHERE c.is_enabled
+                      AND EXISTS (
+                          SELECT 1 FROM transfer_jobs j
+                          WHERE j.connection_id = c.id
+                            AND j.state = 'PENDING'
+                            AND j.next_attempt_at <= now()
+                      )
+                    ORDER BY c.id
                     """
                 )
             )
         ).scalars().all()
-        return [int(r) for r in rows]
+        ids = [int(r) for r in rows]
+        if not ids:
+            return ids
+        self._pass += 1
+        offset = self._pass % len(ids)
+        return ids[offset:] + ids[:offset]
 
     async def _run_connection_group(
         self,
@@ -194,6 +229,119 @@ class Worker:
                 await self._run_job(job.id, limiter)
 
         await asyncio.gather(*(run_one(job) for job in jobs))
+
+    async def _source_for(
+        self,
+        connection: CommPeakConnection,
+        limiter: RateLimiter | None,
+        session: AsyncSession,
+    ) -> CommPeakSource:
+        """The cached read-only client for one CommPeak account."""
+        return cast(
+            CommPeakSource, await self._client_for("source", connection, limiter, session)
+        )
+
+    async def _destination_for(
+        self,
+        destination: StorageDestination,
+        limiter: RateLimiter | None,
+        session: AsyncSession,
+    ) -> WasabiDestination:
+        """The cached client for one archive destination."""
+        return cast(
+            WasabiDestination, await self._client_for("dest", destination, limiter, session)
+        )
+
+    async def _client_for(
+        self,
+        kind: str,
+        row: CommPeakConnection | StorageDestination,
+        limiter: RateLimiter | None,
+        session: AsyncSession,
+    ) -> S3Client:
+        """An open S3 client for one account or destination, reused across jobs.
+
+        This exists because building them per job was the single largest
+        consumer of CPU on the host. Measured, per client:
+
+            unsealing the credentials      14 ms of CPU
+            creating the botocore client   87-99 ms of CPU
+
+        `_run_job` opened one of each, so **roughly 214 ms of CPU went on
+        setup for every object copied** -- and at eight objects a second that
+        is over 1.5 cores spent building clients that are identical to the ones
+        thrown away a moment earlier. The files average 0.73 MB; the setup cost
+        far exceeded the copy.
+
+        Reuse is what aiobotocore is designed for: the client owns a connection
+        pool, and discarding it also discarded every established TLS
+        connection, so each object paid for a fresh handshake too.
+
+        Keyed on `updated_at` as well as the id, so editing a credential in
+        the UI produces a *new* client rather than one that keeps using the old
+        secret until the process restarts -- and the superseded one is closed
+        rather than leaked. Evicted on network errors as well, in
+        `_evict_clients`, because a pool that has gone bad should not be
+        retried for ever.
+        """
+        key = (kind, row.id, row.updated_at)
+        existing = self._clients.get(key)
+        if existing is not None:
+            return existing
+
+        for stale in [k for k in self._clients if k[0] == kind and k[1] == row.id]:
+            self._retire(self._clients.pop(stale))
+
+        if kind == "source":
+            client: S3Client = await open_source(
+                session, cast(CommPeakConnection, row), limiter=limiter
+            )
+        else:
+            client = await open_destination(
+                session, cast(StorageDestination, row), limiter=limiter
+            )
+        opened = await client.__aenter__()
+        self._clients[key] = opened
+        return opened
+
+    def _retire(self, client: S3Client) -> None:
+        """Take a client out of service without closing it yet.
+
+        Closing it here would be a bug, and was one. A cached client is
+        **shared** by every transfer running against that account -- up to five
+        concurrently -- and `S3Client.__aexit__` sets its internal client to
+        None. So closing one mid-flight made every other transfer already
+        using it raise `S3Client used outside its async context manager`,
+        reported as `CONFIG_ERROR` with a hint about endpoint addressing that
+        had nothing to do with it. One genuine network error turned into
+        several spurious failures on the same account, and thirteen jobs failed
+        that way before it was caught.
+
+        So eviction only removes it from the cache -- new jobs immediately get
+        a fresh one -- and the close happens in `_close_retired`, which runs
+        after the batch has finished and nothing can still be holding it.
+        """
+        self._retired.append(client)
+
+    async def _close_retired(self) -> None:
+        """Close clients retired during this pass. Safe only once every
+        transfer in the batch has finished."""
+        while self._retired:
+            client = self._retired.pop()
+            with contextlib.suppress(Exception):
+                await client.__aexit__(None, None, None)
+
+    def _evict_clients(self, *ids: int) -> None:
+        """Stop handing out the cached clients for these rows."""
+        for key in [k for k in self._clients if k[1] in ids]:
+            self._retire(self._clients.pop(key))
+
+    async def _close_clients(self) -> None:
+        """Close every client. A multipart upload in flight is aborted by the
+        transfer code itself; this only releases the pools."""
+        for key in list(self._clients):
+            self._retire(self._clients.pop(key))
+        await self._close_retired()
 
     async def _run_job(self, job_id: int, limiter: RateLimiter | None) -> None:
         """Run one transfer in its own transaction.
@@ -238,29 +386,48 @@ class Worker:
             )
 
             try:
-                source_client = await open_source(session, connection, limiter=limiter)
-                dest_client = await open_destination(session, destination)
-                async with source_client as src, dest_client as dst:
-                    outcome = await transfer_recording(
-                        session,
-                        recording,
-                        destination,
-                        src,
-                        dst,
-                        # The CommPeak account name, so the archive's top
-                        # level reads as the list of accounts it holds.
-                        account=connection.name,
-                        multipart_threshold=threshold,
-                        multipart_chunk=chunk,
-                        write_sidecar=write_sidecar,
-                    )
+                # Reused, not opened per job -- see `_client_for`. They
+                # deliberately outlive this block rather than sitting in an
+                # `async with`: closing them per job is what cost 214 ms of
+                # CPU per object.
+                src = await self._source_for(connection, limiter, session)
+                dst = await self._destination_for(destination, limiter, session)
+                outcome = await transfer_recording(
+                    session,
+                    recording,
+                    destination,
+                    src,
+                    dst,
+                    # The CommPeak account name, so the archive's top
+                    # level reads as the list of accounts it holds.
+                    account=connection.name,
+                    multipart_threshold=threshold,
+                    multipart_chunk=chunk,
+                    write_sidecar=write_sidecar,
+                )
                 await queue.complete(session, job, bytes_transferred=outcome.bytes_transferred)
-                if outcome.verified:
-                    destination.bytes_stored += outcome.bytes_transferred
-                    destination.objects_stored += 1
+                # The archive's totals are deliberately **not** maintained
+                # here. This used to do `destination.bytes_stored += n`, which
+                # was wrong twice over: it is a read-modify-write of a value
+                # loaded earlier in this session, so two workers finishing at
+                # once each wrote their own increment and one was lost; and
+                # every transfer took a row lock on the *same* destination
+                # row, so forty concurrent transfers queued up behind one
+                # counter -- visible as `Lock` waits on
+                # `UPDATE storage_destinations` in `pg_stat_activity`.
+                #
+                # The numbers are derivable from `recordings`, which is where
+                # the truth already lives, so the scheduler recomputes them
+                # periodically instead. A counter that is contended *and*
+                # drifting is worse than one that is a minute old.
 
             except Exception as exc:
                 error = exc if isinstance(exc, TransferError) else classify_exception(exc)
+                if error.error_class in (ErrorClass.NETWORK_ERROR, ErrorClass.AUTH_ERROR):
+                    # A dead connection pool, or credentials that have been
+                    # changed underneath us. Either way the cached client is
+                    # not worth keeping; the retry builds a new one.
+                    self._evict_clients(connection.id, destination.id)
                 recording.state = RecordingState.QUEUED
                 recording.last_error_class = str(error.error_class)
                 recording.last_error_detail = error.message[:4000]

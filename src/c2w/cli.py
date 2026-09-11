@@ -23,6 +23,7 @@ from c2w import __version__
 from c2w.auth.local import AuthError, create_super_admin, hash_password, revoke_all_sessions
 from c2w.config import get_bootstrap
 from c2w.crypto import CryptoError, generate_data_key, seal
+from c2w.db.base import PARTITION_AUTOVACUUM
 from c2w.db.models.auth import User
 from c2w.db.models.core import Brand, CommPeakConnection, StorageDestination, Tenant
 from c2w.db.session import dispose_engine, platform_session
@@ -250,6 +251,12 @@ async def cmd_brand_add(args: argparse.Namespace) -> int:
                 text(
                     f"CREATE TABLE IF NOT EXISTS {table}_brand_{brand.id} "
                     f"PARTITION OF {table} FOR VALUES IN ({brand.id})"
+                )
+            )
+            await session.execute(
+                text(
+                    f"ALTER TABLE {table}_brand_{brand.id} "
+                    f"SET ({PARTITION_AUTOVACUUM})"
                 )
             )
         await session.execute(

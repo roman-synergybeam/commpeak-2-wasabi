@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from c2w.auth.local import create_super_admin, hash_password
@@ -1490,3 +1490,250 @@ class TestAnEmptyFilterBoxIsNotAnError:
         if response.status_code == 404:
             pytest.skip("messages are not enabled in this scenario")
         assert response.status_code == 200
+
+
+class TestAPlatformAdminSeesEveryOrganisation:
+    """The dashboard, sync and call search span all organisations — for one role.
+
+    "How is the platform doing" is the question `SUPER_ADMIN` exists to answer,
+    and switching organisations to answer it once per company is not an answer.
+    Everyone else is unchanged, and that is the half worth testing hardest: a
+    feature that widens one role's view is one edit away from widening
+    everybody's.
+
+    The scope is still moved per organisation rather than switched off. Reading
+    across brands by handing the request an unscoped session would make RLS
+    advisory for exactly the role most able to do damage with it.
+    """
+
+    class _Req:
+        """Enough of a request for the brand-scope helpers: no brand cookie."""
+
+        def __init__(self) -> None:
+            self.cookies: dict[str, str] = {}
+            self.headers: dict[str, str] = {}
+
+    async def _second_brand(self, db):
+        """A second organisation, committed -- the helper reads it in its own
+        transaction, so an uncommitted insert is invisible to it."""
+        async with db() as s:
+            brand_id = (
+                await s.execute(
+                    text("INSERT INTO brands (name, slug) VALUES (:n, :s) RETURNING id"),
+                    {
+                        "n": f"Other {uuid.uuid4().hex[:6]}",
+                        "s": f"other-{uuid.uuid4().hex[:8]}",
+                    },
+                )
+            ).scalar_one()
+            await s.commit()
+        return brand_id
+
+    async def test_a_platform_admin_reads_every_active_organisation(self, db, scenario):
+        from c2w.web.routes import _readable_brand_ids
+
+        other = await self._second_brand(db)
+        async with db() as s:
+            admin = (
+                await s.execute(
+                    select(User).where(User.email == scenario["admin_email"])
+                )
+            ).scalar_one()
+            ids = await _readable_brand_ids(self._Req(), s, admin)
+        assert scenario["brand_id"] in ids
+        assert other in ids
+
+    async def test_an_organisation_admin_reads_only_their_own(self, db, scenario):
+        """The isolation rule, stated as its own test."""
+        from c2w.web.routes import _readable_brand_ids
+
+        other = await self._second_brand(db)
+        async with db() as s:
+            scoped = User(
+                brand_id=scenario["brand_id"],
+                email=f"scoped-{uuid.uuid4().hex[:6]}@example.com",
+                display_name="Scoped",
+                role=Role.ADMIN,
+                auth_source=AuthSource.LOCAL,
+                password_hash=hash_password("a-long-enough-password"),
+            )
+            ids = await _readable_brand_ids(self._Req(), s, scoped)
+        assert ids == [scenario["brand_id"]]
+        assert other not in ids
+
+    async def test_an_operator_reads_only_their_own(self, db, scenario):
+        from c2w.web.routes import _readable_brand_ids
+
+        async with db() as s:
+            operator = (
+                await s.execute(
+                    select(User).where(User.email == scenario["agent_email"])
+                )
+            ).scalar_one()
+            ids = await _readable_brand_ids(self._Req(), s, operator)
+        assert ids == [scenario["brand_id"]]
+
+    async def test_the_scope_is_restored_after_reading_another(self, db, scenario):
+        """The caller reads settings for the selected brand afterwards."""
+        from c2w.web.routes import _scoped_to
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            async with _scoped_to(s, 999_999):
+                inner = (
+                    await s.execute(text("SELECT current_setting('c2w.brand_id', true)"))
+                ).scalar_one()
+            after = (
+                await s.execute(text("SELECT current_setting('c2w.brand_id', true)"))
+            ).scalar_one()
+        assert inner == "999999"
+        assert after == str(scenario["brand_id"])
+
+    def test_merged_progress_is_recomputed_not_averaged(self):
+        """Averaging percentages weights a small organisation like a huge one."""
+        from c2w.web.routes import _merge_dashboard_stats
+
+        merged = _merge_dashboard_stats(
+            [
+                {"recordings_total": 1_000_000, "archived": 500_000, "progress_pct": 50.0,
+                 "recording_states": {}, "job_states": {}, "recent_runs": []},
+                {"recordings_total": 100, "archived": 100, "progress_pct": 100.0,
+                 "recording_states": {}, "job_states": {}, "recent_runs": []},
+            ]
+        )
+        assert merged["recordings_total"] == 1_000_100
+        assert merged["archived"] == 500_100
+        # The mean of 50 and 100 would be 75, which would be a lie.
+        assert 49.9 <= merged["progress_pct"] <= 50.1, merged["progress_pct"]
+
+    def test_merged_state_maps_add_per_state(self):
+        from c2w.web.routes import _merge_dashboard_stats
+
+        merged = _merge_dashboard_stats(
+            [
+                {"recording_states": {"AVAILABLE": 3, "FAILED": 1}, "job_states": {},
+                 "recordings_total": 4, "archived": 3, "recent_runs": []},
+                {"recording_states": {"AVAILABLE": 5, "QUEUED": 2}, "job_states": {},
+                 "recordings_total": 7, "archived": 5, "recent_runs": []},
+            ]
+        )
+        assert merged["recording_states"] == {"AVAILABLE": 8, "FAILED": 1, "QUEUED": 2}
+
+    def test_a_single_organisation_is_passed_straight_through(self):
+        """No merging cost, and no chance of the merge changing one brand's view."""
+        from c2w.web.routes import _merge_dashboard_stats
+
+        only = {"recordings_total": 5, "archived": 1, "progress_pct": 20.0,
+                "recording_states": {"AVAILABLE": 1}, "job_states": {}, "recent_runs": []}
+        assert _merge_dashboard_stats([only]) is only
+
+    async def test_the_dashboard_shows_a_split_only_when_there_are_several(
+        self, app_client, scenario, db
+    ):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        await self._second_brand(db)
+        page = await app_client.get("/")
+        assert page.status_code == 200
+        # Several organisations exist, so the breakdown is not optional.
+        assert "By organisation" in page.text, page.text[:2000]
+
+
+class TestTheCallsPagerOffersNumberedPages:
+    """Prev and Next alone make page 40 of 380 unreachable.
+
+    The list is the reason this platform has a UI, and "walk there forty
+    clicks at a time" is not navigation. The arithmetic lives on `CdrPage`
+    rather than in the template because every interesting case is an edge --
+    the first page, the last one, a total shorter than the window, and a total
+    that is not a total at all.
+
+    No database needed: this is arithmetic.
+    """
+
+    def _page(self, *, offset, limit, total, capped=False):
+        from c2w.api.v1.cdrs import CdrPage
+
+        return CdrPage(
+            rows=[{}] * limit, total=total, limit=limit, offset=offset, count_capped=capped
+        )
+
+    def test_the_page_number_counts_from_one(self):
+        assert self._page(offset=0, limit=50, total=500).page_number == 1
+        assert self._page(offset=50, limit=50, total=500).page_number == 2
+        assert self._page(offset=200, limit=50, total=500).page_number == 5
+
+    def test_a_short_list_is_a_single_page(self):
+        page = self._page(offset=0, limit=50, total=12)
+        assert page.page_count == 1
+        assert page.page_links() == [1]
+
+    def test_an_exactly_full_first_page_is_still_one_page(self):
+        """`ceil` at the boundary: 50 of 50 is one page, not two."""
+        assert self._page(offset=0, limit=50, total=50).page_count == 1
+
+    def test_the_middle_of_a_long_list_elides_both_ends(self):
+        page = self._page(offset=200, limit=50, total=1000)
+        assert page.page_count == 20
+        assert page.page_links() == [1, None, 3, 4, 5, 6, 7, None, 20]
+
+    def test_the_first_page_does_not_elide_before_itself(self):
+        assert self._page(offset=0, limit=50, total=1000).page_links()[:4] == [1, 2, 3, None]
+
+    def test_the_last_page_does_not_elide_after_itself(self):
+        page = self._page(offset=950, limit=50, total=1000)
+        assert page.page_links() == [1, None, 18, 19, 20]
+
+    def test_a_capped_total_offers_no_last_page(self):
+        """The load-bearing one.
+
+        `count_cdrs` stops at `COUNT_CAP`, so the total is a floor. A page
+        count derived from it would be a guess rendered as the end of the
+        list, and an operator who clicked it would land on a page that is not
+        last with nothing saying so.
+        """
+        page = self._page(offset=200, limit=50, total=10_000, capped=True)
+        assert page.page_count is None
+        links = page.page_links()
+        assert links[-1] is None, links
+        assert 200 not in links
+        # Still useful: where you are, and the way back.
+        assert page.page_number == 5
+        assert [n for n in links if n is not None] == [1, 3, 4, 5]
+
+    def test_an_unknown_total_offers_no_last_page(self):
+        page = self._page(offset=0, limit=50, total=None)
+        assert page.page_count is None
+        assert page.page_links() == [1, None]
+
+    def test_a_page_size_of_zero_does_not_divide_by_zero(self):
+        """`limit` comes off a query string, so it is not trusted here."""
+        page = self._page(offset=0, limit=0, total=10)
+        assert page.page_number == 1
+        assert page.page_count == 10
+
+    async def test_the_calls_page_renders_numbered_links(self, app_client, scenario):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/calls?limit=1")
+        assert page.status_code == 200
+        assert 'class="pagenum' in page.text, page.text[-3000:]
+        assert 'aria-current="page"' in page.text
+
+    async def test_a_numbered_link_is_a_real_link(self, app_client, scenario):
+        """Not a button: it must survive a middle-click and no JavaScript."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        body = (await app_client.get("/calls?limit=1")).text
+        pager = body[body.index('<div class="pager"') :]
+        assert 'href="/calls?' in pager
+        assert "offset=" in pager
+
+    async def test_a_small_result_reports_an_exact_page_count(self, app_client, scenario):
+        """The other half of the capped case: below the cap it is a real count,
+        so the page count is a real number and the total carries no "+"."""
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        body = (await app_client.get("/calls?limit=1")).text
+        pager = body[body.index('<div class="pager"') :]
+        assert "page 1 of" in pager, pager[:600]
+        assert "+ calls" not in pager, pager[:600]

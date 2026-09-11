@@ -12,6 +12,10 @@
             data-dir="{{ 'desc' if q.descending else 'asc' }}">
           <a href="/calls?{{ query_string | sortlink('started') }}">Started</a>
         </th>
+        {# Only when the list spans organisations, which only a platform
+           administrator ever sees. A brand-scoped operator's table is exactly
+           what it was. #}
+        {% if cross_brand %}<th>Organisation</th>{% endif %}
         <th>Dir</th>
         <th>From</th>
         <th>To</th>
@@ -32,6 +36,9 @@
     {% for row in page.rows %}
       <tr>
         <td class="mono" data-label="Started">{{ row.start_at | dt }}</td>
+        {% if cross_brand %}
+          <td data-label="Organisation">{% if row.brand_name %}{{ row.brand_name }}{% else %}&mdash;{% endif %}</td>
+        {% endif %}
         <td data-label="Direction">
           {% if row.direction %}<span class="dir-{{ row.direction }}">{{ row.direction }}</span>
           {% else %}&mdash;{% endif %}
@@ -62,7 +69,7 @@
       </tr>
     {% else %}
       <tr>
-        <td colspan="13" class="empty">
+        <td colspan="{{ 14 if cross_brand else 13 }}" class="empty">
           {# "Nothing yet" and "nothing matches" are different sentences, and
              only one is ever true. A list claiming "no calls yet" with a
              filter active lies to someone hunting a missing call. #}
@@ -79,15 +86,42 @@
   </table>
 </div>
 
+{# The pager: numbered pages, not only Prev and Next.
+
+   `page.page_links()` decides which numbers appear -- first, last, and two
+   either side of here, with None where numbers were left out. That arithmetic
+   is in Python because it is what goes wrong at the edges, and a Jinja
+   expression cannot be tested.
+
+   When the total is a floor rather than a count there is no known last page,
+   so no number is offered for one: the row ends in a gap and Next carries on.
+   Guessing a last page from a capped count would be the one thing a pager
+   must not do. #}
 <div class="pager">
   <div class="pagebtns">
     {% if page.offset %}
-      <a class="btn" href="/calls?{{ query_string | offsetlink(page.offset - page.limit) }}"
+      <a class="pagenum" rel="prev" aria-label="Previous page"
+         href="/calls?{{ query_string | offsetlink(page.offset - page.limit) }}"
          hx-get="/calls/rows?{{ query_string | offsetlink(page.offset - page.limit) }}"
          hx-target="#rows" hx-push-url="true">&lsaquo; Prev</a>
     {% endif %}
+
+    {% for n in page.page_links() %}
+      {% if n is none %}
+        <span class="gap" aria-hidden="true">&hellip;</span>
+      {% elif n == page.page_number %}
+        <span class="pagenum here" aria-current="page">{{ n }}</span>
+      {% else %}
+        <a class="pagenum" aria-label="Page {{ n }}"
+           href="/calls?{{ query_string | offsetlink((n - 1) * page.limit) }}"
+           hx-get="/calls/rows?{{ query_string | offsetlink((n - 1) * page.limit) }}"
+           hx-target="#rows" hx-push-url="true">{{ n }}</a>
+      {% endif %}
+    {% endfor %}
+
     {% if page.has_more %}
-      <a class="btn" href="/calls?{{ query_string | offsetlink(page.offset + page.limit) }}"
+      <a class="pagenum" rel="next" aria-label="Next page"
+         href="/calls?{{ query_string | offsetlink(page.offset + page.limit) }}"
          hx-get="/calls/rows?{{ query_string | offsetlink(page.offset + page.limit) }}"
          hx-target="#rows" hx-push-url="true">Next &rsaquo;</a>
     {% endif %}
@@ -96,6 +130,8 @@
     {% if page.rows %}
       Showing {{ "{:,}".format(page.offset + 1) }}&ndash;{{ "{:,}".format(page.offset + page.rows|length) }}
       of {{ count_label }}
+      {%- if page.page_count %} &middot; page {{ "{:,}".format(page.page_number) }} of
+        {{ "{:,}".format(page.page_count) }}{% endif %}
     {% else %}
       Nothing to show
     {% endif %}
