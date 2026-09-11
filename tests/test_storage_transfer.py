@@ -380,3 +380,46 @@ class TestTheWorkerReusesItsS3Clients:
         worker._clients[("source", 3, "g")] = _Angry()  # type: ignore[assignment]
         await worker._close_clients()  # must not raise
         assert not worker._clients
+
+
+class TestAnInternalFaultIsNotReportedAsMisconfiguration:
+    """An error class is a diagnosis, and a wrong one sends people hunting.
+
+    Using an S3 client after it has been closed is a bug in this codebase. It
+    was classified `CONFIG_ERROR`, so the failures panel said "misconfigured --
+    check the endpoint, region and bucket; also check clock skew", and an
+    operator checked all of them while nothing was wrong with any. That is
+    worse than saying nothing: a confident wrong diagnosis costs the reader
+    time and costs the next report its credibility.
+    """
+
+    def test_using_a_closed_client_is_not_a_configuration_error(self):
+        import pytest
+
+        from c2w.storage.base import S3Credentials
+        from c2w.storage.errors import ErrorClass, TransferError
+        from c2w.storage.s3_adapter import S3Client
+
+        client = S3Client(
+            S3Credentials(
+                endpoint_url="https://example.invalid",
+                access_key="k",
+                secret_key="s",
+                bucket="b",
+            )
+        )
+        with pytest.raises(TransferError) as caught:
+            _ = client.client
+
+        assert caught.value.error_class is not ErrorClass.CONFIG_ERROR
+        assert caught.value.error_class is ErrorClass.UNKNOWN
+        # And it says whose fault it is.
+        assert "fault in c2w" in str(caught.value)
+
+    def test_the_unknown_hint_does_not_send_anyone_to_their_settings(self):
+        from c2w.storage.errors import ErrorClass, TransferError
+
+        hint = TransferError(ErrorClass.UNKNOWN, "something odd").hint or ""
+        assert hint, "an unexplained failure still deserves a sentence"
+        for misleading in ("endpoint", "region", "clock skew"):
+            assert misleading not in hint.lower(), hint

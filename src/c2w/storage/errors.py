@@ -185,6 +185,16 @@ _HINTS: Final[dict[ErrorClass, str]] = {
     ErrorClass.STORAGE_ERROR: (
         "the destination rejected the write; check Wasabi quota and bucket policy"
     ),
+    # Deliberately points at us rather than at the operator's settings. An
+    # unclassified failure is one this code did not anticipate, and sending
+    # somebody to re-check credentials that are fine is worse than admitting
+    # that.
+    ErrorClass.UNKNOWN: (
+        "not a failure this system recognises; the detail above is the raw error, "
+        "and the service log has the traceback. Nothing here points at your "
+        "settings -- if it recurs it is a fault to report rather than a setting "
+        "to change"
+    ),
 }
 
 

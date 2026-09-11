@@ -194,8 +194,18 @@ class S3Client(ObjectSource, ObjectDestination):
     @property
     def client(self) -> Any:
         if self._client is None:
+            # UNKNOWN, not CONFIG_ERROR. Using a client after it has been
+            # closed is a fault in this codebase; nothing about the endpoint,
+            # region, bucket or clock is wrong. Classifying it as a
+            # configuration error printed "misconfigured -- check the
+            # endpoint, region and bucket; also check clock skew" on the
+            # failures panel, and an operator went and checked all of them.
+            # An error class is a diagnosis, and a confident wrong diagnosis
+            # costs more than none.
             raise TransferError(
-                ErrorClass.CONFIG_ERROR, "S3Client used outside its async context manager"
+                ErrorClass.UNKNOWN,
+                "an S3 client was used after it was closed -- this is a fault "
+                "in c2w, not in this account's configuration",
             )
         return self._client
 
