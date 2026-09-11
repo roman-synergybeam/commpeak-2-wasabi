@@ -125,10 +125,28 @@ class Worker:
             # outer step, and `SKIP LOCKED` then stops skipping *while*
             # selecting, so two workers pick the same head rows and the second
             # gets nothing. See claim_batch.
-            share = max(2, per_conn * 2)
+            # How many to take per account, derived from the caps the
+            # operator already set rather than from a magic multiplier.
+            #
+            # This was `max(2, per_conn * 2)`, which with the live setting of
+            # one concurrent transfer per account meant **two jobs per account
+            # per pass**. A pass therefore transferred a dozen objects and
+            # then stopped to re-claim, and the measured result was sixteen
+            # transfers in flight out of the thirty those accounts allow --
+            # roughly half the duty cycle spent claiming rather than copying.
+            #
+            # Filling the claim batch across the accounts that actually have
+            # work keeps the pipeline full between claims. It does **not**
+            # raise how many run at once against any one account: that is
+            # still gated by `source.concurrency_per_connection` inside
+            # `_run_connection_group`, so CommPeak sees exactly what it did
+            # before. More jobs per pass, same concurrency.
+            accounts = await self._connections_with_work(session)
+            ceiling = min(batch, global_cap)
+            share = max(per_conn * 2, ceiling // max(1, len(accounts)))
             jobs: list[TransferJob] = []
-            for connection_id in await self._connections_with_work(session):
-                if len(jobs) >= min(batch, global_cap):
+            for connection_id in accounts:
+                if len(jobs) >= ceiling:
                     break
                 jobs.extend(
                     await queue.claim_batch(
