@@ -31,7 +31,12 @@ from c2w.db.models.core import (
     Tenant,
     TransferJob,
 )
-from c2w.db.session import dispose_engine, platform_session
+from c2w.db.session import (
+    MAX_OVERFLOW,
+    POOL_SIZE,
+    dispose_engine,
+    platform_session,
+)
 from c2w.logging import configure_logging, get_logger, reconfigure_from_settings
 from c2w.settings import settings_service
 from c2w.storage.commpeak import CommPeakSource
@@ -63,6 +68,22 @@ class Worker:
         self._clients: dict[tuple[str, int, object], S3Client] = {}
         #: Clients taken out of service but not yet closed. See `_retire`.
         self._retired: list[S3Client] = []
+        #: Caps concurrent transfers at what this process's connection pool
+        #: can serve.
+        #:
+        #: `_run_job` holds a session for the whole transfer, so a running job
+        #: *is* a connection. The concurrency settings and the pool size were
+        #: two unrelated numbers, and exceeding the pool does not queue -- it
+        #: fails. Measured during a speed trial: five workers exhausted
+        #: PostgreSQL's 100 slots and logged 38 `TooManyConnectionsError`
+        #: refusals in three minutes, each a transfer that failed for no
+        #: reason of its own, and the console was one request away from the
+        #: same. A database's connection limit should not be something a
+        #: settings page can walk past.
+        #:
+        #: Two slots are held back for the pass's own bookkeeping: the claim,
+        #: the settings reads, the reclaim.
+        self._pool_gate = asyncio.Semaphore(max(1, POOL_SIZE + MAX_OVERFLOW - 2))
 
     def request_stop(self) -> None:
         self._stopping.set()
@@ -142,6 +163,11 @@ class Worker:
             # `_run_connection_group`, so CommPeak sees exactly what it did
             # before. More jobs per pass, same concurrency.
             accounts = await self._connections_with_work(session)
+            # Claiming is not running: a claimed job waits its turn and holds
+            # nothing. So the claim ceiling stays as configured, and the
+            # connection pool bounds *execution* instead -- see `_pool_gate`.
+            # Clamping this number was tried and starved the pipeline, leaving
+            # half the pool idle at a third of the throughput.
             ceiling = min(batch, global_cap)
             share = max(per_conn * 2, ceiling // max(1, len(accounts)))
             jobs: list[TransferJob] = []
@@ -243,7 +269,7 @@ class Worker:
         gate = asyncio.Semaphore(per_connection)
 
         async def run_one(job: TransferJob) -> None:
-            async with gate, brand_gates[job.brand_id]:
+            async with self._pool_gate, gate, brand_gates[job.brand_id]:
                 await self._run_job(job.id, limiter)
 
         await asyncio.gather(*(run_one(job) for job in jobs))
