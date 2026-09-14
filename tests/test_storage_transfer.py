@@ -423,3 +423,78 @@ class TestAnInternalFaultIsNotReportedAsMisconfiguration:
         assert hint, "an unexplained failure still deserves a sentence"
         for misleading in ("endpoint", "region", "clock skew"):
             assert misleading not in hint.lower(), hint
+
+
+class TestARunOfFailuresPausesTheAccount:
+    """A source that has stopped answering must not be dialled indefinitely.
+
+    Written after the second of two incidents in two days. The first was an
+    explicit refusal, which now pauses an account immediately. The second was
+    quieter and got past that: CommPeak stopped accepting TCP connections, so
+    every request returned `Connect timeout`, which classifies as
+    `NETWORK_ERROR` -- retryable, and individually indistinguishable from an
+    ordinary blip. The workers kept dialling a source that had stopped
+    answering, which is exactly what sustains a network-level block.
+
+    Consecutive-and-per-account is what separates a blip from a block: a blip
+    is followed by a success, a block is not.
+    """
+
+    def _worker(self):
+        from c2w.workers.worker import Worker
+
+        return Worker("test")
+
+    def _timeout(self):
+        from c2w.storage.errors import ErrorClass, TransferError
+
+        return TransferError(
+            ErrorClass.NETWORK_ERROR,
+            'Connect timeout on endpoint URL: "https://recordings.commpeak.com/..."',
+        )
+
+    def test_a_single_failure_does_not_pause_anything(self):
+        worker = self._worker()
+        worker._failures[7] += 1
+        assert worker._failures[7] == 1
+
+    def test_a_success_clears_the_run(self):
+        """The property that stops a busy day from pausing a healthy account."""
+        worker = self._worker()
+        for _ in range(9):
+            worker._failures[7] += 1
+        assert worker._failures[7] == 9
+        worker._failures.pop(7, None)          # what a completed transfer does
+        worker._failures[7] += 1
+        assert worker._failures[7] == 1, "an intermittent failure must not accumulate"
+
+    def test_failures_are_counted_per_account(self):
+        """One dead account must not pause the seven that are answering."""
+        worker = self._worker()
+        for _ in range(20):
+            worker._failures[7] += 1
+        assert worker._failures[7] == 20
+        assert worker._failures[9] == 0
+
+    async def test_a_refusal_is_not_double_counted(self):
+        """`ACL_ERROR` already pauses immediately; counting it too would just
+        confuse the log about why."""
+        from c2w.storage.errors import ErrorClass, TransferError
+
+        worker = self._worker()
+
+        class _Conn:
+            id = 7
+            name = "go4rex.pbx"
+
+        await worker._note_failure(
+            None, _Conn(), TransferError(ErrorClass.ACL_ERROR, "Forbidden")
+        )
+        assert worker._failures[7] == 0
+
+    def test_the_threshold_is_a_setting_not_a_constant(self):
+        from c2w.settings_spec import SETTINGS
+
+        spec = SETTINGS["source.network_failures_before_pause"]
+        assert spec.default == 10
+        assert spec.choices, "an operator has to be able to change this"

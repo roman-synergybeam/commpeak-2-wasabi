@@ -1074,6 +1074,23 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         brand_overridable=True,
     ),
     SettingSpec(
+        key="source.network_failures_before_pause",
+        choices=('3', '5', '10', '20', '50'),
+        type=SettingType.INT,
+        default=10,
+        category="CommPeak calls",
+        label="Pause an account after this many failures in a row",
+        description="A source that has stopped answering does not answer the "
+        "next request either, and retrying is what keeps a block in place. "
+        "Refusals already pause an account immediately; this covers the quieter "
+        "case where CommPeak simply stops accepting connections, which arrives "
+        "as a connect timeout and looks like an ordinary network blip until you "
+        "count them. Counted per account and reset by any success, so a genuine "
+        "blip costs nothing.",
+        unit="failures",
+        validator=_positive,
+    ),
+    SettingSpec(
         key="source.watch_interval_seconds",
         choices=('60', '120', '300', '600', '900'),
         type=SettingType.INT,

@@ -997,6 +997,57 @@ queue, the change log and every unpartitioned table are in it too, about a
 fifth of the total on this estate -- so the two figures will never add up, and
 that is correct rather than a discrepancy to chase.
 
+## CommPeak's concurrency limit is real, and exceeding it is slower
+
+Their documentation recommends about **5 concurrent requests per S3 account**.
+That figure has now been tested twice, both times because "make it faster" was
+read as "find the real ceiling". Both attempts cost an outage, and the second
+produced the measurement that settles it:
+
+| Concurrent per account | Throughput |
+|---|---|
+| 4-5 (documented) | **465/min** |
+| 8 | **239/min** |
+
+**Exceeding the limit does not trade risk for speed. It is simply slower** --
+requests hang, time out and are retried, and half as much work gets done. There
+is no operating point above their figure that is worth having.
+
+**What it costs when it goes wrong, in order of escalation.** Three days at
+30 per account produced a progressive slowdown -- 2.6M, then 1.08M, then 660k,
+then 193k recordings a day -- which nobody read as a signal, and then an
+outright nginx 403 on every account for four hours. Twelve hours later, twelve
+minutes at 8 per account escalated further: CommPeak stopped accepting **TCP
+connections** from this address altogether, and reverting the setting did not
+bring it back. An HTTP-level block cleared after 65 minutes of silence; a
+connection-level one is worse and slower.
+
+**The trap in testing it.** Both trials looked fine at first. A three-minute
+window at 30 per account showed no refusals at all, and that was reported as
+evidence their real tolerance was higher -- it was evidence about three
+minutes. Throttling here is cumulative and arrives late, so a short clean
+window says nothing about a sustained setting. **Do not re-test this.** If a
+higher figure is ever wanted, get it from CommPeak in writing.
+
+**Reading the refusal.** It arrives in three shapes and they escalate:
+
+| What you see | What it means |
+|---|---|
+| nginx HTML 403, no S3 XML | refused above the S3 layer -- ACL or rate limit |
+| `Connect timeout on endpoint URL` | they have stopped accepting connections |
+| plain TCP connect to :443 failing | connection-level block; no credential involved |
+
+The last is worth knowing because it is cheap to check and involves nothing of
+ours: `cat < /dev/null > /dev/tcp/<ip>/443` either connects or it does not.
+
+**Retrying is what sustains all three.** A refusal pauses the account at once
+(`_disable_account`). A connect timeout classifies as `NETWORK_ERROR` and is
+retryable, which is correct for a blip and wrong for a block, so
+`_note_failure` counts them consecutively per account and pauses after
+`source.network_failures_before_pause`. A success clears the count, which is
+what tells a blip from a block. Without that, four workers dialled a source
+that had stopped answering for as long as anyone left them running.
+
 ## Out of scope for v1
 
 Voice transcription and analysis, FXRide CRM, Zendesk. Do not build these; do

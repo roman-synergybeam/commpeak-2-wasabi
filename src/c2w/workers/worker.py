@@ -68,6 +68,9 @@ class Worker:
         self._clients: dict[tuple[str, int, object], S3Client] = {}
         #: Clients taken out of service but not yet closed. See `_retire`.
         self._retired: list[S3Client] = []
+        #: Consecutive failures per account, reset by any success. See
+        #: `_note_failure`.
+        self._failures: dict[int, int] = defaultdict(int)
         #: Caps concurrent transfers at what this process's connection pool
         #: can serve.
         #:
@@ -300,6 +303,45 @@ class Worker:
             WasabiDestination, await self._client_for("dest", destination, limiter, session)
         )
 
+    async def _note_failure(
+        self,
+        session: AsyncSession,
+        connection: CommPeakConnection,
+        error: TransferError,
+    ) -> None:
+        """Pause an account that has failed repeatedly with nothing else to say.
+
+        A refusal is explicit and pauses the account at once. This is for the
+        quieter shape: CommPeak stops accepting connections altogether, every
+        request comes back `Connect timeout`, and each one classifies as
+        `NETWORK_ERROR` -- individually indistinguishable from an ordinary
+        blip, and retryable, so the workers keep dialling a source that has
+        stopped answering. That is what a network-level block looks like from
+        here, and retrying into it is what sustains it.
+
+        Counting consecutively and per account is what separates the two: a
+        real blip is followed by a success, which clears the count, while a
+        block produces an unbroken run. Only the run pauses the account.
+        """
+        if error.error_class in (ErrorClass.ACL_ERROR, ErrorClass.AUTH_ERROR):
+            return  # already handled, and handled immediately
+        self._failures[connection.id] += 1
+        seen = self._failures[connection.id]
+        limit = await settings_service.get_int(
+            session, "source.network_failures_before_pause"
+        )
+        if seen < limit:
+            return
+        log.warning(
+            "worker.account_unresponsive",
+            connection_id=connection.id,
+            account=connection.name,
+            consecutive_failures=seen,
+            last_error=str(error)[:200],
+        )
+        await self._disable_account(session, connection, error)
+        self._failures.pop(connection.id, None)
+
     async def _disable_account(
         self,
         session: AsyncSession,
@@ -481,6 +523,10 @@ class Worker:
                     write_sidecar=write_sidecar,
                 )
                 await queue.complete(session, job, bytes_transferred=outcome.bytes_transferred)
+                # One success is enough to clear the account's failure run: the
+                # count exists to spot a source that has stopped answering, and
+                # a source that just answered plainly has not.
+                self._failures.pop(connection.id, None)
                 # The archive's totals are deliberately **not** maintained
                 # here. This used to do `destination.bytes_stored += n`, which
                 # was wrong twice over: it is a read-modify-write of a value
@@ -498,6 +544,7 @@ class Worker:
 
             except Exception as exc:
                 error = exc if isinstance(exc, TransferError) else classify_exception(exc)
+                await self._note_failure(session, connection, error)
                 if error.error_class in (ErrorClass.ACL_ERROR, ErrorClass.AUTH_ERROR):
                     # Stop using this account until something proves it works
                     # again. Without this, a source that refuses one request
