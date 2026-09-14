@@ -991,6 +991,22 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         validator=_commpeak_concurrency,
     ),
     SettingSpec(
+        key="archive.source_objects_estimate",
+        type=SettingType.INT,
+        default=19_300_000,
+        category="Copying to the archive",
+        label="Recordings held at CommPeak (estimate)",
+        description="How many recordings CommPeak holds in total, across all "
+        "eight buckets. This cannot be measured from here without listing every "
+        "bucket end to end, so it is the figure from the original survey and it "
+        "is only as good as that survey. The dashboard uses it to work out how "
+        "far the copy has got and when it will finish, and labels the result as "
+        "an estimate because of this number. Correct it whenever you have a "
+        "better count -- the completion date moves with it.",
+        unit="recordings",
+        validator=_positive,
+    ),
+    SettingSpec(
         key="ui.stats_cache_seconds",
         choices=('0', '30', '60', '120', '300', '600'),
         choice_labels={"0": "no caching — recount every time"},
