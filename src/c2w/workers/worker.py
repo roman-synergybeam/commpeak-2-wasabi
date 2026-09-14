@@ -22,7 +22,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from c2w.alerts.base import Alert, Severity, dispatch
-from c2w.db.base import JobKind, JobState, RecordingState
+from c2w.db.base import ConnectionStatus, JobKind, JobState, RecordingState
 from c2w.db.models.core import (
     Brand,
     CommPeakConnection,
@@ -241,6 +241,10 @@ class Worker:
                     SELECT c.id
                     FROM commpeak_connections c
                     WHERE c.is_enabled
+                      -- An account the source is refusing is not an account
+                      -- with work; claiming for it only feeds the refusal.
+                      -- `_watch_access` brings it back when it recovers.
+                      AND c.status <> 'ERROR'
                       AND EXISTS (
                           SELECT 1 FROM transfer_jobs j
                           WHERE j.connection_id = c.id
@@ -295,6 +299,33 @@ class Worker:
         return cast(
             WasabiDestination, await self._client_for("dest", destination, limiter, session)
         )
+
+    async def _disable_account(
+        self,
+        session: AsyncSession,
+        connection: CommPeakConnection,
+        error: TransferError,
+    ) -> None:
+        """Mark an account unusable so nothing claims for it until it recovers.
+
+        Deliberately writes the status even though `test_connection` also owns
+        that column: the column means "what we last learned about this
+        account", and a transfer being refused is learning something. Leaving
+        it at OK while every request fails is what let the queue keep feeding
+        the refusal.
+        """
+        if connection.status is ConnectionStatus.ERROR:
+            return
+        connection.status = ConnectionStatus.ERROR
+        connection.status_detail = str(error)[:500]
+        await session.flush()
+        log.warning(
+            "worker.account_disabled",
+            connection_id=connection.id,
+            account=connection.name,
+            error_class=str(error.error_class),
+        )
+        self._evict_clients(connection.id)
 
     async def _client_for(
         self,
@@ -467,6 +498,27 @@ class Worker:
 
             except Exception as exc:
                 error = exc if isinstance(exc, TransferError) else classify_exception(exc)
+                if error.error_class in (ErrorClass.ACL_ERROR, ErrorClass.AUTH_ERROR):
+                    # Stop using this account until something proves it works
+                    # again. Without this, a source that refuses one request
+                    # refuses all of them, and the worker simply pulls the next
+                    # job from a nine-million-deep queue and asks again.
+                    #
+                    # That is not hypothetical: CommPeak began refusing at
+                    # 08:19 one morning and the workers made **105,000 refused
+                    # requests over the next four hours**, about 590 a minute.
+                    # Their refusal is rate-limited as well as permission-based
+                    # and the two are indistinguishable in the response, so a
+                    # retry storm does not merely waste requests -- it is the
+                    # thing that keeps the block alive. The system spent four
+                    # hours ensuring it could not recover.
+                    #
+                    # `_watch_access` in the scheduler is the way back: it
+                    # re-probes one ERROR account at a time, oldest first, and
+                    # returns it to service the moment a single cheap listing
+                    # succeeds. That path existed already; nothing ever put an
+                    # account into ERROR from the transfer path to use it.
+                    await self._disable_account(session, connection, error)
                 if error.error_class in (ErrorClass.NETWORK_ERROR, ErrorClass.AUTH_ERROR):
                     # A dead connection pool, or credentials that have been
                     # changed underneath us. Either way the cached client is

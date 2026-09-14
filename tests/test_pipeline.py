@@ -1427,6 +1427,42 @@ class TestTheClaimSpreadsAcrossAccounts:
             await s.commit()
             assert await Worker("test")._connections_with_work(s) == []
 
+    async def test_an_account_the_source_is_refusing_is_not_claimed_for(self, db, scenario):
+        """The circuit breaker, stated as the rule it enforces.
+
+        Written after a real incident: CommPeak began refusing at 08:19 and the
+        workers made **105,000 refused requests over four hours**, about 590 a
+        minute, because nothing connected "this account is refusing every
+        request" to "stop taking jobs for this account". Their refusal is
+        rate-limited as well as permission-based and the response cannot tell
+        the two apart, so the retry storm was not merely wasted -- it is what
+        keeps the block alive.
+
+        `_watch_access` re-probes one ERROR account at a time and returns it to
+        service when a single listing succeeds, so nothing here is permanent.
+        """
+        from c2w.workers.worker import Worker
+
+        big, _small = await self._two_accounts(db, scenario)
+
+        async with db() as s:
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            before = await Worker("test")._connections_with_work(s)
+            assert big in before, before
+
+            await s.execute(
+                text("UPDATE commpeak_connections SET status = 'ERROR' WHERE id = :i"),
+                {"i": big},
+            )
+            await s.commit()
+
+            after = await Worker("test")._connections_with_work(s)
+
+        assert big not in after, "kept claiming for an account the source is refusing"
+
     async def test_no_account_is_permanently_first(self, db, scenario):
         """What replaced "fewest queued first".
 
