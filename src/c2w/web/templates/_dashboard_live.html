@@ -55,6 +55,86 @@
   </div>
 </div>
 
+{# Progress against CommPeak itself, which is a different question from the
+   bar above.
+
+   That one measures against what has been *indexed*, and the inventory has
+   walked only part of the estate -- so it reads far higher than the share of
+   CommPeak actually copied. Both are true and they answer different
+   questions; this is the one that decides when anything can be deleted at the
+   source, so it is worth its own panel rather than a footnote.
+
+   The source total is an estimate and the wording says so everywhere it is
+   used. No date is shown unless the archive is genuinely gaining: recordings
+   keep arriving, so a copy rate below the arrival rate never finishes however
+   long it runs, and printing a confident date in that case would be the worst
+   thing this panel could do. #}
+{% if convergence %}
+  <h2>CommPeak and the archive</h2>
+  <div class="card">
+    <div class="bar"><span style="width: {{ convergence.percent }}%"></span></div>
+    <div class="barline">
+      <span><strong>{{ "{:,}".format(convergence.archived) }}</strong> in the archive</span>
+      <span><strong>{{ "{:,}".format(convergence.remaining) }}</strong> still at CommPeak</span>
+      <span><strong>{{ convergence.percent }}%</strong>
+        of about {{ "{:,}".format(convergence.source_estimate) }} (estimated)</span>
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <div>
+        <p class="hint">Copying</p>
+        <strong class="tnum">{{ "{:,}".format(convergence.rate_per_day) }}</strong>
+        <p class="hint">recordings a day</p>
+      </div>
+      <div>
+        <p class="hint">Arriving at CommPeak</p>
+        <strong class="tnum">{{ "{:,}".format(convergence.inflow_per_day) }}</strong>
+        <p class="hint">recordings a day</p>
+      </div>
+      <div>
+        <p class="hint">Gap closing by</p>
+        <strong class="tnum" {% if convergence.net_per_day <= 0 %}class="bad"{% endif %}>
+          {{ "{:+,}".format(convergence.net_per_day) }}</strong>
+        <p class="hint">a day &mdash; this is what decides the date</p>
+      </div>
+      <div>
+        <p class="hint">Equal on</p>
+        {% if convergence.state == 'converging' %}
+          <strong class="tnum">{{ convergence.eta | dt }}</strong>
+          <p class="hint">in about
+            {{ "{:,.0f}".format(convergence.days_remaining) }} days, at today's rate</p>
+        {% elif convergence.state == 'complete' %}
+          <strong>done</strong>
+          <p class="hint">the archive holds everything the estimate says exists</p>
+        {% else %}
+          <strong>&mdash;</strong>
+          <p class="hint">no date can be given &mdash; see below</p>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if convergence.state == 'stalled' %}
+      <div class="note caution" style="margin-top:12px">
+        <h3>Nothing has been copied in the last day</h3>
+        <p>The archive is not gaining on CommPeak at all, so there is no
+           completion date to give. Check the accounts on the sync page: an
+           account the source is refusing is taken out of service and retried
+           on a timer rather than hammered.</p>
+      </div>
+    {% elif convergence.state == 'losing' %}
+      <div class="note caution" style="margin-top:12px">
+        <h3>Copying no faster than recordings arrive</h3>
+        <p>About {{ "{:,}".format(convergence.inflow_per_day) }} new recordings
+           reach CommPeak each day and
+           {{ "{:,}".format(convergence.rate_per_day) }} are being copied, so the
+           gap is not closing and no completion date is possible. This is a
+           throughput problem rather than a waiting problem: the two sides will
+           not converge on their own.</p>
+      </div>
+    {% endif %}
+  </div>
+{% endif %}
+
 {# The split, for a platform administrator looking at more than one
    organisation. The totals above are the sum; this says where they came from,
    which is the question the sum immediately raises. #}

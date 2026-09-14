@@ -90,6 +90,9 @@ from c2w.settings_spec import SETTINGS, SettingType, specs_by_category
 from c2w.storage.commpeak import COMMPEAK_ENDPOINT
 from c2w.storage.errors import ErrorClass, TransferError
 from c2w.sync import queue
+from c2w.sync.convergence import Convergence, convergence
+from c2w.sync.convergence import as_context as convergence_context
+from c2w.sync.convergence import merge as merge_convergence
 from c2w.web.accounts import (
     AccountError,
     add_connection,
@@ -875,9 +878,16 @@ async def _dashboard_live_context(
     # per organisation every ten seconds -- which was most of the database
     # server's load. Zero means recount every time, for anyone who wants that.
     cache_seconds = await settings_service.get_int(session, "ui.stats_cache_seconds")
+    source_estimate = await settings_service.get_int(
+        session, "archive.source_objects_estimate"
+    )
+    convergences: list[Convergence] = []
     for brand_id in brand_ids:
         async with _scoped_to(session, brand_id):
             one = await dashboard_stats(session, cache_seconds=cache_seconds)
+            convergences.append(
+                await convergence(session, source_estimate=source_estimate)
+            )
         parts.append(one)
         per_brand.append(
             {
@@ -892,6 +902,10 @@ async def _dashboard_live_context(
             }
         )
     stats = _merge_dashboard_stats(parts)
+    # How far the archive is from the source, and whether it is gaining. The
+    # estimate is per organisation and the same global figure, so the merge
+    # takes the larger rather than summing -- summing would double it.
+    merged_convergence = merge_convergence(convergences)
     order = [
         "AVAILABLE",
         "VERIFIED",
@@ -914,6 +928,7 @@ async def _dashboard_live_context(
         # dashboard raises -- and not merely when the tab last drew.
         "live_at": f"{datetime.now(UTC):%H:%M:%S}Z",
         "live_every": _DASHBOARD_REFRESH_SECONDS,
+        "convergence": convergence_context(merged_convergence),
     }
 
 

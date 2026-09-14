@@ -1737,3 +1737,101 @@ class TestTheCallsPagerOffersNumberedPages:
         pager = body[body.index('<div class="pager"') :]
         assert "page 1 of" in pager, pager[:600]
         assert "+ calls" not in pager, pager[:600]
+
+
+class TestTheConvergenceEstimate:
+    """When the archive will hold everything CommPeak holds.
+
+    The question decides when deleting at the source can be contemplated, so
+    the arithmetic is worth testing directly -- particularly the cases where
+    the honest answer is that there is no date.
+
+    The trap it exists to avoid: recordings keep arriving, so a copy rate that
+    looks impressive can still be losing ground. An ETA computed from the copy
+    rate alone would print a comfortable finish date on a day the gap was
+    widening.
+    """
+
+    def _c(self, **kw):
+        from c2w.sync.convergence import Convergence, ConvergenceState
+
+        base = dict(
+            archived=5_000_000, indexed=10_000_000, source_estimate=19_300_000,
+            archived_bytes=4_440_000_000_000, rate_per_day=1_000_000,
+            inflow_per_day=35_000, state=ConvergenceState.CONVERGING,
+        )
+        base.update(kw)
+        return Convergence(**base)
+
+    def test_the_gap_is_measured_against_the_source_not_the_index(self):
+        """Progress against what has been indexed reads far higher, and is a
+        different question -- the index itself is incomplete."""
+        c = self._c()
+        assert c.remaining == 19_300_000 - 5_000_000
+        assert c.percent == round(100 * 5_000_000 / 19_300_000, 1)
+
+    def test_the_date_is_computed_from_the_net_rate(self):
+        c = self._c(rate_per_day=1_035_000, inflow_per_day=35_000)
+        assert c.net_per_day == 1_000_000
+        assert c.days_remaining == 14.3
+        assert c.eta is not None
+
+    def test_no_date_when_the_copy_is_not_outpacing_arrivals(self):
+        """The load-bearing case. 30,000 a day sounds like progress and is not."""
+        from c2w.sync.convergence import ConvergenceState
+
+        c = self._c(rate_per_day=30_000, inflow_per_day=35_000,
+                    state=ConvergenceState.LOSING)
+        assert c.net_per_day < 0
+        assert c.days_remaining is None, "a date here would be a fiction"
+        assert c.eta is None
+
+    def test_no_date_when_nothing_is_copying(self):
+        from c2w.sync.convergence import ConvergenceState
+
+        c = self._c(rate_per_day=0, state=ConvergenceState.STALLED)
+        assert c.days_remaining is None
+        assert c.eta is None
+
+    def test_a_finished_archive_reports_complete(self):
+        from c2w.sync.convergence import ConvergenceState
+
+        c = self._c(archived=19_300_000, state=ConvergenceState.COMPLETE)
+        assert c.remaining == 0
+        assert c.days_remaining is None
+
+    def test_merging_organisations_does_not_double_the_source_estimate(self):
+        """The estimate is one platform-wide figure, so it is taken, not summed."""
+        from c2w.sync.convergence import merge
+
+        merged = merge([self._c(archived=3_000_000), self._c(archived=2_000_000)])
+        assert merged is not None
+        assert merged.archived == 5_000_000
+        assert merged.source_estimate == 19_300_000, "summing would say 38.6M"
+        assert merged.rate_per_day == 2_000_000
+
+    def test_merging_recomputes_the_state_rather_than_picking_one(self):
+        """One organisation stalled and another converging has no merged state
+        except the one the merged rates imply."""
+        from c2w.sync.convergence import ConvergenceState, merge
+
+        merged = merge([
+            self._c(rate_per_day=0, state=ConvergenceState.STALLED),
+            self._c(rate_per_day=20_000, inflow_per_day=35_000,
+                    state=ConvergenceState.LOSING),
+        ])
+        assert merged is not None
+        # 0 + 20,000 copied against 70,000 arriving: still losing.
+        assert merged.state is ConvergenceState.LOSING
+
+    def test_a_zero_estimate_does_not_divide_by_zero(self):
+        c = self._c(source_estimate=0)
+        assert c.percent == 0.0
+
+    async def test_the_dashboard_renders_the_panel(self, app_client, scenario):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/")
+        assert page.status_code == 200
+        assert "CommPeak and the archive" in page.text
+        # The estimate is never presented as a measurement.
+        assert "estimated" in page.text
