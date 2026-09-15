@@ -562,6 +562,41 @@ def _json_attr(value: Any) -> str:
     return json.dumps(value)
 
 
+def _second_operator(row: Any) -> str | None:
+    """The agent a call was transferred *to*, when that is somebody else.
+
+    CommPeak populates `bridged_agent_*` even when no transfer took place --
+    the same extension appears in both fields -- so rendering it
+    unconditionally produced "Bruno Santos then Bruno Santos" on ordinary
+    calls. "Then" asserts a transfer, and repeating one name asserts it
+    happened to the same person, which is worse than saying nothing: it makes
+    the reader look for an event that never occurred.
+
+    The extension is the identifier, so it decides when both are present --
+    two agents can share a display name, and the same agent can be recorded
+    with a name in one field and a bare `Ext-150` in the other. The name
+    comparison is the fallback, case-insensitively, for the rows that carry no
+    extension.
+    """
+    def _get(key: str) -> str:
+        getter = getattr(row, "get", None)
+        value = getter(key) if callable(getter) else getattr(row, key, None)
+        return str(value).strip() if value else ""
+
+    second = _get("bridged_agent_name") or _get("bridged_agent_extension")
+    if not second:
+        return None
+
+    first_ext, second_ext = _get("agent_extension"), _get("bridged_agent_extension")
+    if first_ext and second_ext:
+        return None if first_ext == second_ext else second
+
+    first = _get("agent_name") or first_ext
+    if first and first.casefold() == second.casefold():
+        return None
+    return second
+
+
 def register(env: Any) -> None:
     env.filters.update(
         {
@@ -571,6 +606,7 @@ def register(env: Any) -> None:
             "dtlocal": _dtlocal,
             "number": _number,
             "media_pill": _media_pill,
+            "second_operator": _second_operator,
             "archived_pct": _archived_pct,
             "meter_class": _meter_class,
             "state_class": lambda v: _STATE_CLASS.get(str(v), "idle"),

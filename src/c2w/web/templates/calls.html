@@ -26,9 +26,29 @@
   <div class="row">
     <div>
       <label for="q">Number</label>
-      <input id="q" name="number" type="search" value="{{ q.number or '' }}"
-             placeholder="441632960770 or 9607">
-      <p class="hint">Full number, or any part of one.</p>
+      <div class="numsearch">
+        <select name="number_match" aria-label="How to match the number">
+          {# `contains` first because it is the default and what the field did
+             before the other modes existed. #}
+          <option value="contains" {{ 'selected' if q.number_match == 'contains' }}>contains</option>
+          <option value="begins"   {{ 'selected' if q.number_match == 'begins' }}>begins with</option>
+          <option value="ends"     {{ 'selected' if q.number_match == 'ends' }}>ends with</option>
+          <option value="exact"    {{ 'selected' if q.number_match == 'exact' }}>is exactly</option>
+        </select>
+        <input id="q" name="number" type="search" value="{{ q.number or '' }}"
+               placeholder="441632960770, 9607, or 345???*">
+      </div>
+      {# The wildcards are worth spelling out: nobody guesses that `?` means
+         one digit, and a search that silently treats them as literals would
+         return nothing and look broken. #}
+      <p class="hint">
+        Full number, or any part of one. Wildcards work in any mode and
+        override it: <code>*</code> stands for any run of digits and
+        <code>?</code> for exactly one &mdash; so <code>*345*</code> finds 345
+        anywhere, <code>?345*</code> finds it after one digit, and
+        <code>345???*</code> finds numbers starting 345 with three more digits
+        then anything.
+      </p>
     </div>
     <div>
       <label for="from">From</label>

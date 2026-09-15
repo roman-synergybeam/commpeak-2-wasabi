@@ -22,7 +22,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +34,7 @@ __all__ = [
     "MAX_MERGE_ROWS",
     "MAX_OFFSET",
     "MAX_PAGE_SIZE",
+    "NUMBER_MATCHES",
     "CdrPage",
     "CdrQuery",
     "SortField",
@@ -42,6 +43,7 @@ __all__ = [
     "forget_cached_stats",
     "get_call",
     "search_cdrs",
+    "transcripts_for_call",
 ]
 
 MAX_PAGE_SIZE = 200
@@ -89,6 +91,9 @@ class CdrQuery:
     date_from: datetime | None = None
     date_to: datetime | None = None
     number: str | None = None
+    #: How `number` is matched: contains | begins | ends | exact.
+    #: Ignored when the number itself carries `*` or `?` wildcards.
+    number_match: str = "contains"
     direction: str | None = None
     agent: str | None = None
     status: str | None = None
@@ -181,6 +186,51 @@ class CdrPage:
         return _with_gaps(sorted(wanted), open_ended=False)
 
 
+#: Which ways a number can be matched. `contains` is the default and keeps the
+#: behaviour that existed before the others were offered.
+NUMBER_MATCHES: Final[tuple[str, ...]] = ("contains", "begins", "ends", "exact")
+
+#: A search carrying either of these is a pattern, whatever mode is selected --
+#: somebody who types `345???*` has already said what they mean.
+_WILDCARDS: Final[str] = "*?"
+
+
+def _digits_and_wildcards(raw: str) -> str:
+    """Keep digits and wildcards, drop everything else.
+
+    A number arrives written however the operator has it -- `+44 163 296 0770`,
+    `00441632960770`, `593990899917@did.commpeak.com` -- and the columns being
+    searched hold digits only. Stripping punctuation here is what lets
+    `+345*` work rather than silently matching nothing.
+    """
+    return "".join(ch for ch in raw if ch.isdigit() or ch in _WILDCARDS)
+
+
+def glob_to_like(pattern: str) -> str:
+    """Translate the operator's wildcards into a SQL LIKE pattern.
+
+    `*` is any run of digits and `?` is exactly one, which maps onto LIKE's
+    `%` and `_` exactly -- so this is a character swap rather than a parser.
+
+    The part that matters is the other direction: `%` and `_` are wildcards to
+    LIKE and ordinary characters to the person typing, so a literal one has to
+    be escaped or a search for `50%` would quietly match everything. They
+    cannot appear in a phone number, but this function is not the place to
+    assume that.
+    """
+    out: list[str] = []
+    for ch in pattern:
+        if ch == "*":
+            out.append("%")
+        elif ch == "?":
+            out.append("_")
+        elif ch in ("%", "_", "\\"):
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _build_filters(query: CdrQuery, params: dict[str, Any]) -> list[str]:
     start, end = query.effective_range()
     params["start"] = start
@@ -197,15 +247,51 @@ def _build_filters(query: CdrQuery, params: dict[str, Any]) -> list[str]:
 
     if query.number:
         raw = query.number.strip()
-        digits = normalise_msisdn(raw)
-        if digits and len(digits) >= 6:
-            # Exact suffix match on the normalised columns hits a btree index.
+        mode = query.number_match if query.number_match in NUMBER_MATCHES else "contains"
+        wild = _digits_and_wildcards(raw)
+
+        # Patterns and anchors match the **raw** `src`/`dst`, not `src_norm`.
+        #
+        # `src_norm` is `normalise_msisdn`, which keeps only the last nine
+        # digits -- `529999550185` is stored as `999550185`. That is right for
+        # correlation, which is what it was built for, and wrong for search:
+        # the calls list displays the raw number, so anchoring against the
+        # suffix means "begins with 52" can never match a number that visibly
+        # begins with 52. A filter has to agree with what the reader can see.
+        if any(ch in wild for ch in _WILDCARDS):
+            clauses.append(
+                "(c.src LIKE :pattern ESCAPE '\\' OR c.dst LIKE :pattern ESCAPE '\\')"
+            )
+            params["pattern"] = glob_to_like(wild)
+        elif mode == "exact":
+            # The exception, deliberately. "Exactly this number" is a question
+            # about identity rather than spelling, and the same number arrives
+            # as `+44 163 296 0770`, `00441632960770` and
+            # `441632960770@did.commpeak.com`. The suffix comparison is what
+            # makes those one number, and it is indexed.
             clauses.append("(c.src_norm = :digits OR c.dst_norm = :digits)")
-            params["digits"] = digits
+            params["digits"] = normalise_msisdn(raw) or wild
+        elif mode == "begins":
+            clauses.append(
+                "(c.src LIKE :begins ESCAPE '\\' OR c.dst LIKE :begins ESCAPE '\\')"
+            )
+            params["begins"] = glob_to_like(wild) + "%"
+        elif mode == "ends":
+            clauses.append(
+                "(c.src LIKE :ends ESCAPE '\\' OR c.dst LIKE :ends ESCAPE '\\')"
+            )
+            params["ends"] = "%" + glob_to_like(wild)
         else:
-            # Partial search: the trigram indexes make this viable.
-            clauses.append("(c.src ILIKE :like OR c.dst ILIKE :like)")
-            params["like"] = f"%{raw}%"
+            # `contains`, and deliberately unchanged: a full number pasted in
+            # resolves to an exact suffix match on an indexed column, which is
+            # how this is used most of the time and much the fastest path.
+            digits = normalise_msisdn(raw)
+            if digits and len(digits) >= 6:
+                clauses.append("(c.src_norm = :digits OR c.dst_norm = :digits)")
+                params["digits"] = digits
+            else:
+                clauses.append("(c.src ILIKE :like OR c.dst ILIKE :like)")
+                params["like"] = f"%{raw}%"
 
     if query.direction in ("in", "out"):
         clauses.append("c.direction = :direction")
@@ -322,6 +408,59 @@ async def search_cdrs(
         offset=offset,
         truncated=offset >= MAX_OFFSET,
     )
+
+
+async def transcripts_for_call(session: AsyncSession, cdr_id: int) -> list[dict[str, Any]]:
+    """Every transcript attached to a call, with its segments.
+
+    One per recording rather than one per call: a call split into parts has a
+    recording each, and merging them would invent a single timeline that does
+    not exist -- the parts can overlap or have gaps, and the timestamps are
+    relative to their own audio.
+
+    Segments come back ordered so the page can line them up against the
+    player, and `start_ms` is kept as milliseconds because that is what an
+    `<audio>` element seeks with.
+    """
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT t.id, t.recording_id, t.engine, t.model, t.language,
+                       t.language_detected, t.confidence, t.duration_seconds,
+                       t.text, t.redacted, t.diarized, t.speaker_count,
+                       t.failed_reason, t.created_at
+                FROM transcripts t
+                WHERE t.cdr_id = :cdr_id
+                ORDER BY t.recording_id, t.id
+                """
+            ),
+            {"cdr_id": cdr_id},
+        )
+    ).mappings().all()
+    if not rows:
+        return []
+
+    segments = (
+        await session.execute(
+            text(
+                """
+                SELECT transcript_id, seq, start_ms, end_ms, speaker,
+                       speaker_name, text, confidence
+                FROM transcript_segments
+                WHERE transcript_id = ANY(:ids)
+                ORDER BY transcript_id, seq
+                """
+            ),
+            {"ids": [r["id"] for r in rows]},
+        )
+    ).mappings().all()
+
+    by_transcript: dict[int, list[dict[str, Any]]] = {}
+    for seg in segments:
+        by_transcript.setdefault(seg["transcript_id"], []).append(dict(seg))
+
+    return [dict(r, segments=by_transcript.get(r["id"], [])) for r in rows]
 
 
 async def filter_options(session: AsyncSession, *, days: int = 90) -> dict[str, list[str]]:

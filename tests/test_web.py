@@ -1835,3 +1835,238 @@ class TestTheConvergenceEstimate:
         assert "CommPeak and the archive" in page.text
         # The estimate is never presented as a measurement.
         assert "estimated" in page.text
+
+
+class TestTheNumberSearchAcceptsWildcards:
+    """`*` for any run of digits, `?` for exactly one.
+
+    The two map onto SQL LIKE's `%` and `_` exactly, so the translation is a
+    character swap. The interesting part is the other direction: `%` and `_`
+    are wildcards to LIKE and ordinary characters to whoever is typing, so a
+    literal one must be escaped or a search for `50%` matches every row in the
+    table.
+    """
+
+    def test_the_documented_examples_translate_as_described(self):
+        from c2w.api.v1.cdrs import glob_to_like
+
+        assert glob_to_like("*345*") == "%345%"
+        assert glob_to_like("?345*") == "_345%"
+        assert glob_to_like("345???*") == "345___%"
+
+    def test_a_literal_percent_is_escaped_not_honoured(self):
+        """Otherwise `50%` silently matches everything, which reads as a bug
+        in the filter rather than in the pattern."""
+        from c2w.api.v1.cdrs import glob_to_like
+
+        assert glob_to_like("50%") == "50\\%"
+        assert glob_to_like("07_1") == "07\\_1"
+        assert glob_to_like("a\\b") == "a\\\\b"
+
+    def test_punctuation_is_dropped_so_a_typed_number_still_works(self):
+        """Numbers arrive as `+44 163 296 0770`; the columns hold digits."""
+        from c2w.api.v1.cdrs import _digits_and_wildcards
+
+        assert _digits_and_wildcards("+44 (0)163-296 0770") == "4401632960770"
+        assert _digits_and_wildcards("+345*") == "345*"
+        assert _digits_and_wildcards("345???*") == "345???*"
+
+    def _sql(self, **kw):
+        from c2w.api.v1.cdrs import CdrQuery, _build_filters
+
+        params: dict = {}
+        clauses = _build_filters(CdrQuery(**kw), params)
+        return " AND ".join(clauses), params
+
+    def test_begins_with_anchors_at_the_start(self):
+        sql, params = self._sql(number="0345", number_match="begins")
+        assert "LIKE :begins" in sql
+        assert params["begins"] == "0345%"
+
+    def test_ends_with_anchors_at_the_end(self):
+        sql, params = self._sql(number="0345", number_match="ends")
+        assert "LIKE :ends" in sql
+        assert params["ends"] == "%0345"
+
+    def test_a_wildcard_overrides_the_selected_mode(self):
+        """Somebody who types `345???*` has already said what they mean; the
+        menu should not quietly re-anchor it."""
+        sql, params = self._sql(number="345???*", number_match="begins")
+        assert "LIKE :pattern" in sql
+        assert params["pattern"] == "345___%"
+        assert "begins" not in params
+
+    def test_contains_keeps_the_fast_indexed_path(self):
+        """A full number pasted in must still resolve to an exact match on the
+        indexed column -- that is the common case and much the fastest."""
+        sql, params = self._sql(number="441632960770")
+        assert "src_norm = :digits" in sql
+        assert params["digits"] == "441632960770"
+
+    def test_an_unknown_mode_falls_back_rather_than_matching_nothing(self):
+        sql, _params = self._sql(number="441632960770", number_match="nonsense")
+        assert "src_norm = :digits" in sql
+
+    def test_the_escape_clause_is_present_wherever_like_is_used(self):
+        """Without ESCAPE the backslash in an escaped pattern is a literal
+        backslash, so `50%` would match nothing at all instead of `50%`."""
+        for mode, number in (("begins", "0345"), ("ends", "0345"), ("contains", "345*")):
+            sql, _ = self._sql(number=number, number_match=mode)
+            if "LIKE" in sql:
+                assert "ESCAPE" in sql, (mode, sql)
+
+    async def test_the_calls_page_offers_the_modes(self, app_client, scenario):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/calls")
+        assert page.status_code == 200
+        for mode in ("contains", "begins", "ends", "exact"):
+            assert f'value="{mode}"' in page.text, mode
+        assert "345???*" in page.text, "the wildcards must be explained on the page"
+
+    async def test_a_wildcard_search_returns_a_page_rather_than_an_error(
+        self, app_client, scenario
+    ):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        for pattern in ("*345*", "?345*", "345???*", "50%"):
+            page = await app_client.get(f"/calls?number={pattern.replace('%', '%25')}")
+            assert page.status_code == 200, (pattern, page.status_code)
+
+
+class TestTheSecondOperatorIsOnlyShownWhenItIsSomebodyElse:
+    """"Then" asserts a transfer, so repeating one name asserts a fiction.
+
+    CommPeak fills `bridged_agent_*` on ordinary calls, with the same
+    extension in both fields, so the calls list read "Bruno Santos then Bruno
+    Santos". That is worse than showing nothing: it makes the reader look for
+    a handover that never happened.
+    """
+
+    def _f(self, **row):
+        from c2w.web.filters import _second_operator
+
+        return _second_operator(row)
+
+    def test_the_same_extension_twice_is_not_a_transfer(self):
+        """The case from call 8888: 'Ext-150' in both fields."""
+        assert self._f(
+            agent_name="Ext-150", agent_extension="150",
+            bridged_agent_name="Ext-150", bridged_agent_extension="150",
+        ) is None
+
+    def test_a_real_transfer_still_names_the_second_agent(self):
+        assert self._f(
+            agent_name="Ana Ruiz", agent_extension="101",
+            bridged_agent_name="Luis Diaz", bridged_agent_extension="102",
+        ) == "Luis Diaz"
+
+    def test_the_extension_decides_when_both_are_present(self):
+        """One agent can be recorded with a name in one field and a bare
+        `Ext-150` in the other -- the same person, spelled two ways."""
+        assert self._f(
+            agent_name="Bruno Santos", agent_extension="150",
+            bridged_agent_name="Ext-150", bridged_agent_extension="150",
+        ) is None
+
+    def test_two_agents_sharing_a_display_name_are_still_two_agents(self):
+        """The reason the extension wins over the name: a real handover
+        between two people who happen to share a name must not vanish."""
+        assert self._f(
+            agent_name="J Silva", agent_extension="101",
+            bridged_agent_name="J Silva", bridged_agent_extension="107",
+        ) == "J Silva"
+
+    def test_names_fall_back_to_a_case_insensitive_comparison(self):
+        assert self._f(
+            agent_name="Ana Ruiz", agent_extension="",
+            bridged_agent_name="ana ruiz", bridged_agent_extension="",
+        ) is None
+
+    def test_nothing_to_show_when_there_is_no_bridged_agent(self):
+        assert self._f(
+            agent_name="Ana Ruiz", agent_extension="101",
+            bridged_agent_name="", bridged_agent_extension="",
+        ) is None
+
+    def test_whitespace_only_values_are_not_a_second_operator(self):
+        assert self._f(
+            agent_name="Ana Ruiz", agent_extension="101",
+            bridged_agent_name="   ", bridged_agent_extension="  ",
+        ) is None
+
+
+class TestTheMatchModeSurvivesTheRequest:
+    """The mode has to reach the query, not merely exist in the form.
+
+    Twice the number search was reported broken while the SQL builder was
+    correct: first because the process was running code from before the modes
+    existed, then because the three `_parse_query` call sites passed their
+    arguments on one line, so an edit that appended `number_match` to a
+    `number=number,` line matched none of them. The routes accepted the
+    parameter and silently dropped it, and every mode behaved as `contains`.
+
+    A unit test on `_build_filters` cannot see either fault. These go through
+    the app.
+    """
+
+    async def test_each_mode_reaches_the_query(self, app_client, scenario):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        for mode in ("contains", "begins", "ends", "exact"):
+            page = await app_client.get(f"/calls?number=9999&number_match={mode}")
+            assert page.status_code == 200, (mode, page.status_code)
+            # The form must come back showing the mode that was asked for --
+            # if the route dropped it, the menu falls back to `contains`.
+            assert f'value="{mode}" selected' in page.text.replace("selected", "selected") \
+                or f'value="{mode}"' in page.text
+            marker = f'<option value="{mode}"'
+            idx = page.text.index(marker)
+            tail = page.text[idx:idx + 120]
+            assert "selected" in tail, f"{mode} was not reflected back: {tail!r}"
+
+    async def test_the_modes_do_not_all_return_the_same_rows(
+        self, app_client, scenario, db
+    ):
+        """The symptom the operator actually saw: every mode gave identical
+        results because the mode never arrived."""
+        from sqlalchemy import text as sql
+
+        async with db() as s:
+            await s.execute(
+                sql("SELECT set_config('c2w.brand_id', :b, false)"),
+                {"b": str(scenario["brand_id"])},
+            )
+            conn = (
+                await s.execute(
+                    sql(
+                        "SELECT id, tenant_id FROM commpeak_connections "
+                        "WHERE brand_id = :b LIMIT 1"
+                    ),
+                    {"b": scenario["brand_id"]},
+                )
+            ).first()
+            assert conn is not None, "the scenario should have a CommPeak account"
+            connection_id, tenant_id = conn
+            # One number that begins 9999, one that ends 9999, one with it in
+            # the middle. A correct filter separates these three.
+            for src, dst in (("99991234", "1000"), ("55559999", "1001"),
+                             ("5599997777", "1002")):
+                await s.execute(
+                    sql(
+                        "INSERT INTO cdrs (brand_id, tenant_id, connection_id, call_uuid,"
+                        " start_at, src, dst, src_norm, dst_norm, direction) VALUES"
+                        " (:b, :t, :c, gen_random_uuid()::text, now(), :src, :dst,"
+                        "  :src, :dst, 'out')"
+                    ),
+                    {"b": scenario["brand_id"], "t": tenant_id,
+                     "c": connection_id, "src": src, "dst": dst},
+                )
+            await s.commit()
+
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        counts = {}
+        for mode in ("contains", "begins", "ends"):
+            body = (await app_client.get(f"/calls?number=9999&number_match={mode}")).text
+            counts[mode] = body.count('data-label="From"')
+
+        assert counts["contains"] >= 3, counts
+        assert counts["begins"] < counts["contains"], counts
+        assert counts["ends"] < counts["contains"], counts

@@ -434,3 +434,19 @@ main > .note p,
 .pager .pagebtns a.pagenum:hover{background:var(--surface-2);color:var(--ink)}
 .pager .pagebtns .pagenum.here{background:var(--accent-wash);border-color:var(--accent);
   color:var(--ink);cursor:default}
+
+/* ---- number search, with its match mode ---------------------------------
+   The mode belongs beside the box, not above it: "begins with 0345" is one
+   sentence and reads as one control. The input takes the remaining width so a
+   long international number is still fully visible, and `min-width:0` is what
+   allows it to shrink -- a flex child defaults to its content width and would
+   otherwise push the mode menu off a narrow screen. */
+.numsearch{display:flex;gap:6px;align-items:stretch}
+.numsearch select{width:auto;flex:0 0 auto}
+.numsearch input{flex:1 1 auto;min-width:0}
+@media (max-width:560px){
+  /* Stacked, because side by side leaves the number box too narrow to read
+     a full number in. */
+  .numsearch{flex-direction:column}
+  .numsearch select{width:100%}
+}

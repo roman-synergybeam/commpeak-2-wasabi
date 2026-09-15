@@ -979,6 +979,7 @@ async def dashboard(
 def _parse_query(
     *,
     number: str | None = None,
+    number_match: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     direction: str | None = None,
@@ -1038,7 +1039,11 @@ def _parse_query(
     return CdrQuery(
         date_from=_dt(date_from),
         date_to=_dt(date_to),
-        number=number or None,
+        number=number,
+        # Falls back to `contains`, which is what the field did before the
+        # other modes existed -- an absent parameter must not change how an
+        # existing bookmarked search behaves.
+        number_match=(number_match or "contains").strip() or "contains",
         direction=direction or None,
         agent=agent or None,
         media=media or None,
@@ -1273,6 +1278,7 @@ async def calls(
     user: CurrentUser,
     session: ScopedSession,
     number: str | None = None,
+    number_match: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     direction: str | None = None,
@@ -1293,7 +1299,8 @@ async def calls(
     offset: str | None = None,
 ) -> Response:
     query = _parse_query(
-        number=number, date_from=date_from, date_to=date_to, direction=direction,
+        number=number, number_match=number_match,
+        date_from=date_from, date_to=date_to, direction=direction,
         agent=agent, media=media, connection_id=connection_id,
         status_filter=status_filter, min_duration=min_duration,
         country=country, queue=queue, call_type=call_type,
@@ -1311,6 +1318,7 @@ async def calls_rows(
     user: CurrentUser,
     session: ScopedSession,
     number: str | None = None,
+    number_match: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     direction: str | None = None,
@@ -1332,7 +1340,8 @@ async def calls_rows(
 ) -> Response:
     """The table fragment htmx swaps in."""
     query = _parse_query(
-        number=number, date_from=date_from, date_to=date_to, direction=direction,
+        number=number, number_match=number_match,
+        date_from=date_from, date_to=date_to, direction=direction,
         agent=agent, media=media, connection_id=connection_id,
         status_filter=status_filter, min_duration=min_duration,
         country=country, queue=queue, call_type=call_type,
@@ -1357,6 +1366,7 @@ async def export_calls(
     user: CurrentUser,
     session: ScopedSession,
     number: str | None = None,
+    number_match: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     direction: str | None = None,
@@ -1378,7 +1388,8 @@ async def export_calls(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "your role may not export CDRs")
 
     query = _parse_query(
-        number=number, date_from=date_from, date_to=date_to, direction=direction,
+        number=number, number_match=number_match,
+        date_from=date_from, date_to=date_to, direction=direction,
         agent=agent, media=media, connection_id=connection_id,
         min_duration=min_duration, country=country, queue=queue, call_type=call_type,
         limit=200,
@@ -3973,6 +3984,7 @@ async def add_tenant(
 def _parse_message_query(
     *,
     number: str | None = None,
+    number_match: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     direction: str | None = None,
@@ -4060,6 +4072,7 @@ async def messages(
     user: CurrentUser,
     session: ScopedSession,
     number: str | None = None,
+    number_match: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     direction: str | None = None,
@@ -4094,6 +4107,7 @@ async def messages_rows(
     user: CurrentUser,
     session: ScopedSession,
     number: str | None = None,
+    number_match: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     direction: str | None = None,
@@ -4131,6 +4145,7 @@ async def export_messages_csv(
     user: CurrentUser,
     session: ScopedSession,
     number: str | None = None,
+    number_match: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     direction: str | None = None,

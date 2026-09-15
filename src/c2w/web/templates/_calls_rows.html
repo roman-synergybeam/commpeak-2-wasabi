@@ -47,12 +47,13 @@
         <td class="mono" data-label="To">{{ row.dst | number }}</td>
         <td data-label="Country">{{ row.dst_country or '—' }}</td>
         {# "Operator" is the person who handled the call. A transfer has a
-           second one, and naming only the first is wrong. #}
+           second one and naming only the first is wrong -- but CommPeak fills
+           the bridged fields even when nothing was transferred, so the second
+           name is shown only when it is somebody else. See `second_operator`. #}
         <td data-label="Operator">
           {{ row.agent_name or row.agent_extension or '—' }}
-          {% if row.bridged_agent_name or row.bridged_agent_extension %}
-            <span class="det">then {{ row.bridged_agent_name or row.bridged_agent_extension }}</span>
-          {% endif %}
+          {% set handed_to = row | second_operator %}
+          {% if handed_to %}<span class="det">then {{ handed_to }}</span>{% endif %}
         </td>
         <td data-label="Queue">{{ row.queue_name or '—' }}</td>
         {# CommPeak's CDR has no carrier or trunk field. The account the call
