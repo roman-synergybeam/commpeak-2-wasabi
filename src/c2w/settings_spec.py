@@ -991,6 +991,52 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         validator=_commpeak_concurrency,
     ),
     SettingSpec(
+        key="retention.delete_source_enabled",
+        type=SettingType.BOOL,
+        default=False,
+        category="Retention",
+        label="Allow deleting recordings from CommPeak",
+        description="The platform-wide switch, and only the first of several "
+        "things that must be true. Deletion at the source is irreversible and "
+        "CommPeak document it as such. Even with this on, an account is "
+        "deleted from only when it has its own delete credentials entered, is "
+        "individually switched on, passes the completeness report, and has had "
+        "a dry run -- and each object is re-checked against the archive at the "
+        "moment it is deleted, because a verification from three weeks ago is "
+        "not evidence about today. Leave this off until that is all true.",
+        restart_required=False,
+    ),
+    SettingSpec(
+        key="retention.delete_source_after_days",
+        choices=('30', '60', '90', '180', '365', '730'),
+        type=SettingType.INT,
+        default=90,
+        category="Retention",
+        label="Delete from CommPeak after",
+        description="Measured from when the call happened, not from when it "
+        "was copied -- otherwise a backlog silently extends everybody's "
+        "retention. A recording is only ever eligible once it is verified in "
+        "the archive, so this is a floor on its age rather than a promise "
+        "about when it goes.",
+        unit="days",
+        validator=_positive,
+        brand_overridable=True,
+    ),
+    SettingSpec(
+        key="retention.delete_batch_size",
+        choices=('50', '100', '500', '1000'),
+        type=SettingType.INT,
+        default=100,
+        category="Retention",
+        label="Delete at most this many per pass",
+        description="Deletes are requests, and this source has blocked this "
+        "server three times in a week over request rate. A refusal stops the "
+        "pass entirely rather than being retried -- retrying into a refusal is "
+        "what caused each of those blocks.",
+        unit="recordings",
+        validator=_positive,
+    ),
+    SettingSpec(
         key="archive.source_objects_estimate",
         type=SettingType.INT,
         default=19_300_000,
