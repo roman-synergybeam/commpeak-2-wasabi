@@ -45,6 +45,25 @@
   </div>
 </div>
 
+{# CommPeak, one light per account.
+
+   Not a copy of `commpeak_connections.status`: that column is the verdict of
+   the last probe, and a row can say OK long after access has stopped. Every
+   account showed OK during a four-hour outage. Amber is therefore its own
+   answer -- "it said OK and nothing has agreed lately" is neither a fault nor
+   a reassurance, and rounding it to green is what made the outage invisible.
+   The title on each light says how old the claim is. #}
+{% if lights %}
+  <h2>CommPeak{% if bad %} &mdash; {{ bad }} refusing{% endif %}</h2>
+  <div class="card lights">
+    {% for light in lights %}
+      <span class="light" title="{{ light.title }}">
+        <span class="dot {{ light.state }}"></span>{{ light.account }}
+      </span>
+    {% endfor %}
+  </div>
+{% endif %}
+
 <h2>Archive progress</h2>
 <div class="card">
   <div class="bar"><span style="width: {{ stats.progress_pct }}%"></span></div>

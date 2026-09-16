@@ -450,3 +450,17 @@ main > .note p,
   .numsearch{flex-direction:column}
   .numsearch select{width:100%}
 }
+
+/* ---- CommPeak account lights --------------------------------------------
+   A name and a dot, nothing more: this answers one question at a glance and
+   the detail lives on the sync page. Wraps rather than scrolls, so eight
+   accounts read as one block on a phone. The dot uses the kit's state inks,
+   so amber here means what amber means everywhere else in the console. */
+.lights{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center}
+.light{display:inline-flex;align-items:center;gap:7px;font-size:13px;
+  color:var(--ink-2);white-space:nowrap}
+.dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto;
+  box-shadow:0 0 0 2px var(--surface)}
+.dot.ok{background:var(--good)}
+.dot.err{background:var(--danger)}
+.dot.warn{background:var(--warn)}

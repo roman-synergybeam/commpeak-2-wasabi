@@ -93,6 +93,8 @@ from c2w.sync import queue
 from c2w.sync.convergence import Convergence, convergence
 from c2w.sync.convergence import as_context as convergence_context
 from c2w.sync.convergence import merge as merge_convergence
+from c2w.sync.source_lights import SourceLight, source_lights
+from c2w.sync.source_lights import as_context as lights_context
 from c2w.web.accounts import (
     AccountError,
     add_connection,
@@ -882,8 +884,10 @@ async def _dashboard_live_context(
         session, "archive.source_objects_estimate"
     )
     convergences: list[Convergence] = []
+    lights: list[SourceLight] = []
     for brand_id in brand_ids:
         async with _scoped_to(session, brand_id):
+            lights.extend(await source_lights(session))
             one = await dashboard_stats(session, cache_seconds=cache_seconds)
             convergences.append(
                 await convergence(session, source_estimate=source_estimate)
@@ -929,6 +933,7 @@ async def _dashboard_live_context(
         "live_at": f"{datetime.now(UTC):%H:%M:%S}Z",
         "live_every": _DASHBOARD_REFRESH_SECONDS,
         "convergence": convergence_context(merged_convergence),
+        **lights_context(lights),
     }
 
 

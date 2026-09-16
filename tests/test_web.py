@@ -2070,3 +2070,64 @@ class TestTheMatchModeSurvivesTheRequest:
         assert counts["contains"] >= 3, counts
         assert counts["begins"] < counts["contains"], counts
         assert counts["ends"] < counts["contains"], counts
+
+
+class TestTheCommPeakLights:
+    """Green must mean "answering now", not "said OK once".
+
+    `commpeak_connections.status` is the verdict of the last probe. During a
+    four-hour outage every account still read `OK`, because the last probe had
+    been before it started. A light copied from that column would have been
+    green throughout. So staleness gets its own colour rather than being
+    rounded up.
+    """
+
+    def _light(self, **kw):
+        from c2w.sync.source_lights import SourceLight
+
+        base = {"account": "go4rex.pbx", "brand_name": "Go4Rex",
+                "state": "ok", "title": ""}
+        base.update(kw)
+        return SourceLight(**base)
+
+    def test_a_stale_ok_is_amber_not_green(self):
+        """The case that made the outage invisible."""
+        from c2w.sync.source_lights import STALE_AFTER_MINUTES
+
+        assert STALE_AFTER_MINUTES > 0
+        # Age beyond the threshold must not be reported as answering.
+        assert self._light(state="warn").ok is False
+
+    def test_only_green_counts_as_ok(self):
+        assert self._light(state="ok").ok is True
+        assert self._light(state="err").ok is False
+        assert self._light(state="warn").ok is False
+
+    def test_the_summary_counts_refusals_not_staleness(self):
+        """Amber is not a fault: reporting it as one would make the headline
+        cry wolf every time the scheduler is briefly behind."""
+        from c2w.sync.source_lights import as_context
+
+        got = as_context([
+            self._light(account="a", state="ok"),
+            self._light(account="b", state="warn"),
+            self._light(account="c", state="err"),
+        ])
+        assert got["bad"] == 1
+        assert got["all_ok"] is False
+
+    def test_all_ok_is_false_when_there_are_no_accounts(self):
+        """An empty estate is not a healthy one, and a green light for nothing
+        configured would be the most misleading state available."""
+        from c2w.sync.source_lights import as_context
+
+        assert as_context([])["all_ok"] is False
+
+    async def test_the_dashboard_shows_one_light_per_account(
+        self, app_client, scenario
+    ):
+        await _login(app_client, scenario["admin_email"], scenario["password"])
+        page = await app_client.get("/")
+        assert page.status_code == 200
+        assert 'class="dot' in page.text, "no lights rendered"
+        assert "CommPeak" in page.text
