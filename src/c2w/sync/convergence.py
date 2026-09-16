@@ -26,7 +26,9 @@ a comfortable finish date on a day the gap was widening.
 
 from __future__ import annotations
 
+import asyncio
 import enum
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -34,7 +36,11 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from c2w.logging import get_logger
+
 __all__ = ["Convergence", "ConvergenceState", "convergence"]
+
+log = get_logger(__name__)
 
 #: Inflow is averaged over this many whole days. Long enough to cover a quiet
 #: weekend, short enough to notice a change in call volume.
@@ -96,8 +102,66 @@ class Convergence:
         return datetime.now(UTC) + timedelta(days=days)
 
 
-async def convergence(session: AsyncSession, *, source_estimate: int) -> Convergence:
+#: Cached, and it has to be. The three aggregates below read whole tables --
+#: twenty-three million recordings -- and the panel holding this refreshes
+#: every ten seconds. Uncached it exceeded the thirty-second statement timeout,
+#: and because the failure aborted the transaction every later query in the
+#: same request failed too: the whole live panel returned 500 rather than one
+#: figure going missing. Keyed by RLS scope, like the other dashboard caches.
+_CACHE: dict[str, tuple[float, Convergence]] = {}
+_REFRESHING: set[str] = set()
+
+
+def forget_cached_convergence() -> None:
+    _CACHE.clear()
+
+
+async def convergence(
+    session: AsyncSession, *, source_estimate: int, cache_seconds: int = 120
+) -> Convergence:
     """Measure how far the archive is from the source, and whether it is gaining."""
+    scope = (
+        await session.execute(
+            text("SELECT coalesce(current_setting('c2w.brand_id', true), '')")
+        )
+    ).scalar_one() or "unscoped"
+    now = time.monotonic()
+    if cache_seconds > 0:
+        cached = _CACHE.get(scope)
+        if cached is not None:
+            if cached[0] > now:
+                return cached[1]
+            # Stale beats slow, and stale beats a 500. The old figure goes out
+            # now and a refresh runs behind it.
+            if scope not in _REFRESHING:
+                _REFRESHING.add(scope)
+                asyncio.get_running_loop().create_task(
+                    _refresh(scope, source_estimate, cache_seconds)
+                )
+            return cached[1]
+    return await _compute(session, scope, source_estimate, cache_seconds)
+
+
+async def _refresh(scope: str, source_estimate: int, cache_seconds: int) -> None:
+    from c2w.db.session import platform_session
+
+    try:
+        async with platform_session() as session:
+            await session.execute(
+                text("SELECT set_config('c2w.brand_id', :b, true)"),
+                {"b": "" if scope == "unscoped" else scope},
+            )
+            await _compute(session, scope, source_estimate, cache_seconds)
+    except Exception:
+        log.warning("convergence.refresh_failed", scope=scope, exc_info=True)
+    finally:
+        _REFRESHING.discard(scope)
+
+
+async def _compute(
+    session: AsyncSession, scope: str, source_estimate: int, cache_seconds: int
+) -> Convergence:
+    now = time.monotonic()
     totals = (
         await session.execute(
             text(
@@ -150,7 +214,7 @@ async def convergence(session: AsyncSession, *, source_estimate: int) -> Converg
     elif rate - inflow <= 0:
         state = ConvergenceState.LOSING
 
-    return Convergence(
+    result = Convergence(
         archived=archived,
         indexed=int(totals["indexed"]),
         source_estimate=source_estimate,
@@ -159,6 +223,9 @@ async def convergence(session: AsyncSession, *, source_estimate: int) -> Converg
         inflow_per_day=inflow,
         state=state,
     )
+    if cache_seconds > 0:
+        _CACHE[scope] = (now + cache_seconds, result)
+    return result
 
 
 def merge(parts: list[Convergence]) -> Convergence | None:

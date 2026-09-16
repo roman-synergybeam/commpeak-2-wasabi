@@ -154,6 +154,59 @@
   </div>
 {% endif %}
 
+{# Per account, under the global figure.
+
+   The estate finishes when its slowest account does, and on this estate two
+   accounts hold nearly all the remaining work -- so a single date invites the
+   reading that everything lands together when in fact most accounts are
+   already done and two run for weeks. Slowest first, for the same reason.
+
+   No date is shown for an account copying no faster than its own inflow: it
+   never finishes, and a number there would be worse than a dash. #}
+{% if account_etas %}
+  <h2>By account</h2>
+  <div class="tw stack">
+    <table>
+      <thead>
+        <tr>
+          <th>Account</th>
+          <th class="right">Archived</th>
+          <th class="right">Left</th>
+          <th class="right">Copying</th>
+          <th>Equal on</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for a in account_etas %}
+        <tr>
+          <td data-label="Account">{{ a.account }}</td>
+          <td class="right" data-label="Archived">
+            <span class="pill {{ 'ok' if a.done else 'warn' }}">{{ a.percent }}%</span>
+          </td>
+          <td class="right tnum" data-label="Left">{{ "{:,}".format(a.remaining) }}</td>
+          <td class="right tnum" data-label="Copying">
+            {% if a.rate_per_day %}{{ "{:,}".format(a.rate_per_day) }}/day{% else %}&mdash;{% endif %}
+          </td>
+          <td data-label="Equal on">
+            {% if a.done %}
+              <span class="pill ok">complete</span>
+            {% elif a.eta %}
+              {{ a.eta | dt }}
+              <span class="det">about {{ "{:,.0f}".format(a.days_remaining) }} days</span>
+            {% elif a.rate_per_day %}
+              <span class="pill err">not gaining</span>
+              <span class="det">arriving as fast as it is copied</span>
+            {% else %}
+              <span class="pill idle">not copying</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+
 {# The split, for a platform administrator looking at more than one
    organisation. The totals above are the sum; this says where they came from,
    which is the question the sum immediately raises. #}

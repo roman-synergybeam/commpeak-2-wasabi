@@ -90,6 +90,8 @@ from c2w.settings_spec import SETTINGS, SettingType, specs_by_category
 from c2w.storage.commpeak import COMMPEAK_ENDPOINT
 from c2w.storage.errors import ErrorClass, TransferError
 from c2w.sync import queue
+from c2w.sync.account_eta import account_etas
+from c2w.sync.account_eta import as_context as account_eta_context
 from c2w.sync.convergence import Convergence, convergence
 from c2w.sync.convergence import as_context as convergence_context
 from c2w.sync.convergence import merge as merge_convergence
@@ -885,12 +887,25 @@ async def _dashboard_live_context(
     )
     convergences: list[Convergence] = []
     lights: list[SourceLight] = []
+    per_account: list[dict[str, Any]] = []
     for brand_id in brand_ids:
         async with _scoped_to(session, brand_id):
             lights.extend(await source_lights(session))
+            # Per account, because the estate finishes when its slowest
+            # account does and two of the eight hold nearly all the work. One
+            # global date invites the reading that everything lands together.
+            per_account.extend(
+                account_eta_context(
+                    await account_etas(session, cache_seconds=max(cache_seconds, 120))
+                )
+            )
             one = await dashboard_stats(session, cache_seconds=cache_seconds)
             convergences.append(
-                await convergence(session, source_estimate=source_estimate)
+                await convergence(
+                    session,
+                    source_estimate=source_estimate,
+                    cache_seconds=cache_seconds,
+                )
             )
         parts.append(one)
         per_brand.append(
@@ -934,6 +949,7 @@ async def _dashboard_live_context(
         "live_every": _DASHBOARD_REFRESH_SECONDS,
         "convergence": convergence_context(merged_convergence),
         **lights_context(lights),
+        "account_etas": per_account,
     }
 
 

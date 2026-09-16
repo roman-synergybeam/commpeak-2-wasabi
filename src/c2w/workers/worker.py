@@ -369,6 +369,45 @@ class Worker:
         )
         self._evict_clients(connection.id)
 
+        # Say so. The immediate alert above fires on the error *class*, which
+        # covers a refusal but not the quiet shape: when CommPeak simply stops
+        # accepting connections every request is a `NETWORK_ERROR`, nothing
+        # reached the threshold for an immediate alert, and an account left
+        # service without a word. That is how a four-hour outage went
+        # unnoticed until somebody happened to look at a dashboard.
+        #
+        # The recovery alert already exists in the scheduler's watch, so this
+        # completes the pair: a message when an account goes out of service
+        # and a message when it comes back.
+        brand = (
+            await session.execute(select(Brand).where(Brand.id == connection.brand_id))
+        ).scalar_one_or_none()
+        await dispatch(
+            session,
+            Alert(
+                title=f"CommPeak account paused: {connection.name}",
+                body=(
+                    f"{connection.name} has been taken out of service after "
+                    f"repeated failures.\n\n{str(error)[:300]}\n\n"
+                    "Nothing is being claimed for it, which is deliberate: "
+                    "retrying into a refusal is what keeps a block in place. "
+                    "The scheduler re-probes it on a timer and will put it back "
+                    "in service on the first success, with another message."
+                ),
+                severity=Severity.CRITICAL,
+                brand_id=connection.brand_id,
+                brand_name=brand.name if brand else None,
+                # Per account: eight paused accounts should be eight messages,
+                # not one and seven suppressed as duplicates.
+                dedupe_key=f"commpeak-paused:{connection.id}",
+                fields={
+                    "Account": connection.name,
+                    "Bucket": connection.s3_bucket,
+                    "Cause": str(error.error_class),
+                },
+            ),
+        )
+
     async def _client_for(
         self,
         kind: str,

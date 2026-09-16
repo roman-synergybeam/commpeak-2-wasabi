@@ -182,11 +182,17 @@ def _hour(value: Any) -> None:
 
 
 def _http_url(value: Any) -> None:
-    """Reject an address that will not work as one.
+    """Reject an address that will not work as one, and say why in full.
 
     Worth checking on write: a malformed public address does not fail here, it
     fails later as a rejected single sign-on redirect, which is a much harder
     thing to trace back to a typed slash.
+
+    Every message quotes what was received. "no host in the address" is a true
+    statement about `https:/example.com` and tells the reader nothing they can
+    act on -- they typed one slash, they cannot see which character is wrong,
+    and the field still shows what they wrote. Naming the value and giving a
+    correct example is the difference between a fixable error and a puzzle.
     """
     from urllib.parse import urlparse
 
@@ -195,9 +201,29 @@ def _http_url(value: Any) -> None:
         return
     parsed = urlparse(text_)
     if parsed.scheme not in ("http", "https"):
-        raise ValueError("must start with http:// or https://")
+        if "://" not in text_ and parsed.scheme == "":
+            raise ValueError(
+                f"{text_!r} has no http:// or https:// in front of it -- "
+                f"write it as 'https://{text_}'"
+            )
+        raise ValueError(
+            f"{text_!r} must start with http:// or https://, not {parsed.scheme!r}:"
+        )
     if not parsed.netloc:
-        raise ValueError("no host in the address")
+        # Overwhelmingly this is a single slash after the scheme. Say so,
+        # rather than reporting the consequence.
+        if text_.startswith((f"{parsed.scheme}:/",)) and not text_.startswith(
+            f"{parsed.scheme}://"
+        ):
+            fixed = text_.replace(f"{parsed.scheme}:/", f"{parsed.scheme}://", 1)
+            raise ValueError(
+                f"{text_!r} has one slash after the scheme, not two -- "
+                f"did you mean {fixed!r}?"
+            )
+        raise ValueError(
+            f"{text_!r} has no host in it -- expected something like "
+            "'https://recordings.example.com'"
+        )
     if "//" in parsed.path:
         raise ValueError("looks like it has a doubled slash")
     if parsed.netloc.endswith(":") or parsed.netloc.startswith(":"):
