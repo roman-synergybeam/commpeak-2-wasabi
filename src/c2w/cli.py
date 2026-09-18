@@ -23,7 +23,7 @@ from c2w import __version__
 from c2w.auth.local import AuthError, create_super_admin, hash_password, revoke_all_sessions
 from c2w.config import get_bootstrap
 from c2w.crypto import CryptoError, generate_data_key, seal
-from c2w.db.base import PARTITION_AUTOVACUUM
+from c2w.db.base import BRAND_PARTITIONED_TABLES, PARTITION_AUTOVACUUM
 from c2w.db.models.auth import User
 from c2w.db.models.core import Brand, CommPeakConnection, StorageDestination, Tenant
 from c2w.db.session import dispose_engine, platform_session
@@ -245,8 +245,10 @@ async def cmd_brand_add(args: argparse.Namespace) -> int:
         await _scope_to_brand(session, brand.id)
 
         # Every brand-partitioned table, or the first insert into the one that
-        # was forgotten fails with "no partition of relation found".
-        for table in ("cdrs", "recordings", "sms_messages"):
+        # was forgotten fails with "no partition of relation found". The list
+        # is `BRAND_PARTITIONED_TABLES` rather than written out here, because
+        # written out here it went stale and transcripts had no partition.
+        for table in BRAND_PARTITIONED_TABLES:
             await session.execute(
                 text(
                     f"CREATE TABLE IF NOT EXISTS {table}_brand_{brand.id} "

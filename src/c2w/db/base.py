@@ -121,3 +121,23 @@ PARTITION_AUTOVACUUM = (
     "autovacuum_analyze_scale_factor = 0.02, "
     "autovacuum_vacuum_cost_delay = 0"
 )
+
+
+#: Every table partitioned by `brand_id`, in one place.
+#:
+#: This list was written out three times -- brand creation in the CLI, brand
+#: creation in the console, and each migration that added a partitioned table
+#: -- and the copies drifted. `transcripts` and `transcript_segments` were
+#: added by migration 0003 and added to none of them, so the first transcript
+#: for any brand failed with the exact error the comment above each copy warned
+#: about: "no partition of relation "transcripts" found for row". It failed in
+#: the scheduler, silently, for every recording it tried.
+#:
+#: Adding a brand-partitioned table means adding it here and nowhere else.
+BRAND_PARTITIONED_TABLES = (
+    "cdrs",
+    "recordings",
+    "sms_messages",
+    "transcripts",
+    "transcript_segments",
+)
