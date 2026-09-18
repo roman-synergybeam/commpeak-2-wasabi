@@ -174,6 +174,51 @@ def _duration(seconds: Any) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
+def _offset(milliseconds: Any) -> str:
+    """A transcript segment's position in its recording, as ``m:ss``.
+
+    Separate from `duration` because this is a point rather than a length, and
+    a point of zero is a real answer -- the first line of a call starts at
+    0:00. `duration` renders 0 as "—", which is right for "no length recorded"
+    and wrong here.
+    """
+    try:
+        total = max(0, int(milliseconds or 0)) // 1000
+    except (TypeError, ValueError):
+        return "0:00"
+    minutes, secs = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def _confidence_class(value: Any) -> str:
+    """One of the four pill meanings for a recogniser's confidence.
+
+    Whisper's number is not a calibrated probability and is not shown as a
+    percentage anywhere a person could mistake it for one; it is only used to
+    say "read this one yourself" when the audio was poor. `idle` rather than
+    `err` at the bottom: a low-confidence transcript is weak evidence, not a
+    failure, and `err` on this page means the recording could not be fetched.
+    """
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return "idle"
+    if score >= 0.75:
+        return "ok"
+    return "warn" if score >= 0.5 else "idle"
+
+
+def _confidence_label(value: Any) -> str:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return "confidence not reported"
+    if score >= 0.75:
+        return "clear audio"
+    return "mixed audio" if score >= 0.5 else "poor audio"
+
+
 def _dt(value: Any) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S") if isinstance(value, datetime) else "—"
 
@@ -602,6 +647,9 @@ def register(env: Any) -> None:
         {
             "filesize": _filesize,
             "duration": _duration,
+            "offset": _offset,
+            "confidence_class": _confidence_class,
+            "confidence_label": _confidence_label,
             "dt": _dt,
             "dtlocal": _dtlocal,
             "number": _number,

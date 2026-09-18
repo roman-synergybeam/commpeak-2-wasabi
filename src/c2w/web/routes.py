@@ -58,6 +58,7 @@ from c2w.api.v1.cdrs import (
     get_call,
     get_recording,
     search_cdrs,
+    transcripts_for_recordings,
 )
 from c2w.api.v1.messages import (
     MessageQuery,
@@ -81,7 +82,7 @@ from c2w.auth.local import (
 )
 from c2w.auth.rbac import Permission, permissions_for
 from c2w.crypto import CryptoError, generate_data_key
-from c2w.db.base import PARTITION_AUTOVACUUM
+from c2w.db.base import BRAND_PARTITIONED_TABLES, PARTITION_AUTOVACUUM
 from c2w.db.models.auth import AuthSource, Role, User, UserBrand
 from c2w.db.models.core import Brand, CommPeakConnection, StorageDestination, Tenant
 from c2w.logging import get_logger
@@ -112,7 +113,7 @@ from c2w.web.accounts import (
     update_destination,
     wasabi_region_choices,
 )
-from c2w.web.filters import _auth_label, _role_label
+from c2w.web.filters import _auth_label, _offset, _role_label
 from c2w.web.filters import register as register_filters
 from c2w.web.settings_tests import run_section_test, tests_for
 
@@ -1486,10 +1487,41 @@ async def call_detail(
     # whichever organisation happened to own this call.
     async with _scoped_to_owner(request, session, user, _CALL_OWNER, cdr_id, "call not found"):
         call = await get_call(session, cdr_id)
+        # Inside the same scope as the call itself: a transcript is the
+        # contents of a customer conversation, so it is read under the
+        # organisation that owns the call and never under whichever one the
+        # operator happens to be looking at.
+        #
+        # Keyed on the recordings `get_call` has already loaded, rather than
+        # on the call id. Asking by call id would repeat that recordings
+        # lookup -- on this estate a 200 ms scan -- to learn something this
+        # function is already holding.
+        transcripts = (
+            await transcripts_for_recordings(
+                session,
+                [r["id"] for r in call["recordings"]],
+                brand_id=call["brand_id"],
+            )
+            if call
+            else []
+        )
     if call is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "call not found")
     return templates.TemplateResponse(
-        request, "call_detail.html", await _shell(request, session, user, "calls", call=call)
+        request,
+        "call_detail.html",
+        await _shell(
+            request,
+            session,
+            user,
+            "calls",
+            call=call,
+            # Keyed by recording so the template can put each transcript under
+            # the player it belongs to. A call split into parts has a recording
+            # each, with timings relative to its own audio -- one merged
+            # transcript would invent a timeline that does not exist.
+            transcripts={t["recording_id"]: t for t in transcripts},
+        ),
     )
 
 
@@ -3850,8 +3882,10 @@ async def add_organisation(
     )
 
     # Every brand-partitioned table. Miss one and the first insert into it
-    # fails with "no partition of relation found" -- in a worker, at 3am.
-    for table in ("cdrs", "recordings", "sms_messages"):
+    # fails with "no partition of relation found" -- in a worker, at 3am. That
+    # is not hypothetical: it is what this list missing `transcripts` did. The
+    # names live in `BRAND_PARTITIONED_TABLES` so there is one copy to update.
+    for table in BRAND_PARTITIONED_TABLES:
         await session.execute(
             text(
                 f"CREATE TABLE IF NOT EXISTS {table}_brand_{brand.id} "
@@ -4565,6 +4599,112 @@ async def download_recording(
     request: Request, user: CurrentUser, session: ScopedSession, recording_id: int
 ) -> Response:
     return await _media_redirect(request, session, user, recording_id, download=True)
+
+
+@router.get("/api/v1/recordings/{recording_id}/transcript.txt")
+async def download_transcript(
+    request: Request, user: CurrentUser, session: ScopedSession, recording_id: int
+) -> Response:
+    """The transcript as plain text.
+
+    Served from here rather than redirected to storage, unlike the audio: the
+    text lives in this database, not in the archive, and it is kilobytes. The
+    reason the audio never passes through this process -- concurrent playback
+    of megabyte objects -- does not apply.
+
+    Authorised as a *download*, not as playback. A transcript of a customer
+    conversation leaving the platform as a file is the thing
+    `recordings.download` exists to gate, and it is easier to copy and
+    forward than the audio is. The same audit row is written, so a transcript
+    taken off the platform is as visible afterwards as a recording taken off
+    it.
+    """
+    from c2w.db.models.core import Recording
+    from c2w.media.sdr import MediaAction, MediaDenied, audit_media_access, authorise
+
+    async with _scoped_to_owner(
+        request, session, user, _RECORDING_OWNER, recording_id, "recording not found"
+    ):
+        recording = (
+            await session.execute(select(Recording).where(Recording.id == recording_id))
+        ).scalar_one_or_none()
+        if recording is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "recording not found")
+
+        try:
+            await authorise(session, user, recording, MediaAction.DOWNLOAD)
+        except MediaDenied as denied:
+            await audit_media_access(
+                session,
+                user,
+                recording,
+                MediaAction.DOWNLOAD,
+                result="denied",
+                ip=client_ip(request),
+                user_agent=request.headers.get("user-agent"),
+                detail={"kind": "transcript", "reason": denied.reason},
+            )
+            raise HTTPException(status.HTTP_403_FORBIDDEN, denied.message) from denied
+
+        # By recording, not by call: a recording that has not been matched to
+        # a call yet still has a transcript, and asking by `cdr_id` would
+        # refuse to hand over its own text.
+        rows = await transcripts_for_recordings(
+            session, [recording_id], brand_id=recording.brand_id
+        )
+        transcript = next((t for t in rows if t["segments"]), None)
+        if transcript is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "this recording has no transcript"
+            )
+
+        await audit_media_access(
+            session,
+            user,
+            recording,
+            MediaAction.DOWNLOAD,
+            result="allowed",
+            ip=client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            detail={"kind": "transcript", "lines": len(transcript["segments"])},
+        )
+
+    body = _transcript_text(transcript, recording)
+    return Response(
+        body,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="transcript-{recording_id}.txt"'
+            ),
+            # The transcript is personal data; no shared cache may keep a copy.
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+def _transcript_text(transcript: dict[str, Any], recording: Any) -> str:
+    """Render one transcript as the text file a person downloads.
+
+    Timestamps are kept on every line. Without them a transcript is only
+    readable, and the reason to take one off the platform is usually to point
+    somebody at a moment in the call.
+    """
+    header = [
+        f"Recording {recording.id}",
+        f"Call {recording.call_uuid or '—'}",
+        f"Recognised by {transcript['engine']} {transcript['model'] or ''}".strip(),
+    ]
+    if transcript.get("language_detected"):
+        header.append(f"Language detected: {transcript['language_detected']}")
+    if transcript.get("redacted"):
+        header.append("Long digit runs are masked, keeping the last two.")
+    lines = [*header, ""]
+    for seg in transcript["segments"]:
+        who = seg.get("speaker_name") or seg.get("speaker")
+        stamp = _offset(seg["start_ms"])
+        lines.append(f"[{stamp}] {who + ': ' if who else ''}{seg['text']}")
+    return "\n".join(lines) + "\n"
 
 
 async def _media_redirect(

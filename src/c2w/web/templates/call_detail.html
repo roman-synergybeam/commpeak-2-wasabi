@@ -60,7 +60,7 @@
            with no sound while the same file downloaded and played fine
            elsewhere. player.js drops this attribute and reloads if asking
            for CORS is what stopped the media loading. #}
-        <audio controls preload="none" crossorigin="anonymous"
+        <audio id="rec-{{ rec.id }}" controls preload="none" crossorigin="anonymous"
                src="/api/v1/recordings/{{ rec.id }}/stream"></audio>
         {% if 'recordings.download' in permissions %}
           <div class="actions">
@@ -82,6 +82,70 @@
       </div>
     {% endif %}
 
+    {# The transcript belongs under the player it was made from, not in a
+       section of its own: the timings are relative to *this* audio, and a
+       call split into parts has a recording each. #}
+    {% set tr = transcripts.get(rec.id) %}
+    {% if tr and 'recordings.play' in permissions %}
+      {% if tr.failed_reason %}
+        {# Not a caution box: nothing here is irreversible, and the recording
+           itself is fine. This is an explainer for an empty space. #}
+        <div class="note">
+          <h3>Not transcribed</h3>
+          <p>{{ tr.failed_reason }}</p>
+        </div>
+      {% elif tr.segments %}
+        <div class="transcript" data-for="rec-{{ rec.id }}">
+          <div class="part-head">
+            <div>
+              <strong>Transcript</strong>
+              {% if tr.language_detected %}
+                <span class="pill idle">{{ tr.language_detected }}</span>
+              {% endif %}
+              {% if tr.redacted %}
+                <span class="pill idle" title="Long digit runs are masked,
+                       keeping the last two, per the transcription settings">
+                  numbers masked</span>
+              {% endif %}
+              <span class="pill {{ tr.confidence | confidence_class }}"
+                    title="How clearly the recogniser heard this call. Not a
+                           calibrated probability, and not a measure of whether
+                           the words are correct.">
+                {{ tr.confidence | confidence_label }}</span>
+            </div>
+            <span class="det mono">{{ tr.segments | length }} lines</span>
+          </div>
+
+          {# Each line seeks the player above it. Handled by player.js rather
+             than an inline onclick: the page sets no inline script anywhere,
+             so the CSP does not have to allow one. #}
+          <ol class="lines">
+            {% for seg in tr.segments %}
+              <li>
+                <button type="button" class="seek" data-ms="{{ seg.start_ms }}"
+                        title="Play from here">{{ seg.start_ms | offset }}</button>
+                {% if seg.speaker_name or seg.speaker %}
+                  <span class="who">{{ seg.speaker_name or seg.speaker }}</span>
+                {% endif %}
+                <span class="said">{{ seg.text }}</span>
+              </li>
+            {% endfor %}
+          </ol>
+
+          {# Gated on download, not play: a transcript leaving the platform as
+             a file is what `recordings.download` exists to control, and it is
+             easier to forward than the audio. A role that may listen but not
+             take a copy reads it on this page and gets no button. #}
+          {% if 'recordings.download' in permissions %}
+            <div class="actions">
+              <a class="btn ghost" href="/api/v1/recordings/{{ rec.id }}/transcript.txt">
+                Download transcript</a>
+            </div>
+          {% endif %}
+        </div>
+      {% endif %}
+    {% endif %}
+
     <details class="quiet">
       <summary>Technical detail</summary>
       <table class="plain" style="margin-top:10px">
@@ -93,6 +157,12 @@
             <td class="mono">{{ rec.checksum_sha256 or '—' }}</td></tr>
         <tr><td>Verified</td><td class="mono">{{ rec.verified_at | dt }}</td></tr>
         <tr><td>Call identifier</td><td class="mono">{{ call.call_uuid or '—' }}</td></tr>
+        {% if transcripts.get(rec.id) %}
+          {% set tr = transcripts[rec.id] %}
+          <tr><td>Transcribed by<span class="det">engine and model</span></td>
+              <td class="mono">{{ tr.engine }} {{ tr.model or '' }}</td></tr>
+          <tr><td>Transcribed at</td><td class="mono">{{ tr.created_at | dt }}</td></tr>
+        {% endif %}
       </table>
     </details>
   </div>

@@ -177,7 +177,102 @@
     }
   }
 
-  function init(root) { attachAll(root); attachSliders(root); }
+  /* ---- transcripts ------------------------------------------------------
+     A transcript line is a place in the audio, so clicking one plays from
+     there and the line being spoken is marked while it plays.
+
+     One delegated listener per transcript rather than one per line: a long
+     call runs to several hundred segments, and that many listeners is a cost
+     paid on every page load for a feature most visits never use.
+
+     The stamps are also what makes this usable at all on a recording with no
+     waveform -- scrubbing a forty-minute call to find a sentence is the thing
+     a transcript is supposed to replace. */
+
+  function playerFor(panel) {
+    var id = panel.getAttribute("data-for");
+    return id ? document.getElementById(id) : null;
+  }
+
+  /* Mark the line covering `seconds`, and keep it in view.
+
+     The segments are in order, so this walks to the last one that has
+     started rather than searching: a linear scan per timeupdate (four a
+     second) over several hundred lines is work for nothing. */
+  function mark(panel, seconds) {
+    var ms = seconds * 1000;
+    var items = panel.querySelectorAll(".lines li");
+    var found = null;
+    for (var i = 0; i < items.length; i++) {
+      var at = parseInt(items[i].querySelector(".seek").dataset.ms, 10);
+      if (at <= ms) found = items[i]; else break;
+    }
+    if (panel._here === found) return;          // nothing moved; do not repaint
+    if (panel._here) panel._here.classList.remove("here");
+    panel._here = found;
+    if (!found) return;
+    found.classList.add("here");
+    /* Only when the list is not being read by hand. Scrolling the panel under
+       somebody who has just scrolled it themselves is the behaviour that makes
+       auto-following transcripts unusable. */
+    if (panel._followUntil && Date.now() < panel._followUntil) return;
+    var box = panel.querySelector(".lines");
+    var top = found.offsetTop - box.offsetTop;
+    if (top < box.scrollTop || top > box.scrollTop + box.clientHeight - found.offsetHeight) {
+      box.scrollTop = top - box.clientHeight / 3;
+    }
+  }
+
+  function attachTranscript(panel) {
+    if (panel.dataset.c2wTranscript === "1") return;
+    panel.dataset.c2wTranscript = "1";
+
+    panel.addEventListener("click", function (e) {
+      var btn = e.target.closest ? e.target.closest(".seek") : null;
+      if (!btn) return;
+      var audio = playerFor(panel);
+      if (!audio) return;
+      var seconds = parseInt(btn.dataset.ms, 10) / 1000;
+
+      /* preload="none", so on the first click there is no duration yet and a
+         seek is silently ignored -- the click appeared to do nothing at all.
+         Seek once the metadata arrives instead. */
+      if (audio.readyState < 1) {
+        audio.addEventListener("loadedmetadata", function once() {
+          audio.removeEventListener("loadedmetadata", once);
+          audio.currentTime = seconds;
+          audio.play();
+        });
+        audio.load();
+        return;
+      }
+      audio.currentTime = seconds;
+      audio.play();
+    });
+
+    /* A hand on the scrollbar suspends following for a few seconds, so
+       reading ahead is not fought by the playhead. */
+    var box = panel.querySelector(".lines");
+    if (box) {
+      box.addEventListener("wheel", function () {
+        panel._followUntil = Date.now() + 5000;
+      }, { passive: true });
+    }
+
+    var audio = playerFor(panel);
+    if (audio) {
+      audio.addEventListener("timeupdate", function () {
+        mark(panel, audio.currentTime);
+      });
+    }
+  }
+
+  function attachTranscripts(root) {
+    var list = (root || document).querySelectorAll(".transcript");
+    for (var i = 0; i < list.length; i++) attachTranscript(list[i]);
+  }
+
+  function init(root) { attachAll(root); attachSliders(root); attachTranscripts(root); }
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () { init(document); });

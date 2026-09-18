@@ -51,6 +51,55 @@
   flex-wrap:wrap;gap:8px}
 .player audio{width:100%;height:40px}
 
+/* ---- transcript ---------------------------------------------------------
+   Sits inside .player, under the audio it was made from. A reading surface
+   rather than a table: it is prose with a timestamp, and .tw would put a
+   scrollbar under a column of two-character stamps.
+
+   No literal colours -- every value here is a token, so this retints with the
+   rest in dark mode. */
+.transcript{margin-top:16px;padding-top:14px;border-top:1px solid var(--rule)}
+.transcript .part-head{margin-bottom:10px}
+
+.transcript .lines{list-style:none;margin:0;padding:0;
+  /* Long calls are long. Capped and scrolled so the technical-detail panel
+     and the next part stay reachable without a page-length scroll, with the
+     cap in `em` so it follows the reader's font size. */
+  max-height:26em;overflow-y:auto;
+  /* The kit's rule: the scroll container owns the padding, or the last line
+     sits flush against the edge. */
+  padding-right:6px}
+
+.transcript .lines li{display:flex;gap:10px;align-items:baseline;
+  padding:5px 0;border-bottom:1px solid var(--rule)}
+.transcript .lines li:last-child{border-bottom:0}
+
+/* The timestamp is a button, so the kit's button rule would paint it as a
+   primary control. Stripped back to a link-like affordance: it is one of
+   forty on the page and none of them is the page's primary action. */
+.transcript .seek{flex:none;background:none;border:0;padding:0;
+  font:12px var(--mono);color:var(--accent-ink);cursor:pointer;
+  /* Fixed width so the text starts on one left edge rather than stepping in
+     and out as the stamps go from 0:09 to 1:04 to 12:31. */
+  min-width:3.4em;text-align:right}
+.transcript .seek:hover{text-decoration:underline}
+.transcript .seek:focus-visible{outline:2px solid var(--accent);outline-offset:2px;
+  border-radius:var(--radius-sm)}
+
+.transcript .who{flex:none;font-size:12.5px;font-weight:600;color:var(--ink-2)}
+
+/* min-width:0 or a long unbroken run -- a URL read out, a reference number --
+   pushes the row wider than its container instead of wrapping. The kit names
+   this as a trap for exactly this reason. */
+.transcript .said{min-width:0;color:var(--ink);overflow-wrap:anywhere}
+
+/* The line currently being spoken, tracked against the player. --accent-wash
+   is a tint rather than a state colour: this says "you are here", not
+   "something is wrong". */
+.transcript .lines li.here{background:var(--accent-wash);
+  border-radius:var(--radius-sm)}
+.transcript .lines li.here .said{color:var(--accent-ink)}
+
 /* ---- sign-in ------------------------------------------------------------
    Inside the kit's main.narrow frame. */
 .login-card{background:var(--surface);border:1px solid var(--rule);

@@ -44,6 +44,7 @@ __all__ = [
     "get_call",
     "search_cdrs",
     "transcripts_for_call",
+    "transcripts_for_recordings",
 ]
 
 MAX_PAGE_SIZE = 200
@@ -413,15 +414,62 @@ async def search_cdrs(
 async def transcripts_for_call(session: AsyncSession, cdr_id: int) -> list[dict[str, Any]]:
     """Every transcript attached to a call, with its segments.
 
-    One per recording rather than one per call: a call split into parts has a
-    recording each, and merging them would invent a single timeline that does
-    not exist -- the parts can overlap or have gaps, and the timestamps are
-    relative to their own audio.
+    Found through `recordings`, not through `transcripts.cdr_id`. That column
+    is a copy taken when the transcript was written, and a recording is often
+    transcribed *before* it is matched to a call -- the transcriber works
+    newest-first and correlation happens on its own schedule, so the newest
+    recordings routinely have no `cdr_id` yet. The copy is never updated when
+    the match arrives, so a page trusting it would show nothing for exactly
+    the calls most likely to be looked at.
+
+    For the call detail page use `transcripts_for_recordings` instead: that
+    page has already loaded the call's recordings and this would fetch them a
+    second time. This wrapper is for callers holding only a call id.
+    """
+    recordings = (
+        await session.execute(
+            text("SELECT id, brand_id FROM recordings WHERE cdr_id = :cdr_id"),
+            {"cdr_id": cdr_id},
+        )
+    ).all()
+    if not recordings:
+        return []
+    return await transcripts_for_recordings(
+        session, [r[0] for r in recordings], brand_id=recordings[0][1]
+    )
+
+
+async def transcripts_for_recordings(
+    session: AsyncSession, recording_ids: list[int], *, brand_id: int
+) -> list[dict[str, Any]]:
+    """The transcripts for these recordings, each with its segments.
+
+    Keyed on recordings rather than on the call, because that is what a
+    transcript actually belongs to. A call split into parts has a recording
+    each, and merging them would invent a single timeline that does not exist
+    -- the parts can overlap or have gaps, and the timestamps are relative to
+    their own audio.
 
     Segments come back ordered so the page can line them up against the
-    player, and `start_ms` is kept as milliseconds because that is what an
+    player, and `start_ms` stays in milliseconds because that is what an
     `<audio>` element seeks with.
+
+    Takes ids rather than joining `transcripts` to `recordings`. Both are
+    partitioned by `brand_id`, and joining them makes the planner prune both
+    partition sets on every call detail page: measured against a database with
+    ~1,500 partitions per table that was 3.8-4.6 seconds against 230-370 ms,
+    nearly all of it planning rather than execution, so warm caches do not
+    help. It is invisible at two organisations and gets worse with each one
+    onboarded.
+
+    `brand_id` is passed explicitly rather than left to row-level security.
+    The workers read on a `BYPASSRLS` connection where the policy is never
+    consulted, and a transcript wrongly filed under another organisation must
+    not be reachable from this page by either route.
     """
+    if not recording_ids:
+        return []
+
     rows = (
         await session.execute(
             text(
@@ -431,11 +479,12 @@ async def transcripts_for_call(session: AsyncSession, cdr_id: int) -> list[dict[
                        t.text, t.redacted, t.diarized, t.speaker_count,
                        t.failed_reason, t.created_at
                 FROM transcripts t
-                WHERE t.cdr_id = :cdr_id
+                WHERE t.recording_id = ANY(:recording_ids)
+                  AND t.brand_id = :brand_id
                 ORDER BY t.recording_id, t.id
                 """
             ),
-            {"cdr_id": cdr_id},
+            {"recording_ids": list(recording_ids), "brand_id": brand_id},
         )
     ).mappings().all()
     if not rows:
@@ -448,11 +497,11 @@ async def transcripts_for_call(session: AsyncSession, cdr_id: int) -> list[dict[
                 SELECT transcript_id, seq, start_ms, end_ms, speaker,
                        speaker_name, text, confidence
                 FROM transcript_segments
-                WHERE transcript_id = ANY(:ids)
+                WHERE transcript_id = ANY(:ids) AND brand_id = :brand_id
                 ORDER BY transcript_id, seq
                 """
             ),
-            {"ids": [r["id"] for r in rows]},
+            {"ids": [r["id"] for r in rows], "brand_id": brand_id},
         )
     ).mappings().all()
 
