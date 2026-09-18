@@ -374,3 +374,170 @@ class TestStoring:
         assert tid == again, "the same recording must not get two transcript rows"
         assert rows == ["two"]
         assert body == ("two", "base")
+
+
+@pytest.mark.skipif(not TEST_DB, reason="needs a migrated scratch database")
+class TestOrganisationsStaySeparate:
+    """One organisation's calls must never be transcribed into another's.
+
+    This is a regression test for a leak that reached production. The
+    transcriber runs on `platform_session()`, whose role has `BYPASSRLS`
+    because the workers legitimately read across organisations -- so the
+    `set_config('c2w.brand_id', ...)` that every other scoped query relies on
+    does nothing at all on that connection. The pending-work query trusted it
+    anyway, so the first organisation's pass claimed the newest recordings on
+    the whole estate, transcribed them under its own settings, and wrote the
+    text into its own partition.
+
+    Six of one broker's calls were filed under the other's before it was
+    caught. Both halves of the fix are asserted here: the query filters on
+    `brand_id` itself, and the service refuses a recording that is not the
+    organisation's even if something hands it one.
+    """
+
+    @pytest.fixture
+    async def db(self):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        engine = create_async_engine(TEST_DB)
+        yield async_sessionmaker(engine, expire_on_commit=False)
+        await engine.dispose()
+
+    async def _brand_with_a_recording(self, s) -> tuple[int, int]:
+        """A brand, its partitions, and one archived recording. Returns both ids."""
+        slug = f"iso-{uuid.uuid4().hex[:8]}"
+        brand_id = (
+            await s.execute(
+                text("INSERT INTO brands (name, slug) VALUES (:n, :s) RETURNING id"),
+                {"n": slug, "s": slug},
+            )
+        ).scalar_one()
+        for table in ("cdrs", "recordings", "transcripts", "transcript_segments"):
+            await s.execute(
+                text(
+                    f"CREATE TABLE IF NOT EXISTS {table}_brand_{brand_id} "
+                    f"PARTITION OF {table} FOR VALUES IN ({brand_id})"
+                )
+            )
+        await s.commit()
+        await s.execute(
+            text("SELECT set_config('c2w.brand_id', :b, false)"), {"b": str(brand_id)}
+        )
+        tenant_id = (
+            await s.execute(
+                text(
+                    "INSERT INTO tenants (brand_id, name, slug) VALUES (:b,'t',:s) "
+                    "RETURNING id"
+                ),
+                {"b": brand_id, "s": slug},
+            )
+        ).scalar_one()
+        conn_id = (
+            await s.execute(
+                text(
+                    "INSERT INTO commpeak_connections (brand_id, tenant_id, name, "
+                    "s3_endpoint, s3_region, s3_bucket, s3_access_key_sealed, "
+                    "s3_secret_sealed) VALUES (:b,:t,:n,'http://x','r',:s,'x','x') "
+                    "RETURNING id"
+                ),
+                {"b": brand_id, "t": tenant_id, "n": slug, "s": slug},
+            )
+        ).scalar_one()
+        # An archive to have been copied *to*. The pending query requires both
+        # `destination_id` and `destination_key`, because a row with only one
+        # of them can never be read and would be handed back on every pass.
+        dest_id = (
+            await s.execute(
+                text(
+                    "INSERT INTO storage_destinations (brand_id, name, endpoint, "
+                    "region, bucket, access_key_sealed, secret_sealed) "
+                    "VALUES (:b,:n,'http://x','r',:s,'x','x') RETURNING id"
+                ),
+                {"b": brand_id, "n": slug, "s": slug},
+            )
+        ).scalar_one()
+        rec_id = (
+            await s.execute(
+                text(
+                    "INSERT INTO recordings (brand_id, connection_id, tenant_id, "
+                    "source_key, source_size, state, destination_id, destination_key, "
+                    "started_at) "
+                    "VALUES (:b,:c,:t,'k',1,'AVAILABLE',:d,'archived/k', now()) "
+                    "RETURNING id"
+                ),
+                {"b": brand_id, "c": conn_id, "t": tenant_id, "d": dest_id},
+            )
+        ).scalar_one()
+        await s.commit()
+        return brand_id, rec_id
+
+    async def test_a_pass_never_claims_another_organisations_recording(self, db, monkeypatch):
+        """The exact query the transcriber runs, against two organisations."""
+        import c2w.workers.transcriber as transcriber
+
+        async with db() as s:
+            first, first_rec = await self._brand_with_a_recording(s)
+            second, second_rec = await self._brand_with_a_recording(s)
+
+        # `_pending_recordings` opens its own platform session; point it at the
+        # scratch database. This is the BYPASSRLS path in production, and the
+        # scratch role is the same one the migrations run as -- so if the query
+        # leaned on row-level security, this test would pass for the wrong
+        # reason. It asserts on ownership rather than on row counts for that
+        # reason too.
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        engine = create_async_engine(TEST_DB)
+        monkeypatch.setattr(
+            transcriber, "platform_session", async_sessionmaker(engine, expire_on_commit=False)
+        )
+        try:
+            claimed_first = await transcriber._pending_recordings(first, limit=50)
+            claimed_second = await transcriber._pending_recordings(second, limit=50)
+        finally:
+            await engine.dispose()
+
+        assert first_rec in claimed_first, "an organisation must see its own recording"
+        assert second_rec in claimed_second
+        assert second_rec not in claimed_first, (
+            "one organisation's pass claimed another organisation's recording"
+        )
+        assert first_rec not in claimed_second
+
+    async def test_the_service_refuses_a_recording_from_another_organisation(self, db):
+        """Defence in depth: the guard holds even if the query is wrong again."""
+        from c2w.transcribe.service import transcribe_recording
+
+        async with db() as s:
+            owner, rec_id = await self._brand_with_a_recording(s)
+            other, _ = await self._brand_with_a_recording(s)
+
+            config = TranscribeSettings(
+                enabled=True, engine="faster-whisper-local", model="tiny",
+                primary_language="auto-detect", diarize=False, word_timestamps=True,
+                redact_numbers=False, only_longer_than=0, concurrency=1,
+            )
+
+            class _NeverRuns:
+                name = "should-not-be-reached"
+
+                async def transcribe(self, *a, **k):  # pragma: no cover
+                    raise AssertionError("the audio must not even be fetched")
+
+            # Scoped to the *owner*, so the row is genuinely visible and the
+            # guard is what stops this rather than row-level security. That
+            # models production, where the connection has BYPASSRLS and every
+            # row is visible whatever the scope says -- scoping to `other`
+            # here would hide the recording on the scratch role and the test
+            # would pass without the guard existing at all.
+            await s.execute(
+                text("SELECT set_config('c2w.brand_id', :b, false)"), {"b": str(owner)}
+            )
+            # Raises rather than returning None: "nothing to do" would let a
+            # broken query quietly transcribe nothing for ever.
+            with pytest.raises(ValueError, match="belongs to organisation"):
+                await transcribe_recording(
+                    s, rec_id, brand_id=other, engine=_NeverRuns(), config=config
+                )
+
+        assert owner != other

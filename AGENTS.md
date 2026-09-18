@@ -346,7 +346,7 @@ src/c2w/
   alerts/     base.py telegram.py slack.py
   api/        app.py deps.py v1/cdrs.py v1/messages.py
   web/        routes.py filters.py templates/ static/
-  workers/    worker.py scheduler.py reconciler.py
+  workers/    worker.py scheduler.py reconciler.py transcriber.py transcriber.py
 deploy/       systemd/ nginx/ install.sh
 ```
 
@@ -645,6 +645,64 @@ than an inherited default.
   a redacted transcript still findable.
 - Recognition runs in a worker thread: CTranslate2 is CPU-bound C++ and would
   block the event loop for the length of the recording otherwise.
+- **It runs in its own process, `c2w-transcriber`, not in the scheduler.** It
+  used to be a step in the scheduler tick, which meant it ran only when the
+  incremental inventory ahead of it finished -- hours, on this estate -- and
+  then held the next tick behind itself for the length of each recording. It
+  reads finished objects out of the archive and touches nothing the transfer
+  path touches, so it has no reason to share a loop with it. The unit is
+  `Nice=10` with idle I/O: the transfer is the job this system exists to do,
+  and transcription is what yields when they compete.
+- **The pending query filters `r.brand_id` itself, and must keep doing so.**
+  The workers run as `c2w_platform`, which has `BYPASSRLS`, so the
+  `set_config('c2w.brand_id', ...)` that scopes every other query is
+  *decorative* on that connection -- the policy is never consulted. The first
+  version trusted it, and the first organisation's pass claimed the newest
+  recordings on the whole estate, transcribed them under its own settings and
+  filed them in its own partition. Six of one broker's calls were written into
+  the other's records before it was caught. `transcribe_recording` now also
+  refuses a recording whose `brand_id` is not the one it was asked for.
+- **A skip is recorded, not just skipped.** Work is found by "archived
+  recording with no `transcripts` row", so a recording that is returned and
+  then dropped comes straight back on the next pass. Too short, unreadable
+  and wrong-engine all write a row with `failed_reason`; without it the loop
+  re-downloads and re-recognises the same voicemail for ever.
+- **`transcripts` and `transcript_segments` are partitioned by `brand_id`, and
+  0003 created no partitions for them.** A partitioned parent with no children
+  accepts no rows, so every insert failed with "no partition of relation found"
+  and the table sat empty while the recogniser ran. Migration 0015 backfills
+  them; `BRAND_PARTITIONED_TABLES` in `db/base.py` is now the single list both
+  brand-creation paths read, so the next partitioned table cannot be added to
+  the schema and forgotten by the code that provisions it.
+- **It runs in its own process, `c2w-transcriber`, not in the scheduler.** It
+  used to be a step in the scheduler tick, which meant it ran only when the
+  incremental inventory ahead of it finished -- hours, on this estate -- and
+  then held the next tick behind itself for the length of each recording. It
+  reads finished objects out of the archive and touches nothing the transfer
+  path touches, so it has no reason to share a loop with it. The unit is
+  `Nice=10` with idle I/O: the transfer is the job this system exists to do,
+  and transcription is what yields when they compete.
+- **The pending query filters `r.brand_id` itself, and must keep doing so.**
+  The workers run as `c2w_platform`, which has `BYPASSRLS`, so the
+  `set_config('c2w.brand_id', ...)` that scopes every other query is
+  *decorative* on that connection -- the policy is never consulted. The first
+  version trusted it, and the first organisation's pass claimed the newest
+  recordings on the whole estate, transcribed them under its own settings and
+  filed them in its own partition. Six of one broker's calls were written into
+  the other's records before it was caught. `transcribe_recording` now also
+  refuses a recording whose `brand_id` is not the one it was asked for.
+- **A skip is recorded, not just skipped.** Work is found by "archived
+  recording with no `transcripts` row", so a recording that is returned and
+  then dropped comes straight back on the next pass. Too short, unreadable
+  and wrong-engine all write a row with `failed_reason`; without it the loop
+  re-downloads and re-recognises the same voicemail for ever.
+- **`transcripts` and `transcript_segments` are partitioned by `brand_id`, and
+  0003 created no partitions for them.** A partitioned parent with no children
+  accepts no rows, so every insert failed with "no partition of relation found"
+  and the table sat empty while the recogniser ran. Migration 0015 backfills
+  them; `BRAND_PARTITIONED_TABLES` in `db/base.py` is now the single list both
+  brand-creation paths read, so the next partitioned table cannot be added to
+  the schema and forgotten by the code that provisions it.
 - `transcribe.diarize` is in the settings and does nothing yet. faster-whisper
   does not diarise; doing it properly needs a second model.
 

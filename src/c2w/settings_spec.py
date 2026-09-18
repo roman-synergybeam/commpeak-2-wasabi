@@ -1610,9 +1610,11 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         default=False,
         category="Transcription and voice analysis",
         label="Transcribe archived recordings",
-        description="Not yet built. The settings are here so the shape of it is "
-        "agreed and the schema is in place; no recogniser is wired up, so "
-        "switching this on transcribes nothing today.",
+        description="Turns archived recordings into searchable text, on this "
+        "server. It reads from the archive and never from CommPeak, so it runs "
+        "alongside the transfer rather than competing with it, and it starts "
+        "with the most recent calls. Only recordings that have finished "
+        "copying are transcribed.",
         brand_overridable=True,
     ),
     SettingSpec(

@@ -1,6 +1,6 @@
 [Unit]
 Description=c2w recording platform
-Wants=c2w-api.service c2w-scheduler.service c2w-reconciler.service
+Wants=c2w-api.service c2w-scheduler.service c2w-reconciler.service c2w-transcriber.service
 After=c2w-api.service
 
 [Install]

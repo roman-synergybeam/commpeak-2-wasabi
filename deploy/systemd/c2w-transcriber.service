@@ -1,0 +1,97 @@
+[Unit]
+Description=c2w transcriber
+Documentation=file:/opt/c2w/AGENTS.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+PartOf=c2w.target
+
+[Service]
+Type=simple
+
+# A separate unit from the scheduler on purpose. Transcription reads finished
+# objects out of the archive and touches nothing the transfer path touches, so
+# it runs in parallel with a transfer that will take weeks rather than waiting
+# behind an inventory scan that runs for hours. See workers/transcriber.py.
+
+# Nice, and idle I/O. Whisper will use every core it is given for as long as
+# there is a backlog, and on this host that backlog is millions of recordings
+# -- effectively for ever. The transfer is the job this system exists to do,
+# so transcription must be the thing that yields when they compete.
+Nice=10
+IOSchedulingClass=idle
+CPUSchedulingPolicy=batch
+User=c2w
+Group=c2w
+WorkingDirectory=/opt/c2w
+
+# Bounded memory, because this was OOM-killed in its first hour at a 7.5G peak
+# and took the host's free memory with it on the way. Two things add up:
+# `whisper_local._MODELS` caches one model per distinct (model, compute_type),
+# so two organisations on different model sizes keep *both* resident -- roughly
+# 2.2G for medium and 2.5G for turbo -- and CTranslate2's working set sits on
+# top of that.
+#
+# MemoryHigh throttles and reclaims first, so a pass slows down instead of
+# dying; MemoryMax is the wall. The point is not to protect this service -- it
+# restarts cleanly and re-queues whatever it lost -- but to stop it being the
+# reason the transfer workers get OOM-killed. The transfer is the job this
+# system exists to do.
+#
+# Aligning both organisations on the same `transcribe.model` halves the
+# resident footprint and is the better fix where the accuracy allows it.
+MemoryHigh=4G
+MemoryMax=5G
+
+# Only two values can live outside the database, because they are what a process
+# needs in order to reach it and to make sense of what it finds there. Everything
+# else is configured in the app itself (Settings page, or c2w-admin settings).
+# There is deliberately no .env file: configuration that lives in two places
+# eventually disagrees with itself.
+Environment=C2W_DATABASE_URL=postgresql+asyncpg://c2w@127.0.0.1:5432/c2w
+Environment=C2W_PLATFORM_DATABASE_URL=postgresql+asyncpg://c2w_platform@127.0.0.1:5432/c2w
+
+# The master key unseals every stored credential. Delivered as a systemd
+# credential so it never appears in this unit file, in `systemctl show`, or in
+# the environment of a child process.
+LoadCredential=master_key:/etc/c2w/master.key
+Environment=C2W_MASTER_KEY_FILE=%d/master_key
+
+# The database password is the one value that must reach the process as text;
+# it lives in a 0600 root-owned file rather than in this unit.
+EnvironmentFile=/etc/c2w/database.env
+
+# Where faster-whisper keeps its downloaded models. Set explicitly because
+# the default is under $HOME and `ProtectHome=yes` below makes that
+# unreachable -- the model would be re-downloaded on every start if it could
+# be written at all. `StateDirectory=c2w` creates and owns this path.
+Environment=HF_HOME=/var/lib/c2w/models
+Environment=XDG_CACHE_HOME=/var/lib/c2w/cache
+
+ExecStart=/opt/c2w/.venv/bin/python -m c2w.workers.transcriber
+
+Restart=always
+RestartSec=15s
+TimeoutStopSec=60s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+StateDirectory=c2w
+LogsDirectory=c2w
+ReadWritePaths=/var/lib/c2w
+
+[Install]
+WantedBy=multi-user.target

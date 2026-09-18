@@ -43,7 +43,6 @@ class Scheduler:
         self._last_retention = 0.0
         self._last_archive_totals = 0.0
         self._last_sms = 0.0
-        self._last_transcribe = 0.0
 
     def request_stop(self) -> None:
         self._stopping.set()
@@ -110,13 +109,15 @@ class Scheduler:
             self._last_sms = loop_now
             await _poll_text_messages()
 
-        # Transcription, for organisations that have switched it on. Every
-        # minute at most: each pass takes only as many recordings as the
-        # concurrency setting allows, so a long backlog drains steadily
-        # instead of one pass running for hours.
-        if loop_now - self._last_transcribe >= 60:
-            self._last_transcribe = loop_now
-            await _transcribe_pending()
+        # Transcription used to run here, and that was the wrong place for it.
+        # `_tick` runs its steps in sequence, and the incremental inventory
+        # above it walks a day prefix at a time across every account -- hours,
+        # on this estate. So "every minute at most" meant "whenever the scan
+        # finishes", and a recogniser that takes minutes per recording then
+        # held the tick behind it in turn. Transcription reads from the
+        # archive and touches nothing the transfer path touches, so it has no
+        # reason to share a loop with it: `c2w-transcriber` runs it in its own
+        # process, in parallel with the transfer rather than behind it.
 
         # What the last period actually moved, per organisation. Its own
         # interval because it is a report rather than work.
@@ -687,103 +688,6 @@ class Scheduler:
                         queued=len(pending),
                         offload_after_days=days,
                     )
-
-
-async def _transcribe_pending() -> None:
-    """Transcribe archived recordings that have no transcript yet.
-
-    Only archived ones: the audio is read from the archive, never from
-    CommPeak. Pulling 13.9 TB through here a second time to transcribe it would
-    double the transfer this system exists to do once.
-
-    A failure is written to the transcript row rather than retried for ever, so
-    one unreadable file cannot block the queue behind it.
-    """
-    from c2w.transcribe.base import EngineUnavailable
-    from c2w.transcribe.service import build_engine, load_settings, transcribe_recording
-
-    async with platform_session() as session:
-        brands = (
-            await session.execute(text("SELECT id, name FROM brands WHERE is_active"))
-        ).all()
-
-    for brand_id, brand_name in brands:
-        async with platform_session() as session:
-            config = await load_settings(session, brand_id=brand_id)
-            if not config.enabled:
-                continue
-            try:
-                engine = build_engine(config)
-            except EngineUnavailable as exc:
-                # A recogniser nobody built is a configuration problem for a
-                # person, so say it once per pass and move on rather than
-                # failing every recording individually.
-                log.warning(
-                    "transcribe.engine_unavailable",
-                    brand_id=brand_id,
-                    engine=config.engine,
-                    detail=str(exc),
-                )
-                continue
-
-            await session.execute(
-                text("SELECT set_config('c2w.brand_id', :b, true)"), {"b": str(brand_id)}
-            )
-            pending = (
-                await session.execute(
-                    text(
-                        "SELECT r.id FROM recordings r "
-                        "LEFT JOIN transcripts t ON t.recording_id = r.id "
-                        "  AND t.brand_id = r.brand_id "
-                        "WHERE r.state IN ('AVAILABLE', 'SOURCE_DELETED') "
-                        "  AND r.destination_key IS NOT NULL "
-                        "  AND t.id IS NULL "
-                        "ORDER BY r.started_at DESC NULLS LAST "
-                        "LIMIT :n"
-                    ),
-                    {"n": max(1, config.concurrency)},
-                )
-            ).scalars().all()
-
-        for recording_id in pending:
-            async with platform_session() as session:
-                await session.execute(
-                    text("SELECT set_config('c2w.brand_id', :b, true)"), {"b": str(brand_id)}
-                )
-                try:
-                    result = await transcribe_recording(
-                        session,
-                        recording_id,
-                        brand_id=brand_id,
-                        engine=engine,
-                        config=config,
-                    )
-                    await session.commit()
-                except EngineUnavailable as exc:
-                    await session.rollback()
-                    log.warning(
-                        "transcribe.engine_unavailable",
-                        brand_id=brand_id,
-                        detail=str(exc),
-                    )
-                    break
-                except Exception as exc:
-                    await session.rollback()
-                    log.exception(
-                        "transcribe.pass_failed",
-                        recording_id=recording_id,
-                        error=str(exc)[:200],
-                    )
-                    continue
-            if result is not None:
-                log.info(
-                    "transcribe.done",
-                    brand=brand_name,
-                    recording_id=recording_id,
-                    seconds=result.duration_seconds,
-                    segments=len(result.segments),
-                    language=result.language_detected,
-                )
 
 
 async def _poll_call_records() -> None:

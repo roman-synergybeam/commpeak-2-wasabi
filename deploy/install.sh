@@ -138,10 +138,11 @@ else
 fi
 
 echo "==> services"
-# Scheduler and reconciler are singletons on purpose -- each takes a PostgreSQL
-# advisory lock and a second instance exits rather than double-queueing scans.
+# Scheduler, reconciler and transcriber are singletons on purpose -- each takes
+# a PostgreSQL advisory lock and a second instance exits rather than
+# double-queueing scans or transcribing the same recording twice.
 # Workers are the scaling knob.
-systemctl enable --now c2w-api c2w-scheduler c2w-reconciler
+systemctl enable --now c2w-api c2w-scheduler c2w-reconciler c2w-transcriber
 for i in $(seq 1 "$WORKERS"); do systemctl enable --now "c2w-worker@${i}"; done
 
 echo

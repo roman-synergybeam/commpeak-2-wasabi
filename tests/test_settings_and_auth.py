@@ -671,10 +671,22 @@ class TestTranscriptionSettings:
         assert any(c.startswith("pt-BR") for c in choices)
         assert any(c.startswith("pt-PT") for c in choices)
 
-    def test_it_ships_switched_off_and_says_it_is_unbuilt(self):
+    def test_it_ships_switched_off(self):
+        """Off by default, because switching it on is a real decision.
+
+        It used to also assert the description said "not yet built", which was
+        true when the settings were added ahead of the feature. The recogniser
+        is wired up now and `c2w-transcriber` runs it, so that sentence would
+        be a lie told to the person deciding whether to turn it on -- and a
+        test pinning a stale promise is worse than no test. What still matters
+        is the default: transcription costs real CPU on a host that is already
+        moving 13.9 TB, so nobody gets it by accident.
+        """
         spec = SETTINGS["transcribe.enabled"]
         assert spec.default is False
-        assert "not yet built" in spec.description.lower()
+        assert "not yet built" not in spec.description.lower()
+        # It must say what it will actually do, not what it will not do.
+        assert "archive" in spec.description.lower()
 
     def test_transcription_is_per_organisation(self):
         for key in ("transcribe.enabled", "transcribe.primary_language",

@@ -1,0 +1,69 @@
+[Unit]
+Description=c2w transcriber
+Documentation=file:/home/c2w/commpeak-2-wasabi/AGENTS.md
+After=c2w-postgres.service
+Requires=c2w-postgres.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/c2w/commpeak-2-wasabi
+
+# A separate unit from the scheduler on purpose. Transcription reads finished
+# objects out of the archive and touches nothing the transfer path touches, so
+# it runs in parallel with a transfer that will take weeks rather than waiting
+# behind an inventory scan that runs for hours. See workers/transcriber.py.
+
+# Nice, and idle I/O. Whisper will use every core it is given for as long as
+# there is a backlog, and here that backlog is millions of recordings --
+# effectively for ever. The transfer is the job this system exists to do, so
+# transcription is the thing that yields when the two compete for the host.
+Nice=10
+IOSchedulingClass=idle
+CPUSchedulingPolicy=batch
+
+# Bounded memory, because this was OOM-killed in its first hour at a 7.5G peak
+# and took the host's free memory with it on the way. Two things add up:
+# `whisper_local._MODELS` caches one model per distinct (model, compute_type),
+# so two organisations on different model sizes keep *both* resident -- roughly
+# 2.2G for medium and 2.5G for turbo -- and CTranslate2's working set sits on
+# top of that.
+#
+# MemoryHigh throttles and reclaims first, so a pass slows down instead of
+# dying; MemoryMax is the wall. The point is not to protect this service -- it
+# restarts cleanly and re-queues whatever it lost -- but to stop it being the
+# reason the transfer workers get OOM-killed. The transfer is the job this
+# system exists to do.
+#
+# Aligning both organisations on the same `transcribe.model` halves the
+# resident footprint and is the better fix where the accuracy allows it.
+MemoryHigh=4G
+MemoryMax=5G
+
+Environment=C2W_DATABASE_URL=postgresql+asyncpg://c2w@127.0.0.1:5432/c2w
+# Reads across organisations, so it needs the BYPASSRLS role. Without this it
+# falls back to C2W_DATABASE_URL, whose role has RLS forced and no brand set --
+# every tenant-scoped table then reads as empty and this does nothing at all,
+# silently. Exactly the failure the scheduler unit warns about.
+Environment=C2W_PLATFORM_DATABASE_URL=postgresql+asyncpg://c2w_platform@127.0.0.1:5432/c2w
+Environment=C2W_MASTER_KEY_FILE=/home/c2w/.config/c2w/master.key
+
+ExecStart=/home/c2w/commpeak-2-wasabi/.venv/bin/python -m c2w.workers.transcriber
+
+Restart=always
+RestartSec=15s
+KillSignal=SIGTERM
+# Longer than the other workers. A stop arriving mid-recording waits for
+# faster-whisper to finish the file it is on: that work is minutes of CPU and
+# is thrown away if the process is killed, and the loop checks for a stop
+# between recordings anyway.
+TimeoutStopSec=300s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target

@@ -120,6 +120,23 @@ async def transcribe_recording(
     if recording is None:
         return None
 
+    # Refuse rather than trust the caller's scope. These run on a
+    # `BYPASSRLS` connection, so the lookup above is *not* confined to one
+    # organisation however `c2w.brand_id` is set -- and everything below
+    # writes `brand_id` from the argument, not from the row. Without this
+    # check, being handed the wrong id silently files one customer's
+    # conversation under another customer, in that customer's partition,
+    # readable from that customer's console.
+    #
+    # It is a guard on an invariant the caller is supposed to hold, so it
+    # raises rather than returning None: "nothing to do" would let a broken
+    # query quietly transcribe nothing for ever.
+    if recording.brand_id != brand_id:
+        raise ValueError(
+            f"recording {recording_id} belongs to organisation "
+            f"{recording.brand_id}, not {brand_id}"
+        )
+
     already = (
         await session.execute(
             text("SELECT 1 FROM transcripts WHERE recording_id = :r AND text IS NOT NULL"),
@@ -182,6 +199,21 @@ async def transcribe_recording(
             "transcribe.too_short",
             recording_id=recording_id,
             seconds=result.duration_seconds,
+        )
+        # Recorded rather than simply skipped. The pending query finds work by
+        # "archived recording with no transcripts row", so a recording that is
+        # returned and then dropped is returned again on the very next pass --
+        # which, now that the transcriber is a loop of its own rather than a
+        # step in a thirty-second tick, means downloading and recognising the
+        # same three-second voicemail continuously. The row is what makes the
+        # decision stick.
+        await _record_failure(
+            session,
+            recording,
+            brand_id,
+            f"skipped: {result.duration_seconds or 0:.0f}s of audio is under the "
+            f"{config.only_longer_than}s minimum in settings",
+            config,
         )
         return None
 
