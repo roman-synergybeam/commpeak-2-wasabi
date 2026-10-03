@@ -94,7 +94,16 @@ async def scenario(db, s3_creds, moto_endpoint):
         await s.execute(
             text("SELECT set_config('c2w.brand_id', :b, false)"), {"b": str(brand_id)}
         )
-        for table in ("transfer_attempts", "transfer_jobs", "recordings", "cdrs"):
+        # The accounts too: every test adds one to the same brand, and one a
+        # previous test left in ERROR with no probe time sorts ahead of
+        # anything the access watch's own test sets up.
+        for table in (
+            "transfer_attempts",
+            "transfer_jobs",
+            "recordings",
+            "cdrs",
+            "commpeak_connections",
+        ):
             await s.execute(
                 text(f"DELETE FROM {table} WHERE brand_id = :b"),  # noqa: S608 - fixed names
                 {"b": brand_id},
@@ -296,6 +305,121 @@ class TestInventory:
 
 
 class TestTransfer:
+    async def test_the_source_slot_is_held_only_while_commpeak_is_asked(
+        self, db, scenario
+    ):
+        """CommPeak's per-account limit gates the GET, not the
+        archive verify, the sidecar or the commit -- holding it through those
+        left the slot idle for more than half of every object."""
+        import asyncio
+
+        audio = os.urandom(30_000)
+        await _seed_recording(scenario["src"], SRC_KEY, audio)
+        async with await _scoped(db, scenario["brand_id"]) as s:
+            conn = await s.get(CommPeakConnection, scenario["connection_id"])
+            async with CommPeakSource(scenario["src"]) as src:
+                await scan_day(s, src, conn, DAY, destination_id=scenario["destination_id"])
+            await s.commit()
+
+        gate = asyncio.Semaphore(1)
+        held: dict[str, bool] = {}
+
+        def spy(label, obj, name):
+            real = getattr(obj, name)
+
+            async def wrapped(*a, **kw):
+                held[label] = gate.locked()
+                return await real(*a, **kw)
+
+            setattr(obj, name, wrapped)
+
+        async with await _scoped(db, scenario["brand_id"]) as s:
+            rec = (
+                await s.execute(
+                    select(Recording).where(
+                        Recording.source_key == SRC_KEY,
+                        Recording.connection_id == scenario["connection_id"],
+                    )
+                )
+            ).scalar_one()
+            dest_row = await s.get(StorageDestination, scenario["destination_id"])
+            async with (
+                CommPeakSource(scenario["src"]) as src,
+                WasabiDestination(scenario["dst"]) as dst,
+            ):
+                spy("source head", src, "head")
+                spy("copy", dst, "put_stream")
+                spy("archive verify", dst, "head")
+                spy("sidecar", dst, "put_bytes")
+                outcome = await transfer_recording(
+                    s,
+                    rec,
+                    dest_row,
+                    src,
+                    dst,
+                    account="go4rex.td",
+                    multipart_threshold=16 * 1024 * 1024,
+                    multipart_chunk=5 * 1024 * 1024,
+                    source_gate=gate,
+                )
+            await s.commit()
+
+        assert outcome.verified and outcome.sidecar_written
+        # And no source HEAD at all: the GET carries everything it provided.
+        assert held == {
+            "copy": True,
+            "archive verify": False,
+            "sidecar": False,
+        }
+        assert not gate.locked()
+
+    async def test_an_object_rewritten_since_inventory_archives_what_was_read(
+        self, db, scenario
+    ):
+        """With no source HEAD, the listed size is only a hint. The archive must
+        hold -- and verify against -- the bytes the GET actually returned."""
+        await _seed_recording(scenario["src"], SRC_KEY, os.urandom(4_000))
+        async with await _scoped(db, scenario["brand_id"]) as s:
+            conn = await s.get(CommPeakConnection, scenario["connection_id"])
+            async with CommPeakSource(scenario["src"]) as src:
+                await scan_day(s, src, conn, DAY, destination_id=scenario["destination_id"])
+            await s.commit()
+        rewritten = os.urandom(9_000)
+        await _seed_recording(scenario["src"], SRC_KEY, rewritten)
+
+        async with await _scoped(db, scenario["brand_id"]) as s:
+            rec = (
+                await s.execute(
+                    select(Recording).where(
+                        Recording.source_key == SRC_KEY,
+                        Recording.connection_id == scenario["connection_id"],
+                    )
+                )
+            ).scalar_one()
+            assert rec.source_size == 4_000
+            dest_row = await s.get(StorageDestination, scenario["destination_id"])
+            async with (
+                CommPeakSource(scenario["src"]) as src,
+                WasabiDestination(scenario["dst"]) as dst,
+            ):
+                outcome = await transfer_recording(
+                    s,
+                    rec,
+                    dest_row,
+                    src,
+                    dst,
+                    account="go4rex.td",
+                    multipart_threshold=16 * 1024 * 1024,
+                    multipart_chunk=5 * 1024 * 1024,
+                )
+                archived = await dst.head(outcome.destination_key)
+            await s.commit()
+
+        assert outcome.verified
+        assert outcome.bytes_transferred == len(rewritten)
+        assert archived.size == len(rewritten)
+        assert rec.source_size == len(rewritten)
+
     async def test_full_transfer_verifies_and_writes_sidecar(self, db, scenario):
         audio = os.urandom(30_000)
         await _seed_recording(scenario["src"], SRC_KEY, audio)
@@ -1537,3 +1661,32 @@ class TestTheScannerBoundsItsTransaction:
         )
         # Set after the day's scan returns, not inside it.
         assert source.index("await scan_day(") < source.index(cursor_line)
+
+
+async def test_singleton_lock_holds_no_transaction(db, monkeypatch):
+    """The lock is held for the life of the process, so it must not hold a
+    transaction too: an open one pins the vacuum horizon and the job tables
+    bloat until the workers' claims time out. It did, for ten days."""
+    from c2w.workers import scheduler
+
+    engine = create_async_engine(TEST_DB)
+    monkeypatch.setattr(scheduler, "get_platform_engine", lambda: engine)
+    name = f"test-lock-{uuid.uuid4().hex[:8]}"
+    try:
+        async with scheduler.singleton_lock(name) as acquired:
+            assert acquired
+            async with db() as session:
+                states = (
+                    await session.execute(
+                        text(
+                            "SELECT a.state, a.backend_xmin IS NOT NULL"
+                            "  FROM pg_locks l JOIN pg_stat_activity a USING (pid)"
+                            " WHERE l.locktype = 'advisory'"
+                            "   AND l.objid = hashtext(:name)::oid"
+                        ),
+                        {"name": name},
+                    )
+                ).all()
+            assert states == [("idle", False)]
+    finally:
+        await engine.dispose()

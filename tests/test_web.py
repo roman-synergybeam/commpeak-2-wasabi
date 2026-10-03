@@ -1901,7 +1901,9 @@ class TestTheNumberSearchAcceptsWildcards:
         indexed column -- that is the common case and much the fastest."""
         sql, params = self._sql(number="441632960770")
         assert "src_norm = :digits" in sql
-        assert params["digits"] == "441632960770"
+        # The comparable suffix, normalised exactly as ingest writes
+        # `src_norm` -- the full number would never equal the stored value.
+        assert params["digits"] == "632960770"
 
     def test_an_unknown_mode_falls_back_rather_than_matching_nothing(self):
         sql, _params = self._sql(number="441632960770", number_match="nonsense")

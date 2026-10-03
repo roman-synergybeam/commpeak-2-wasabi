@@ -51,6 +51,11 @@ log = get_logger(__name__)
 
 IDLE_SLEEP_SECONDS = 5.0
 DISABLED_SLEEP_SECONDS = 30.0
+#: Jobs in flight per CommPeak slot. Measured per object: ~390 ms needs the
+#: source, ~510 ms is archive verify, sidecar and database. Three keeps the
+#: slot busy with room for the slow tail; it does not change how many requests
+#: CommPeak sees, which `source.concurrency_per_connection` alone decides.
+SOURCE_PIPELINE_DEPTH = 3
 
 
 class Worker:
@@ -273,11 +278,22 @@ class Worker:
         brand_gates: dict[int, asyncio.Semaphore],
         limiter: RateLimiter | None,
     ) -> None:
-        gate = asyncio.Semaphore(per_connection)
+        # Two gates, because a job is mostly *not* talking to CommPeak.
+        # `source_gate` is the account's slot and is held only for the HEAD
+        # and the GET (see `transfer_recording`), so CommPeak still sees at
+        # most `per_connection` requests from this process. `in_flight` lets
+        # a few jobs per slot do their archive and database work meanwhile,
+        # so the slot is not idle while one job verifies and commits.
+        #
+        # `in_flight` is taken *before* the pool gate. The other order let one
+        # account's claimed jobs take every pool slot and then queue on their
+        # own account's gate, starving the accounts behind it.
+        source_gate = asyncio.Semaphore(per_connection)
+        in_flight = asyncio.Semaphore(per_connection * SOURCE_PIPELINE_DEPTH)
 
         async def run_one(job: TransferJob) -> None:
-            async with self._pool_gate, gate, brand_gates[job.brand_id]:
-                await self._run_job(job.id, limiter)
+            async with in_flight, self._pool_gate, brand_gates[job.brand_id]:
+                await self._run_job(job.id, limiter, source_gate)
 
         await asyncio.gather(*(run_one(job) for job in jobs))
 
@@ -499,7 +515,12 @@ class Worker:
             self._retire(self._clients.pop(key))
         await self._close_retired()
 
-    async def _run_job(self, job_id: int, limiter: RateLimiter | None) -> None:
+    async def _run_job(
+        self,
+        job_id: int,
+        limiter: RateLimiter | None,
+        source_gate: asyncio.Semaphore | None = None,
+    ) -> None:
         """Run one transfer in its own transaction.
 
         Each job commits independently so a failure never rolls back the work
@@ -560,6 +581,7 @@ class Worker:
                     multipart_threshold=threshold,
                     multipart_chunk=chunk,
                     write_sidecar=write_sidecar,
+                    source_gate=source_gate,
                 )
                 await queue.complete(session, job, bytes_transferred=outcome.bytes_transferred)
                 # One success is enough to clear the account's failure run: the

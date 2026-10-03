@@ -16,7 +16,9 @@ Nothing here writes to CommPeak.  The source object is read and left alone.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -142,55 +144,93 @@ async def transfer_recording(
     multipart_threshold: int,
     multipart_chunk: int,
     write_sidecar: bool = True,
+    source_gate: contextlib.AbstractAsyncContextManager[Any] | None = None,
 ) -> TransferOutcome:
-    """Copy one recording to the archive and verify it landed intact."""
+    """Copy one recording to the archive and verify it landed intact.
+
+    `source_gate` is held only while CommPeak is being asked for something --
+    the streamed GET. Everything after that talks to the archive
+    or the database, and holding CommPeak's per-account slot through it left
+    the slot idle for more than half of every object: measured, 390 ms of a
+    900 ms slot was CommPeak's.
+    """
+    # Per-step wall time, logged with `transfer.complete`. Throughput is bound
+    # by how long each object holds its CommPeak slot, and only the source
+    # steps need one -- these say how much of the slot the source really uses.
+    clock = time.monotonic()
+    timings: dict[str, int] = {}
+
+    def lap(step: str) -> None:
+        nonlocal clock
+        now_ = time.monotonic()
+        timings[f"{step}_ms"] = round((now_ - clock) * 1000)
+        clock = now_
+
     now = datetime.now(UTC)
     recording.state = RecordingState.TRANSFERRING
     recording.transfer_started_at = now
     await session.flush()
 
-    # HEAD first: the size drives the multipart decision, and an object that
-    # disappeared since inventory is a normal condition worth naming precisely
-    # rather than discovering halfway through a stream.
-    try:
-        src_meta = await source.head(recording.source_key)
-    except TransferError as exc:
-        if exc.error_class is ErrorClass.NOT_FOUND:
-            recording.state = RecordingState.MISSING_SOURCE
-            recording.last_error_class = str(ErrorClass.NOT_FOUND)
-            recording.last_error_detail = "object no longer present at source"
-            await session.flush()
-            log.info(
-                "transfer.source_missing",
-                recording_id=recording.id,
-                source_key=recording.source_key,
+    async with source_gate or contextlib.nullcontext():
+        lap("source_wait")
+        # No source HEAD. It cost a CommPeak request and ~65 ms of the
+        # account's slot on every object, for a size inventory already
+        # recorded from the listing. The GET supplies the rest: aiobotocore
+        # checks the body against its Content-Length and raises on a short
+        # read, so `upload.size` is the object's real size at the time it was
+        # read -- what the HEAD used to report -- and a key deleted since
+        # inventory answers the GET with NoSuchKey just as it answered HEAD.
+        dest_key = destination_key(
+            path_prefix=destination_row.path_prefix,
+            account=account,
+            source_key=recording.source_key,
+        )
+        content_type = _CONTENT_TYPES.get(recording.file_ext or "", "application/octet-stream")
+
+        dest.multipart_threshold = multipart_threshold
+        dest.multipart_chunk = multipart_chunk
+
+        try:
+            upload = await dest.put_stream(
+                dest_key,
+                source.open_stream(recording.source_key),
+                size_hint=recording.source_size,
+                content_type=content_type,
+                metadata={
+                    # Enough provenance on the object itself to trace it back
+                    # without the database.
+                    "c2w-source-key": recording.source_key[:1024],
+                    "c2w-call-uuid": recording.call_uuid or "",
+                    "c2w-match": recording.match_method or "",
+                },
             )
-            return TransferOutcome(recording.id, 0, verified=False)
-        raise
+        except TransferError as exc:
+            # An object that disappeared since inventory is a normal condition
+            # worth naming precisely, not a failure to retry.
+            if exc.error_class is ErrorClass.NOT_FOUND:
+                recording.state = RecordingState.MISSING_SOURCE
+                recording.last_error_class = str(ErrorClass.NOT_FOUND)
+                recording.last_error_detail = "object no longer present at source"
+                await session.flush()
+                log.info(
+                    "transfer.source_missing",
+                    recording_id=recording.id,
+                    source_key=recording.source_key,
+                )
+                return TransferOutcome(recording.id, 0, verified=False)
+            raise
 
-    dest_key = destination_key(
-        path_prefix=destination_row.path_prefix,
-        account=account,
-        source_key=recording.source_key,
-    )
-    content_type = _CONTENT_TYPES.get(recording.file_ext or "", "application/octet-stream")
-
-    dest.multipart_threshold = multipart_threshold
-    dest.multipart_chunk = multipart_chunk
-
-    upload = await dest.put_stream(
-        dest_key,
-        source.open_stream(recording.source_key),
-        size_hint=src_meta.size,
-        content_type=content_type,
-        metadata={
-            # Enough provenance on the object itself to trace it back without
-            # the database.
-            "c2w-source-key": recording.source_key[:1024],
-            "c2w-call-uuid": recording.call_uuid or "",
-            "c2w-match": recording.match_method or "",
-        },
-    )
+    if upload.size != recording.source_size:
+        # Rewritten at CommPeak after it was listed. The HEAD used to absorb
+        # this silently by reporting the new size; say so instead, and record
+        # the size of what was actually archived.
+        log.warning(
+            "transfer.source_size_changed",
+            recording_id=recording.id,
+            listed=recording.source_size,
+            read=upload.size,
+        )
+        recording.source_size = upload.size
 
     recording.destination_id = destination_row.id
     recording.destination_key = dest_key
@@ -200,11 +240,13 @@ async def transfer_recording(
     recording.bytes_transferred = upload.size
     recording.state = RecordingState.UPLOADED
     recording.transfer_completed_at = datetime.now(UTC)
+    lap("copy")
     await session.flush()
 
     # Read it back. This is the step that turns "we sent it" into "it is there".
     dest_meta = await dest.head(dest_key)
-    _compare(src_meta, dest_meta, upload.checksum_sha256)
+    _compare(upload.size, dest_meta, upload.checksum_sha256)
+    lap("dst_head")
 
     recording.state = RecordingState.VERIFIED
     recording.verified_at = datetime.now(UTC)
@@ -233,6 +275,7 @@ async def transfer_recording(
                 error=exc.message,
             )
 
+    lap("sidecar")
     recording.state = RecordingState.AVAILABLE
     await session.flush()
 
@@ -243,6 +286,7 @@ async def transfer_recording(
         multipart=upload.multipart,
         parts=upload.parts,
         destination_key=dest_key,
+        **timings,
     )
     return TransferOutcome(
         recording_id=recording.id,

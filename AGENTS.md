@@ -427,6 +427,16 @@ decoration and several are enforced in `web/filters.py`:
   `SettingsService._resolve` returns the scope for exactly this reason.
 - `pg_try_advisory_lock` is session-scoped: hold the connection for the life of
   the process, or the lock is released the moment the session returns to the pool.
+  **And hold it in autocommit.** SQLAlchemy begins a transaction on the first
+  statement, so the lock connection sat `idle in transaction` for the life of
+  the scheduler and the transcriber -- which pins the vacuum horizon for the
+  whole cluster. Dead rows stopped being reclaimed from 2026-09-17; by
+  2026-09-27 `transfer_jobs` and `recordings` carried ~30M dead tuples, every
+  worker tick timed out in the stale-lease reaper, and nothing was copied for
+  five days while every account still read `OK` and the dashboard blamed the
+  source. `singleton_lock` sets `isolation_level="AUTOCOMMIT"`, and
+  `test_singleton_lock_holds_no_transaction` pins it. If copying stops, check
+  `max(age(backend_xmin))` in `pg_stat_activity` before suspecting CommPeak.
 - **`RETURNING (xmax = 0)` does not work on a partitioned table.** It is the
   usual way to ask an upsert "was this row new?", but `xmax` is a system column
   and asyncpg refuses to read one from an INSERT routed through a partitioned
@@ -830,6 +840,24 @@ per-account figure, or from cutting the round trips per object. At 304/min
 with 40 transfers in flight each object takes about eight seconds, which for a
 0.73 MB file is latency (GET, PUT, HEAD verify, then the row) rather than
 throughput. More parallelism against the same limit will not fix that.
+
+**What did fix it was holding the limit for less time.** `transfer.complete`
+logs per-step timings, and on 615 objects the CommPeak slot was held ~900 ms
+per object of which only ~390 ms (source HEAD 64, GET-into-PUT 328) touched
+CommPeak; the archive verify, sidecar, settings reads and commit ran inside
+the slot and left it idle. `transfer_recording(source_gate=...)` now holds the
+slot for the HEAD and the GET only, and `SOURCE_PIPELINE_DEPTH` jobs per slot
+do the rest meanwhile. Same five requests per account at CommPeak, and its
+own latencies did not move (69 / 324 ms after) -- but 600/min became ~1,250/min
+on the same backlog, with no refusals.
+
+**Then the source HEAD went.** It was 69 ms of the slot and one CommPeak
+request per object, for a size the inventory listing already recorded. The GET
+covers both things it did: aiobotocore raises `IncompleteReadError` when a
+body falls short of its `Content-Length`, so the bytes read are the object's
+real size, and a deleted key answers the GET with `NoSuchKey`. A size that
+differs from the listing is logged as `transfer.source_size_changed` and the
+row corrected, rather than absorbed. ~1,100/min became ~1,560/min.
 
 **`source.concurrency_per_connection` is enforced per worker *process*, not
 across the platform.** It gates each connection group inside

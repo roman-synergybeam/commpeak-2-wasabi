@@ -956,9 +956,18 @@ async def singleton_lock(name: str):
     the moment that session returns to the pool -- which looks like it worked
     and guards nothing. Holding the connection also means the lock is released
     automatically if the process dies, with no stale-lock cleanup to do.
+
+    The connection must also be in autocommit. SQLAlchemy otherwise opens a
+    transaction on the first statement and never ends it, and a transaction
+    held open for the life of the process pins the vacuum horizon for the
+    whole cluster: dead rows stop being reclaimed, and the job tables bloat
+    until the workers' claim queries hit the statement timeout and nothing is
+    copied at all. That happened -- the scheduler sat "idle in transaction"
+    for ten days before the transfers stopped.
     """
     engine = get_platform_engine()
     connection = await engine.connect()
+    await connection.execution_options(isolation_level="AUTOCOMMIT")
     try:
         acquired = (
             await connection.execute(
