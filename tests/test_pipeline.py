@@ -305,12 +305,22 @@ class TestInventory:
 
 
 class TestTransfer:
+    @pytest.mark.parametrize(
+        ("threshold", "upload_in_slot"),
+        [
+            # The common case: read whole inside the slot, uploaded outside it.
+            (16 * 1024 * 1024, False),
+            # Multipart streams source into archive, so the upload is the GET.
+            (10_000, True),
+        ],
+        ids=["buffered", "multipart"],
+    )
     async def test_the_source_slot_is_held_only_while_commpeak_is_asked(
-        self, db, scenario
+        self, db, scenario, threshold, upload_in_slot
     ):
-        """CommPeak's per-account limit gates the GET, not the
-        archive verify, the sidecar or the commit -- holding it through those
-        left the slot idle for more than half of every object."""
+        """CommPeak's per-account limit gates the GET, not the archive upload,
+        verify, sidecar or commit -- holding it through those left the slot
+        idle for most of every object."""
         import asyncio
 
         audio = os.urandom(30_000)
@@ -347,8 +357,15 @@ class TestTransfer:
                 CommPeakSource(scenario["src"]) as src,
                 WasabiDestination(scenario["dst"]) as dst,
             ):
+                real_open = src.open_stream
+
+                def open_spy(*a, **kw):
+                    held["source get"] = gate.locked()
+                    return real_open(*a, **kw)
+
+                src.open_stream = open_spy
                 spy("source head", src, "head")
-                spy("copy", dst, "put_stream")
+                spy("upload", dst, "put_stream")
                 spy("archive verify", dst, "head")
                 spy("sidecar", dst, "put_bytes")
                 outcome = await transfer_recording(
@@ -358,16 +375,19 @@ class TestTransfer:
                     src,
                     dst,
                     account="go4rex.td",
-                    multipart_threshold=16 * 1024 * 1024,
+                    multipart_threshold=threshold,
                     multipart_chunk=5 * 1024 * 1024,
                     source_gate=gate,
                 )
+                archived = await dst.head(outcome.destination_key)
             await s.commit()
 
         assert outcome.verified and outcome.sidecar_written
-        # And no source HEAD at all: the GET carries everything it provided.
+        assert archived.size == len(audio)
+        # No source HEAD at all: the GET carries everything it provided.
         assert held == {
-            "copy": True,
+            "source get": True,
+            "upload": upload_in_slot,
             "archive verify": False,
             "sidecar": False,
         }

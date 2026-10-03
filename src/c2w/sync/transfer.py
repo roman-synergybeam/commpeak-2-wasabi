@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import json
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -29,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from c2w.db.base import RecordingState
 from c2w.db.models.core import Recording, StorageDestination
 from c2w.logging import get_logger
-from c2w.storage.base import ObjectMeta
+from c2w.storage.base import ObjectMeta, UploadResult
 from c2w.storage.commpeak import CommPeakSource
 from c2w.storage.errors import ErrorClass, TransferError
 from c2w.storage.wasabi import WasabiDestination, destination_key, sidecar_key
@@ -133,6 +134,11 @@ def _compare(source: ObjectMeta | int, dest: ObjectMeta, expected_digest: str) -
         )
 
 
+async def _once(data: bytes) -> AsyncIterator[bytes]:
+    """An already-read object, as the stream `put_stream` takes."""
+    yield data
+
+
 async def transfer_recording(
     session: AsyncSession,
     recording: Recording,
@@ -171,54 +177,75 @@ async def transfer_recording(
     recording.transfer_started_at = now
     await session.flush()
 
-    async with source_gate or contextlib.nullcontext():
-        lap("source_wait")
-        # No source HEAD. It cost a CommPeak request and ~65 ms of the
-        # account's slot on every object, for a size inventory already
-        # recorded from the listing. The GET supplies the rest: aiobotocore
-        # checks the body against its Content-Length and raises on a short
-        # read, so `upload.size` is the object's real size at the time it was
-        # read -- what the HEAD used to report -- and a key deleted since
-        # inventory answers the GET with NoSuchKey just as it answered HEAD.
-        dest_key = destination_key(
-            path_prefix=destination_row.path_prefix,
-            account=account,
-            source_key=recording.source_key,
+    dest_key = destination_key(
+        path_prefix=destination_row.path_prefix,
+        account=account,
+        source_key=recording.source_key,
+    )
+    content_type = _CONTENT_TYPES.get(recording.file_ext or "", "application/octet-stream")
+    dest.multipart_threshold = multipart_threshold
+    dest.multipart_chunk = multipart_chunk
+
+    async def upload_from(stream: AsyncIterator[bytes]) -> UploadResult:
+        return await dest.put_stream(
+            dest_key,
+            stream,
+            size_hint=recording.source_size,
+            content_type=content_type,
+            metadata={
+                # Enough provenance on the object itself to trace it back
+                # without the database.
+                "c2w-source-key": recording.source_key[:1024],
+                "c2w-call-uuid": recording.call_uuid or "",
+                "c2w-match": recording.match_method or "",
+            },
         )
-        content_type = _CONTENT_TYPES.get(recording.file_ext or "", "application/octet-stream")
 
-        dest.multipart_threshold = multipart_threshold
-        dest.multipart_chunk = multipart_chunk
-
-        try:
-            upload = await dest.put_stream(
-                dest_key,
-                source.open_stream(recording.source_key),
-                size_hint=recording.source_size,
-                content_type=content_type,
-                metadata={
-                    # Enough provenance on the object itself to trace it back
-                    # without the database.
-                    "c2w-source-key": recording.source_key[:1024],
-                    "c2w-call-uuid": recording.call_uuid or "",
-                    "c2w-match": recording.match_method or "",
-                },
+    # No source HEAD. It cost a CommPeak request and ~65 ms of the account's
+    # slot on every object, for a size inventory already recorded from the
+    # listing. The GET supplies the rest: aiobotocore checks the body against
+    # its Content-Length and raises on a short read, so `upload.size` is the
+    # object's real size when it was read -- what the HEAD used to report --
+    # and a key deleted since inventory answers the GET with NoSuchKey.
+    #
+    # Below the multipart threshold the object is read whole *inside* the
+    # slot and uploaded *outside* it. `put_stream` buffers a small object in
+    # memory before sending it anyway, so the bytes and the memory are the
+    # same -- but the account's slot is released the moment CommPeak has
+    # answered, instead of being held through the archive PUT, which does not
+    # touch CommPeak at all. A multipart object still streams source into
+    # destination under the slot: buffering one would break the rule against
+    # staging large media, and they are rare.
+    buffered = recording.source_size < multipart_threshold
+    upload: UploadResult | None = None
+    body = bytearray()
+    try:
+        async with source_gate or contextlib.nullcontext():
+            lap("source_wait")
+            if buffered:
+                async for chunk in source.open_stream(recording.source_key):
+                    body.extend(chunk)
+                lap("get")
+            else:
+                upload = await upload_from(source.open_stream(recording.source_key))
+    except TransferError as exc:
+        # An object that disappeared since inventory is a normal condition
+        # worth naming precisely, not a failure to retry.
+        if exc.error_class is ErrorClass.NOT_FOUND:
+            recording.state = RecordingState.MISSING_SOURCE
+            recording.last_error_class = str(ErrorClass.NOT_FOUND)
+            recording.last_error_detail = "object no longer present at source"
+            await session.flush()
+            log.info(
+                "transfer.source_missing",
+                recording_id=recording.id,
+                source_key=recording.source_key,
             )
-        except TransferError as exc:
-            # An object that disappeared since inventory is a normal condition
-            # worth naming precisely, not a failure to retry.
-            if exc.error_class is ErrorClass.NOT_FOUND:
-                recording.state = RecordingState.MISSING_SOURCE
-                recording.last_error_class = str(ErrorClass.NOT_FOUND)
-                recording.last_error_detail = "object no longer present at source"
-                await session.flush()
-                log.info(
-                    "transfer.source_missing",
-                    recording_id=recording.id,
-                    source_key=recording.source_key,
-                )
-                return TransferOutcome(recording.id, 0, verified=False)
-            raise
+            return TransferOutcome(recording.id, 0, verified=False)
+        raise
+    if upload is None:
+        upload = await upload_from(_once(bytes(body)))
+        del body
 
     if upload.size != recording.source_size:
         # Rewritten at CommPeak after it was listed. The HEAD used to absorb

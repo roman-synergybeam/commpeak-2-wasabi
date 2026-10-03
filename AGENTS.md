@@ -859,6 +859,19 @@ real size, and a deleted key answers the GET with `NoSuchKey`. A size that
 differs from the listing is logged as `transfer.source_size_changed` and the
 row corrected, rather than absorbed. ~1,100/min became ~1,560/min.
 
+**And then CommPeak slowed down, at five concurrent.** Over the following
+eight hours its latency rose steadily -- the copy step's median went 213 ->
+474 ms and its mean 348 -> 1,120 ms, a growing slow tail -- and plateaued
+around 500/min, with no refusals. That is not overnight load, which would
+have eased at night. Its limit is evidently on request *rate* or throughput as
+well as on concurrency. Releasing the slot before the archive PUT
+(`transfer_recording` buffers a sub-multipart object inside the slot and
+uploads it outside) took it to ~580/min, and CommPeak's GET latency doubled
+within minutes to absorb it (median ~150 -> ~300 ms, p90 ~2.3 s). Past this
+point every extra request just makes each request slower. The slot is now
+spent entirely on CommPeak's own reply time, so this end has nothing left to
+shorten; more speed has to come from CommPeak.
+
 **`source.concurrency_per_connection` is enforced per worker *process*, not
 across the platform.** It gates each connection group inside
 `Worker._run_batch`, so N workers at that value give N times as many

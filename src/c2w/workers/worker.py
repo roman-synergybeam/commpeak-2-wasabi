@@ -51,11 +51,13 @@ log = get_logger(__name__)
 
 IDLE_SLEEP_SECONDS = 5.0
 DISABLED_SLEEP_SECONDS = 30.0
-#: Jobs in flight per CommPeak slot. Measured per object: ~390 ms needs the
-#: source, ~510 ms is archive verify, sidecar and database. Three keeps the
-#: slot busy with room for the slow tail; it does not change how many requests
-#: CommPeak sees, which `source.concurrency_per_connection` alone decides.
-SOURCE_PIPELINE_DEPTH = 3
+#: Jobs in flight per CommPeak slot. The slot now covers only the GET; the
+#: archive PUT, verify, sidecar and database work -- several times longer --
+#: happen outside it, so it takes this many jobs to keep it busy. It does not
+#: change how many requests CommPeak sees, which
+#: `source.concurrency_per_connection` alone decides. Bounded in turn by the
+#: pool gate, so it cannot exceed the connections this process has.
+SOURCE_PIPELINE_DEPTH = 6
 
 
 class Worker:
