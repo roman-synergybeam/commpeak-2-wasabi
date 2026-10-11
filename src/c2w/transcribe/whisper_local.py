@@ -32,6 +32,9 @@ log = get_logger(__name__)
 #: dominate the run.
 _MODELS: dict[tuple[str, str], Any] = {}
 
+#: What Whisper and its voice-activity detector both expect.
+SAMPLE_RATE = 16_000
+
 
 def _language_code(setting: str | None) -> str | None:
     """Turn a settings label into a Whisper language code.
@@ -99,6 +102,7 @@ class WhisperLocal:
         *,
         language: str | None = None,
         word_timestamps: bool = True,
+        min_speech_seconds: float = 0,
     ) -> TranscriptResult:
         """Recognise one file.
 
@@ -107,15 +111,41 @@ class WhisperLocal:
         request in the process.
         """
         return await asyncio.to_thread(
-            self._transcribe_blocking, audio_path, _language_code(language), word_timestamps
+            self._transcribe_blocking,
+            audio_path,
+            _language_code(language),
+            word_timestamps,
+            min_speech_seconds,
         )
 
     def _transcribe_blocking(
-        self, audio_path: str, language: str | None, word_timestamps: bool
+        self,
+        audio_path: str,
+        language: str | None,
+        word_timestamps: bool,
+        min_speech_seconds: float = 0,
     ) -> TranscriptResult:
+        from faster_whisper.audio import decode_audio
+
+        # Decoded once and handed to the model as samples, so measuring the
+        # speech first costs no second decode.
+        audio = decode_audio(audio_path, sampling_rate=SAMPLE_RATE)
+        speech = speech_seconds(audio)
+        if speech < min_speech_seconds:
+            # Hold music, ringing, silence. The detector takes a fraction of a
+            # second; recognising it would take the full model run and, on
+            # music, tends to produce invented words rather than nothing.
+            return TranscriptResult(
+                text="",
+                duration_seconds=len(audio) / SAMPLE_RATE,
+                speech_seconds=speech,
+                engine=self.name,
+                model=self.model_name,
+            )
+
         model = self._model()
         segments, info = model.transcribe(
-            audio_path,
+            audio,
             language=language,
             beam_size=self.beam_size,
             word_timestamps=word_timestamps,
@@ -147,6 +177,7 @@ class WhisperLocal:
 
         return TranscriptResult(
             text=" ".join(parts),
+            speech_seconds=speech,
             language=language,
             language_detected=getattr(info, "language", None),
             confidence=_confidence(total_logprob / len(out)) if out else None,
@@ -162,6 +193,18 @@ class WhisperLocal:
                 "beam_size": self.beam_size,
             },
         )
+
+
+def speech_seconds(audio: Any) -> float:
+    """Seconds of speech the voice-activity detector finds in 16 kHz samples.
+
+    The same Silero detector Whisper's own `vad_filter` uses, run on its own so
+    the answer is known before the expensive part rather than after it.
+    """
+    from faster_whisper.vad import get_speech_timestamps
+
+    spans = get_speech_timestamps(audio, sampling_rate=SAMPLE_RATE)
+    return round(sum(span["end"] - span["start"] for span in spans) / SAMPLE_RATE, 2)
 
 
 def _confidence(avg_logprob: float | None) -> float | None:

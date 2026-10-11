@@ -1720,6 +1720,21 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         brand_overridable=True,
     ),
     SettingSpec(
+        key="transcribe.min_speech_seconds",
+        type=SettingType.INT,
+        default=5,
+        category="Transcription and voice analysis",
+        label="Skip recordings with less speech than",
+        description="Most recordings are hold music, ringing or silence. A speech "
+        "detector measures each one first, in a fraction of a second, and anything "
+        "under this is recorded as \"no speech\" without running the recogniser.",
+        unit="seconds",
+        choices=("0", "3", "5", "10", "20"),
+        choice_labels={"0": "never skip"},
+        validator=_non_negative,
+        brand_overridable=True,
+    ),
+    SettingSpec(
         key="transcribe.concurrency",
         type=SettingType.INT,
         default=1,

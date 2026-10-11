@@ -32,10 +32,11 @@ from c2w.db.models.core import (
     TransferJob,
 )
 from c2w.db.session import (
-    MAX_OVERFLOW,
-    POOL_SIZE,
+    WORKER_POOL,
+    configure_pool,
     dispose_engine,
     platform_session,
+    pool_capacity,
 )
 from c2w.logging import configure_logging, get_logger, reconfigure_from_settings
 from c2w.settings import settings_service
@@ -93,7 +94,7 @@ class Worker:
         #:
         #: Two slots are held back for the pass's own bookkeeping: the claim,
         #: the settings reads, the reclaim.
-        self._pool_gate = asyncio.Semaphore(max(1, POOL_SIZE + MAX_OVERFLOW - 2))
+        self._pool_gate = asyncio.Semaphore(max(1, pool_capacity() - 2))
 
     def request_stop(self) -> None:
         self._stopping.set()
@@ -723,6 +724,7 @@ class Worker:
 
 async def _amain() -> None:
     configure_logging("c2w-worker")
+    configure_pool(*WORKER_POOL)
     async with platform_session() as session:
         await reconfigure_from_settings("c2w-worker", session)
 

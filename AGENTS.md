@@ -716,6 +716,47 @@ than an inherited default.
 - `transcribe.diarize` is in the settings and does nothing yet. faster-whisper
   does not diarise; doing it properly needs a second model.
 
+### Remote GPU agents
+
+The server has eight cores and no GPU -- about a call a minute against 24.7M
+recordings. `c2w.transcribe.agents` lends the work to a GPU machine elsewhere
+(the operator's own PC, RTX 4060) through `/api/agent/v1`, and the program it
+runs is `src/c2w/agent_dist/c2w_agent.py`, installed on Windows by
+`install.ps1`, both served from `/api/agent/v1/download/`. What the design
+refuses to trust the agent with:
+
+- **No archive credential leaves the server.** Each job carries a presigned
+  GET for one object, valid for the 20-minute lease. A compromised agent can
+  read what it was handed and nothing else. Its own token is stored as a
+  SHA-256 only (`c2w-admin agent create|list|revoke|progress`).
+- **The organisation comes from the lease, never from the agent.** The job id
+  is `<brand>.<random token>`; every step runs in `brand_session`, so a job id
+  edited to another organisation finds no lease under that organisation's RLS
+  (`test_a_job_cannot_be_moved_to_another_organisation`).
+- **The server judges the result.** `skip_reason` is one rule for the local
+  engine and for agents; redaction is applied server-side to what the agent
+  sends, whatever the agent did.
+
+**Most recordings are not conversations.** There are ~15,000 recording files a
+day against ~3,500 call records, and only ~700 calls a day have 20 s or more
+of talk -- the rest is ringing, hold music and silence. So every recogniser
+measures speech with the Silero VAD *before* the model (`speech_seconds`), and
+anything under `transcribe.min_speech_seconds` (default 5) is recorded
+"skipped: no speech" in a fraction of a second. Where a recording is linked to
+a call record with `bill_duration = 0`, the claim skips it without a download.
+Only 7-15% of recordings are linked, and call records only exist from
+2026-09-09, so the VAD gate is the filter that matters for the backlog.
+
+**Agents work oldest first, the local transcriber newest first**, so they meet
+in the middle rather than compete; `transcribe_leases` keeps them apart where
+they do meet. `transcribe_cursors` holds where each organisation's oldest-first
+scan has reached, or every claim would re-probe every transcribed row from the
+start; an expired or handed-back lease pulls the cursor back to it.
+
+The ETA (`agents.progress`) counts recordings *dealt with* -- transcribed or
+skipped -- because skipping is most of the work, against the archive's verified
+object count from `storage_destinations`.
+
 ## The auto-sync hook
 
 `.claude/auto-sync.sh` commits and pushes on every Stop. Two things about it

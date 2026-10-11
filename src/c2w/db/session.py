@@ -32,12 +32,14 @@ from c2w.config import Bootstrap, get_bootstrap
 __all__ = [
     "MissingBrandScope",
     "brand_session",
+    "configure_pool",
     "dispose_engine",
     "get_engine",
     "get_platform_engine",
     "get_platform_sessionmaker",
     "get_sessionmaker",
     "platform_session",
+    "pool_capacity",
 ]
 
 _engine: AsyncEngine | None = None
@@ -50,7 +52,37 @@ _platform_sessionmaker: async_sessionmaker[AsyncSession] | None = None
 #: API plus a handful of workers.
 POOL_SIZE = 10
 MAX_OVERFLOW = 10
+
+#: Per-process pool limits, by role. PostgreSQL allows 100 connections and
+#: keeps 3 of them for superusers; at 10 + 10 everywhere, five workers alone
+#: could open all 100, and with a real queue to work through they did: the
+#: workers and the console were refused with "remaining connection slots are
+#: reserved". The roles add up to 90 -- 5 x 12 for workers, 20 for the API,
+#: 5 each for the scheduler and transcriber -- leaving room for a maintenance
+#: session. Change one and re-add the sum.
+WORKER_POOL = (6, 6)
+BACKGROUND_POOL = (3, 2)
+
+_pool_limits: tuple[int, int] = (POOL_SIZE, MAX_OVERFLOW)
+
+
+def configure_pool(pool_size: int, max_overflow: int) -> None:
+    """Size this process's connection pools. Call before the first session."""
+    global _pool_limits
+    if _engine is not None or _platform_engine is not None:
+        raise RuntimeError("configure_pool() called after an engine was built")
+    _pool_limits = (pool_size, max_overflow)
+
+
+def pool_capacity() -> int:
+    """The most connections one of this process's pools will open."""
+    return sum(_pool_limits)
 STATEMENT_TIMEOUT_MS = 30_000
+#: A transaction left open with nothing running in it is ended after this.
+#: Only a stuck task does that -- a transcription hung for three and a half
+#: days once held its snapshot the whole time, which slowed every full scan in
+#: the database. Generous, because ending a merely slow one is not free either.
+IDLE_IN_TRANSACTION_TIMEOUT_MS = 3_600_000
 
 
 class MissingBrandScope(RuntimeError):
@@ -60,14 +92,17 @@ class MissingBrandScope(RuntimeError):
 def _build_engine(url: str, app_name: str) -> AsyncEngine:
     return create_async_engine(
         url,
-        pool_size=POOL_SIZE,
-        max_overflow=MAX_OVERFLOW,
+        pool_size=_pool_limits[0],
+        max_overflow=_pool_limits[1],
         pool_pre_ping=True,
         echo=False,
         connect_args={
             "server_settings": {
                 "application_name": app_name,
                 "statement_timeout": str(STATEMENT_TIMEOUT_MS),
+                "idle_in_transaction_session_timeout": str(
+                    IDLE_IN_TRANSACTION_TIMEOUT_MS
+                ),
             }
         },
     )

@@ -162,6 +162,15 @@ class TestTheRealEngine:
         assert result.duration_seconds is not None
         assert "language_probability" in result.engine_detail
 
+    async def test_no_speech_stops_before_the_model(self, tmp_path):
+        """Hold music and silence end at the speech detector. A model name that
+        cannot load proves the recogniser was never reached."""
+        engine = WhisperLocal(model="no-such-model")
+        result = await engine.transcribe(self._wav(tmp_path, 3.0), min_speech_seconds=5)
+        assert result.segments == []
+        assert result.speech_seconds is not None and result.speech_seconds < 5
+        assert result.duration_seconds == pytest.approx(3.0, abs=0.1)
+
 
 TEST_DB = __import__("os").environ.get("C2W_TEST_DATABASE_URL")
 

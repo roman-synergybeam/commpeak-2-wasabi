@@ -132,6 +132,77 @@ async def cmd_user_list(_args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# ------------------------------------------------------- transcription agents
+
+
+async def cmd_agent_create(args: argparse.Namespace) -> int:
+    from c2w.transcribe.agents import create_agent
+
+    async with platform_session() as session:
+        token = await create_agent(session, args.name)
+        await session.commit()
+    _out(f"Agent {args.name!r} created. Its token, shown this once and stored only as a hash:")
+    _out("")
+    _out(f"  {token}")
+    _out("")
+    _out("Paste it when the installer on that machine asks for it.")
+    return EXIT_OK
+
+
+async def cmd_agent_list(_args: argparse.Namespace) -> int:
+    async with platform_session() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT name, created_at, last_seen_at, revoked_at, last_detail "
+                    "FROM transcribe_agents ORDER BY id"
+                )
+            )
+        ).all()
+    if not rows:
+        _out("No transcription agents. Add one with: c2w-admin agent create <name>")
+        return EXIT_OK
+    for name, _created, seen, revoked, detail in rows:
+        if revoked:
+            state = "revoked"
+        else:
+            state = "never seen" if seen is None else f"seen {seen:%Y-%m-%d %H:%M}"
+        device = (detail or {}).get("device") or "-"
+        _out(f"{name:24} {state:24} {device}")
+    return EXIT_OK
+
+
+async def cmd_agent_revoke(args: argparse.Namespace) -> int:
+    from c2w.transcribe.agents import revoke_agent
+
+    async with platform_session() as session:
+        done = await revoke_agent(session, args.name)
+        await session.commit()
+    _out(f"Agent {args.name!r} revoked." if done else f"No active agent named {args.name!r}.")
+    return EXIT_OK if done else EXIT_ERROR
+
+
+async def cmd_agent_progress(_args: argparse.Namespace) -> int:
+    from c2w.transcribe.agents import progress
+
+    for row in await progress(fresh=True):
+        eta = row["eta_hours"]
+        _out(
+            f"{row['organisation']:16} {row['processed']:>11,} of {row['archived']:>11,} done, "
+            f"{row['per_hour']:>8,.0f}/h, "
+            + (f"about {_eta_words(eta)} to go" if eta is not None else "no recent progress")
+        )
+    return EXIT_OK
+
+
+def _eta_words(hours: float) -> str:
+    if hours < 48:
+        return f"{hours:.0f} hours"
+    if hours < 24 * 60:
+        return f"{hours / 24:.0f} days"
+    return f"{hours / 24 / 30:.1f} months"
+
+
 # ------------------------------------------------------------------- settings
 
 
@@ -579,6 +650,20 @@ def build_parser() -> argparse.ArgumentParser:
         dest="cmd", required=True
     )
     de.add_parser("list", help="list destinations").set_defaults(func=cmd_destination_list)
+
+    ag = sub.add_parser("agent", help="manage remote transcription agents").add_subparsers(
+        dest="cmd", required=True
+    )
+    p = ag.add_parser("create", help="register a machine and print its token")
+    p.add_argument("name")
+    p.set_defaults(func=cmd_agent_create)
+    ag.add_parser("list", help="list agents").set_defaults(func=cmd_agent_list)
+    p = ag.add_parser("revoke", help="switch an agent off")
+    p.add_argument("name")
+    p.set_defaults(func=cmd_agent_revoke)
+    ag.add_parser("progress", help="transcription progress and ETA").set_defaults(
+        func=cmd_agent_progress
+    )
 
     # doctor
     sub.add_parser("doctor", help="check configuration and connectivity").set_defaults(

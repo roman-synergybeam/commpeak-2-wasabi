@@ -119,6 +119,10 @@ def create_app() -> FastAPI:
 
     app.include_router(web_router)
 
+    from c2w.api.agent import router as agent_router
+
+    app.include_router(agent_router)
+
     @app.exception_handler(HTTPException)
     async def unauthorised_to_login(request: Request, exc: HTTPException) -> Response:
         """Send browsers to the sign-in page rather than showing raw JSON 401s."""

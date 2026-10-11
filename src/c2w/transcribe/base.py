@@ -57,6 +57,11 @@ class TranscriptResult:
     engine: str = ""
     model: str = ""
     engine_detail: dict = field(default_factory=dict)
+    #: Seconds the voice-activity detector found speech in, measured before
+    #: recognition. None when it was not measured. What tells a conversation
+    #: from hold music, ringing and silence -- which on this estate are most
+    #: of the recordings.
+    speech_seconds: float | None = None
 
 
 class Transcriber(Protocol):
@@ -70,6 +75,7 @@ class Transcriber(Protocol):
         *,
         language: str | None = None,
         word_timestamps: bool = True,
+        min_speech_seconds: float = 0,
     ) -> TranscriptResult: ...
 
 

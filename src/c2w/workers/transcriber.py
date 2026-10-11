@@ -29,7 +29,7 @@ import signal
 
 from sqlalchemy import text
 
-from c2w.db.session import dispose_engine, platform_session
+from c2w.db.session import BACKGROUND_POOL, configure_pool, dispose_engine, platform_session
 from c2w.logging import configure_logging, get_logger, reconfigure_from_settings
 from c2w.transcribe.base import EngineUnavailable
 from c2w.transcribe.service import (
@@ -274,6 +274,12 @@ async def _pending_recordings(brand_id: int, *, limit: int) -> list[int]:
                     "  AND r.destination_key IS NOT NULL "
                     "  AND r.destination_id IS NOT NULL "
                     "  AND t.id IS NULL "
+                    # Not a recording a remote agent is holding. The agent works
+                    # oldest first and this newest first, so they only meet in
+                    # the middle -- this is for when they do.
+                    "  AND NOT EXISTS (SELECT 1 FROM transcribe_leases l "
+                    "    WHERE l.brand_id = r.brand_id AND l.recording_id = r.id "
+                    "    AND l.expires_at > now()) "
                     "ORDER BY r.started_at DESC NULLS LAST "
                     "LIMIT :n"
                 ),
@@ -285,6 +291,7 @@ async def _pending_recordings(brand_id: int, *, limit: int) -> list[int]:
 
 async def _amain() -> None:
     configure_logging("c2w-transcriber")
+    configure_pool(*BACKGROUND_POOL)
     async with platform_session() as session:
         await reconfigure_from_settings("c2w-transcriber", session)
 

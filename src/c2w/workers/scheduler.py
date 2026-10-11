@@ -19,7 +19,13 @@ from sqlalchemy import select, text
 from c2w.alerts.base import Alert, Severity, dispatch
 from c2w.db.base import ConnectionStatus, JobKind, RecordingState, SyncRunKind
 from c2w.db.models.core import Brand, CommPeakConnection, Recording, SyncRun
-from c2w.db.session import dispose_engine, get_platform_engine, platform_session
+from c2w.db.session import (
+    BACKGROUND_POOL,
+    configure_pool,
+    dispose_engine,
+    get_platform_engine,
+    platform_session,
+)
 from c2w.db.size import as_gb, brand_bytes, database_bytes
 from c2w.logging import configure_logging, get_logger, reconfigure_from_settings
 from c2w.settings import settings_service
@@ -31,6 +37,16 @@ from c2w.sync.inventory import backfill_priority, plan_incremental, scan_range
 log = get_logger(__name__)
 
 TICK_SECONDS = 30.0
+
+#: How often the archive totals are recounted. They are derived from every
+#: verified row in `recordings`, and at twenty-four million rows that is a
+#: full scan of tens of seconds -- every minute, it was most of the database's
+#: time, and when it grew past the statement timeout it failed the whole tick.
+ARCHIVE_TOTALS_SECONDS = 600
+
+#: The recount's own statement timeout, wider than the pool's 30 s default
+#: because it is a deliberate full scan and the only one the scheduler runs.
+ARCHIVE_TOTALS_TIMEOUT = "5min"
 
 
 class Scheduler:
@@ -71,13 +87,13 @@ class Scheduler:
         # finish", which is how this refresh came to sit thirteen minutes stale
         # with the counters a hundred and fifty thousand objects out. Cheap
         # work that must actually happen on a schedule goes first.
-        if loop_now - self._last_archive_totals >= 60:
+        if loop_now - self._last_archive_totals >= ARCHIVE_TOTALS_SECONDS:
             self._last_archive_totals = loop_now
-            await self._refresh_archive_totals()
+            await self._step("archive_totals", self._refresh_archive_totals())
 
         if loop_now - self._last_inventory >= poll:
             self._last_inventory = loop_now
-            await self._run_incremental_inventory()
+            await self._step("inventory", self._run_incremental_inventory())
 
         # Call records. Its own interval and its own pass: the CDR API is a
         # different service from the recordings bucket, reachable when that one
@@ -87,7 +103,7 @@ class Scheduler:
             cdr_minutes = await settings_service.get_int(session, "commpeak.cdr_poll_minutes")
         if cdr_minutes and loop_now - self._last_cdr >= cdr_minutes * 60:
             self._last_cdr = loop_now
-            await _poll_call_records()
+            await self._step("call_records", _poll_call_records())
 
         # Accounts that are not working get re-checked here and nowhere else,
         # one at a time. See _watch_access.
@@ -97,7 +113,7 @@ class Scheduler:
             )
         if loop_now - self._last_watch >= max(60, watch_every):
             self._last_watch = loop_now
-            await self._watch_access()
+            await self._step("watch_access", self._watch_access())
 
         # Text messages, for organisations that have switched them on. Its own
         # interval because it is a different API with a different rhythm: a
@@ -107,7 +123,7 @@ class Scheduler:
             sms_minutes = await settings_service.get_int(session, "sms.poll_minutes")
         if loop_now - self._last_sms >= max(60, sms_minutes * 60):
             self._last_sms = loop_now
-            await _poll_text_messages()
+            await self._step("text_messages", _poll_text_messages())
 
         # Transcription used to run here, and that was the wrong place for it.
         # `_tick` runs its steps in sequence, and the incremental inventory
@@ -131,14 +147,28 @@ class Scheduler:
             # Not on the very first tick: the window would start at process
             # start and report a few seconds of activity as if it were an hour.
             if not first_pass:
-                await self._send_sync_summary(summary_minutes)
+                await self._step("sync_summary", self._send_sync_summary(summary_minutes))
 
         # Retention only gates which discovered recordings become eligible for
         # offload; it never deletes anything at the source.
         if loop_now - self._last_retention >= 3600:
             self._last_retention = loop_now
-            await self._queue_eligible_recordings()
+            await self._step("retention", self._queue_eligible_recordings())
 
+
+    async def _step(self, name: str, work) -> None:
+        """Run one tick step so that its failure cannot stop the others.
+
+        The steps run in sequence, so before this an exception in the first
+        one skipped every step after it -- and for three and a half days the
+        archive-totals recount timed out every minute and took the incremental
+        inventory down with it: nothing new was discovered, silently, while
+        every service still showed as running.
+        """
+        try:
+            await work
+        except Exception as exc:
+            log.exception("scheduler.step_failed", step=name, error=str(exc)[:300])
 
     async def _refresh_archive_totals(self) -> None:
         """Recompute what each archive destination holds.
@@ -157,6 +187,12 @@ class Scheduler:
         """
         async with platform_session() as session:
             await session.execute(
+                text(f"SET LOCAL statement_timeout = '{ARCHIVE_TOTALS_TIMEOUT}'")
+            )
+            # Aggregated before the join, not after: joining first and
+            # grouping by destination sorted every verified row -- hundreds of
+            # megabytes spilled to disk -- to produce two numbers.
+            await session.execute(
                 text(
                     """
                     UPDATE storage_destinations d
@@ -165,14 +201,21 @@ class Scheduler:
                            updated_at     = now()
                       FROM (
                           SELECT d2.id,
-                                 count(r.id)                          AS objects,
-                                 coalesce(sum(r.destination_size), 0) AS bytes
+                                 coalesce(a.objects, 0) AS objects,
+                                 coalesce(a.bytes, 0)   AS bytes
                           FROM storage_destinations d2
-                          LEFT JOIN recordings r
-                                 ON r.destination_id = d2.id
-                                AND r.brand_id = d2.brand_id
-                                AND r.verified_at IS NOT NULL
-                          GROUP BY d2.id
+                          LEFT JOIN (
+                              SELECT destination_id,
+                                     brand_id,
+                                     count(*)                AS objects,
+                                     sum(destination_size)   AS bytes
+                              FROM recordings
+                              WHERE verified_at IS NOT NULL
+                                AND destination_id IS NOT NULL
+                              GROUP BY destination_id, brand_id
+                          ) a
+                                 ON a.destination_id = d2.id
+                                AND a.brand_id = d2.brand_id
                       ) t
                      WHERE d.id = t.id
                        AND (d.objects_stored, d.bytes_stored) IS DISTINCT FROM
@@ -989,6 +1032,7 @@ async def singleton_lock(name: str):
 
 async def _amain() -> None:
     configure_logging("c2w-scheduler")
+    configure_pool(*BACKGROUND_POOL)
     async with platform_session() as session:
         await reconfigure_from_settings("c2w-scheduler", session)
 
