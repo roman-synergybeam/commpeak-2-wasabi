@@ -258,7 +258,9 @@ def _eta_words(hours: float) -> str:
 def load_config() -> dict:
     if not CONFIG.exists():
         raise SystemExit(f"No {CONFIG}. Run install.ps1 first.")
-    return json.loads(CONFIG.read_text(encoding="utf-8"))
+    # utf-8-sig: Windows PowerShell 5.1's Set-Content -Encoding UTF8 writes a
+    # byte-order mark, which plain utf-8 json refuses.
+    return json.loads(CONFIG.read_text(encoding="utf-8-sig"))
 
 
 def check(config: dict, use_cpu: bool) -> int:

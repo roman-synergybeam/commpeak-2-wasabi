@@ -61,7 +61,9 @@ if ($existing) {
     $token = (Read-Host "Paste the token from 'c2w-admin agent create'").Trim()
 }
 if (-not $token.StartsWith("c2wa_")) { throw "That does not look like an agent token (they start with c2wa_)." }
-@{ server = $Server; token = $token; model = "turbo" } | ConvertTo-Json | Set-Content -Encoding UTF8 $Config
+# Written without a byte-order mark: PowerShell 5.1's "-Encoding UTF8" adds one.
+$json = @{ server = $Server; token = $token; model = "turbo" } | ConvertTo-Json
+[System.IO.File]::WriteAllText($Config, $json, (New-Object System.Text.UTF8Encoding $false))
 # Only this Windows user can read the token.
 icacls $Config /inheritance:r /grant:r "$($env:USERNAME):(R,W)" | Out-Null
 
