@@ -45,7 +45,9 @@ Step "Creating the agent's own Python environment"
 if (-not (Test-Path $Py)) { & $python -m venv $Venv }
 & $Py -m pip install --quiet --upgrade pip
 Write-Host "Installing faster-whisper and the CUDA 12 libraries (about 1.5 GB, a few minutes)..."
-& $Py -m pip install --quiet --upgrade "faster-whisper==1.2.1" requests numpy nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
+# av below 19: PyAV 19 removed the `metadata_errors` argument faster-whisper
+# 1.2.1 passes when it opens audio, and every decode fails with a TypeError.
+& $Py -m pip install --quiet --upgrade "faster-whisper==1.2.1" "av>=11,<19" requests numpy nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
 if ($LASTEXITCODE -ne 0) { throw "pip could not install the packages." }
 
 Step "Downloading the agent"

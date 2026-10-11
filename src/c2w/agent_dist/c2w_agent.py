@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "1.0"
+VERSION = "1.0.1"
 HOME = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "c2w-agent"
 CONFIG = HOME / "config.json"
 LOG = HOME / "agent.log"
@@ -227,7 +227,7 @@ def fetcher(console: Console, device: str, out: queue.Queue, stop: threading.Eve
                 audio = decode_audio(io.BytesIO(response.content), sampling_rate=SAMPLE_RATE)
             except Exception as exc:
                 console.give_back(job["job_id"], f"download failed: {type(exc).__name__}: {exc}")
-                say(f"download failed, handed back: {type(exc).__name__}")
+                say(f"download failed, handed back: {type(exc).__name__}: {str(exc)[:160]}")
                 return
             out.put(("job", (job, audio)))
 
