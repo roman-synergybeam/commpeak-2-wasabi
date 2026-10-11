@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}Transcription — c2w{% endblock %}
+{% block body %}
+
+<h1>Transcription</h1>
+<p class="sub">Calls turned into searchable text. Hold music, ringing and silence are
+  recognised and skipped, so "done" counts both.</p>
+
+{% set t = total %}
+<div class="stats">
+  <div><p class="hint">Done</p><strong data-stat="processed">{{ "{:,}".format(t.processed) }}</strong></div>
+  <div><p class="hint">Left</p><strong data-stat="remaining">{{ "{:,}".format(t.remaining) }}</strong></div>
+  <div><p class="hint">Rate</p><strong data-stat="per_hour">{{ "{:,}".format(t.per_hour) }}</strong><span class="unit">per hour</span></div>
+  <div><p class="hint">Finished</p><strong data-stat="eta_words">{{ t.eta_words }}</strong></div>
+</div>
+
+<h2>All organisations</h2>
+<div class="card">
+  {# A sliver for anything started: at 0.2% an honest bar is invisible, and an
+     empty bar reads as "nothing is happening". The figure beside it is exact. #}
+  <div class="bar"><span data-bar="total" style="width: {{ [t.pct, 0.4 if t.processed else 0] | max }}%"></span></div>
+  <div class="barline">
+    <span><strong data-stat="pct">{{ t.pct }}%</strong> of <span data-stat="archived">{{ "{:,}".format(t.archived) }}</span> archived recordings</span>
+    <span>finishing <strong data-stat="finish">{{ ("around " ~ t.finish) if t.finish else "—" }}</strong> at the current rate</span>
+    {% if t.speech_share is not none %}
+      <span><strong data-stat="speech_share">{{ t.speech_share }}%</strong> of the last day's
+        <span data-stat="last_24h">{{ "{:,}".format(t.last_24h) }}</span> had real speech</span>
+    {% endif %}
+  </div>
+</div>
+
+{% if show_brand %}
+  <h2>Per organisation</h2>
+  {% for o in organisations %}
+    <div class="card">
+      <h3>{{ o.organisation }}</h3>
+      <div class="bar sm"><span data-bar="org-{{ o.brand_id }}" style="width: {{ [o.pct, 0.4 if o.processed else 0] | max }}%"></span></div>
+      <div class="barline">
+        <span><strong data-stat="org-{{ o.brand_id }}-processed">{{ "{:,}".format(o.processed) }}</strong>
+          of {{ "{:,}".format(o.archived) }}</span>
+        <span><strong data-stat="org-{{ o.brand_id }}-pct">{{ o.pct }}%</strong></span>
+        <span><strong data-stat="org-{{ o.brand_id }}-per_hour">{{ "{:,}".format(o.per_hour | round | int) }}</strong> per hour</span>
+      </div>
+    </div>
+  {% endfor %}
+  <p class="hint">The work is shared evenly between organisations. When one finishes,
+    the other gets all of it, which is why the finish date above is the combined one.</p>
+{% endif %}
+
+{% if machines %}
+  <h2>Machines doing the work</h2>
+  <div class="tw stack">
+    <table>
+      <thead><tr><th>Name</th><th>State</th><th>Hardware</th><th>Last seen</th></tr></thead>
+      <tbody>
+      {% for m in machines %}
+        <tr>
+          <td data-label="Name">{{ m.name }}{% if m.host %} <span class="det">({{ m.host }})</span>{% endif %}</td>
+          <td data-label="State">
+            <span class="pill {{ 'ok' if m.state == 'working' else 'idle' }}">{{ m.state }}</span>
+          </td>
+          <td data-label="Hardware">{{ m.device or "—" }}</td>
+          <td class="mono" data-label="Last seen">{{ m.last_seen | dt }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="hint">This server also transcribes the newest calls on its own processor,
+    slowly; the machines above work through the archive oldest first.</p>
+{% endif %}
+
+<script type="module">
+  import { poll } from '/static/ui-kit/js/poll.js';
+  import { humanNumber } from '/static/ui-kit/js/humanize.js';
+
+  const set = (key, value) => {
+    const el = document.querySelector(`[data-stat="${key}"]`);
+    if (el) el.textContent = value;
+  };
+  const bar = (key, pct, started) => {
+    const el = document.querySelector(`[data-bar="${key}"]`);
+    if (el) el.style.width = `${Math.max(pct, started ? 0.4 : 0)}%`;
+  };
+
+  // Never "done": this is a dashboard for a job measured in months, so it
+  // polls for as long as the page is open.
+  poll({
+    url: '/transcription/status.json',
+    onTick: (d) => {
+      const t = d.total;
+      set('processed', humanNumber(t.processed));
+      set('remaining', humanNumber(t.remaining));
+      set('per_hour', humanNumber(t.per_hour));
+      set('eta_words', t.eta_words);
+      set('pct', `${t.pct}%`);
+      set('archived', humanNumber(t.archived));
+      set('finish', t.finish ? `around ${t.finish}` : '—');
+      if (t.speech_share !== null) set('speech_share', `${t.speech_share}%`);
+      set('last_24h', humanNumber(t.last_24h));
+      bar('total', t.pct, t.processed > 0);
+      for (const o of d.organisations) {
+        set(`org-${o.brand_id}-processed`, humanNumber(o.processed));
+        set(`org-${o.brand_id}-pct`, `${o.pct}%`);
+        set(`org-${o.brand_id}-per_hour`, humanNumber(Math.round(o.per_hour)));
+        bar(`org-${o.brand_id}`, o.pct, o.processed > 0);
+      }
+    },
+    done: () => false,
+    interval: 10000,
+    errorInterval: 15000,
+  });
+</script>
+{% endblock %}

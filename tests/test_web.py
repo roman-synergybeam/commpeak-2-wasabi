@@ -2133,3 +2133,34 @@ class TestTheCommPeakLights:
         assert page.status_code == 200
         assert 'class="dot' in page.text, "no lights rendered"
         assert "CommPeak" in page.text
+
+
+class TestTranscriptionPage:
+    """The live progress page: figures for the organisations a person may see,
+    and the machines doing the work only for the platform administrator."""
+
+    async def test_an_operator_sees_only_their_organisation(self, app_client, scenario):
+        await _login(app_client, scenario["agent_email"], scenario["password"])
+        page = await app_client.get("/transcription")
+        assert page.status_code == 200
+        assert "Machines doing the work" not in page.text
+        status = (await app_client.get("/transcription/status.json")).json()
+        assert [o["brand_id"] for o in status["organisations"]] == [scenario["brand_id"]]
+        assert status["machines"] == []
+
+    async def test_the_platform_administrator_sees_the_machines(self, app_client, scenario):
+        from c2w.db.session import get_sessionmaker
+        from c2w.transcribe.agents import create_agent
+
+        async with get_sessionmaker()() as s:
+            await create_agent(s, f"gpu-{uuid.uuid4().hex[:6]}")
+            await s.commit()
+        await _login(
+            app_client, scenario["admin_email"], scenario["password"],
+            brand_id=scenario["brand_id"],
+        )
+        status = (await app_client.get("/transcription/status.json")).json()
+        assert status["machines"], "the super admin should see the agents"
+        assert {"eta_words", "finish", "pct"} <= set(status["total"])
+        page = await app_client.get("/transcription")
+        assert "Machines doing the work" in page.text

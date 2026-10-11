@@ -74,7 +74,7 @@ MAX_CLAIM = 32
 #: and so a credential scan can be taught the shape.
 TOKEN_PREFIX = "c2wa_"  # noqa: S105 - a prefix, not a credential
 
-_PROGRESS_CACHE_SECONDS = 60.0
+_PROGRESS_CACHE_SECONDS = 20.0
 _progress_cache: tuple[float, list[dict]] | None = None
 
 
@@ -410,18 +410,30 @@ async def fail(agent: Agent, job_id: str, *, reason: str, retry: bool) -> None:
         )
 
 
-async def progress(*, fresh: bool = False) -> list[dict]:
+async def progress(
+    *, fresh: bool = False, brand_ids: list[int] | None = None
+) -> list[dict]:
     """Per organisation: how much is done, how fast, and when it will finish.
 
     The rate counts every recording *dealt with* -- transcribed or skipped --
     because that is what empties the backlog, and skipping hold music is most
-    of the work. Cached for a minute: it is asked on every claim.
+    of the work. `brand_ids` limits it to the organisations a caller may see;
+    None means all of them, for the agent and the CLI. Cached briefly: the
+    agent asks on every claim and the console page every few seconds.
     """
     global _progress_cache
     now = time.monotonic()
     if not fresh and _progress_cache and now - _progress_cache[0] < _PROGRESS_CACHE_SECONDS:
-        return _progress_cache[1]
+        rows = _progress_cache[1]
+    else:
+        rows = await _measure_progress()
+        _progress_cache = (now, rows)
+    if brand_ids is None:
+        return rows
+    return [row for row in rows if row["brand_id"] in brand_ids]
 
+
+async def _measure_progress() -> list[dict]:
     from c2w.db.session import get_sessionmaker
 
     async with get_sessionmaker()() as session:
@@ -443,37 +455,44 @@ async def progress(*, fresh: bool = False) -> list[dict]:
                     {"b": brand_id},
                 )
             ).scalar_one()
-            row = (
+            processed = (
+                await session.execute(
+                    text("SELECT count(*) FROM transcripts WHERE brand_id = :b"), {"b": brand_id}
+                )
+            ).scalar_one()
+            # The windows read the (brand_id, updated_at) index, so they cost
+            # the last day's rows rather than the whole table.
+            recent = (
                 await session.execute(
                     text(
-                        "SELECT count(*), "
-                        "  count(*) FILTER (WHERE text IS NOT NULL), "
+                        "SELECT "
                         "  count(*) FILTER (WHERE updated_at > now() - interval '1 hour'), "
-                        "  count(*) FILTER (WHERE updated_at > now() - interval '1 day'), "
-                        "  count(*) FILTER (WHERE text IS NOT NULL "
-                        "                   AND updated_at > now() - interval '1 day') "
-                        "FROM transcripts WHERE brand_id = :b"
+                        "  count(*), "
+                        "  count(*) FILTER (WHERE text IS NOT NULL) "
+                        "FROM transcripts "
+                        "WHERE brand_id = :b AND updated_at > now() - interval '1 day'"
                     ),
                     {"b": brand_id},
                 )
             ).one()
-        processed, transcribed, last_hour, last_day, speech_day = (int(v) for v in row)
-        remaining = max(int(archived) - processed, 0)
+        last_hour, last_day, speech_day = (int(v) for v in recent)
+        archived, processed = int(archived), int(processed)
+        remaining = max(archived - processed, 0)
         per_hour = last_hour or last_day / 24
         out.append(
             {
+                "brand_id": brand_id,
                 "organisation": name,
-                "archived": int(archived),
+                "archived": archived,
                 "processed": processed,
-                "transcribed": transcribed,
                 "remaining": remaining,
+                "pct": round(100 * processed / archived, 2) if archived else 0.0,
                 "per_hour": round(per_hour, 1),
                 "last_24h": last_day,
                 "with_speech_last_24h": speech_day,
                 "eta_hours": round(remaining / per_hour, 1) if per_hour else None,
             }
         )
-    _progress_cache = (now, out)
     return out
 
 

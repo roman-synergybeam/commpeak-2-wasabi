@@ -15,12 +15,13 @@ import contextlib
 import re
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Final
 from urllib.parse import quote, quote_plus, urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -1687,6 +1688,108 @@ async def sync_status(
             "connections": [dict(r) for r in rows],
         }
     )
+
+
+@router.get("/transcription", response_class=HTMLResponse)
+async def transcription_page(
+    request: Request, user: CurrentUser, session: ScopedSession
+) -> Response:
+    context = await _transcription_context(request, session, user)
+    return templates.TemplateResponse(
+        request,
+        "transcription.html",
+        await _shell(request, session, user, "transcription", **context),
+    )
+
+
+@router.get("/transcription/status.json")
+async def transcription_status(
+    request: Request, user: CurrentUser, session: ScopedSession
+) -> Response:
+    """The same figures as the page, for its live progress bars."""
+    context = await _transcription_context(request, session, user)
+    return JSONResponse(jsonable_encoder(context))
+
+
+async def _transcription_context(
+    request: Request, session: AsyncSession, user: User
+) -> dict[str, Any]:
+    """Progress and ETA, for the organisations this person may see.
+
+    The headline ETA is the *combined* one -- everything left over everything
+    being done an hour -- not the slowest organisation's. The agent splits its
+    work evenly, so one organisation's own ETA assumes it keeps half the
+    capacity for ever, when the moment the smaller one finishes the larger one
+    gets all of it.
+    """
+    from c2w.transcribe import agents
+
+    brand_ids = await _readable_brand_ids(request, session, user)
+    rows = await agents.progress(brand_ids=brand_ids)
+    archived = sum(r["archived"] for r in rows)
+    processed = sum(r["processed"] for r in rows)
+    remaining = sum(r["remaining"] for r in rows)
+    per_hour = sum(r["per_hour"] for r in rows)
+    last_24h = sum(r["last_24h"] for r in rows)
+    speech_24h = sum(r["with_speech_last_24h"] for r in rows)
+    eta_hours = remaining / per_hour if per_hour else None
+
+    machines: list[dict[str, Any]] = []
+    if user.is_super_admin:
+        # The machines doing the work are the platform's, not an
+        # organisation's, so only the platform administrator sees them.
+        for name, seen, revoked, detail, online in (
+            await session.execute(
+                text(
+                    "SELECT name, last_seen_at, revoked_at IS NOT NULL, last_detail, "
+                    "  last_seen_at > now() - interval '3 minutes' "
+                    "FROM transcribe_agents ORDER BY revoked_at IS NOT NULL, name"
+                )
+            )
+        ).all():
+            machines.append(
+                {
+                    "name": name,
+                    "last_seen": seen,
+                    "state": "revoked" if revoked else ("working" if online else "offline"),
+                    "device": (detail or {}).get("device") or "",
+                    "host": (detail or {}).get("host") or "",
+                }
+            )
+
+    return {
+        "organisations": rows,
+        "total": {
+            "archived": archived,
+            "processed": processed,
+            "remaining": remaining,
+            "pct": round(100 * processed / archived, 2) if archived else 0.0,
+            "per_hour": round(per_hour),
+            "eta_hours": round(eta_hours, 1) if eta_hours is not None else None,
+            "eta_words": _eta_words(eta_hours),
+            "finish": (
+                (datetime.now(UTC) + timedelta(hours=eta_hours)).strftime("%B %Y")
+                if eta_hours is not None
+                else None
+            ),
+            "last_24h": last_24h,
+            "speech_share": round(100 * speech_24h / last_24h) if last_24h else None,
+        },
+        "machines": machines,
+        "show_brand": len(rows) > 1,
+    }
+
+
+def _eta_words(hours: float | None) -> str:
+    if hours is None:
+        return "no recent progress"
+    if hours < 1:
+        return "under an hour"
+    if hours < 48:
+        return f"about {hours:.0f} hours"
+    if hours < 24 * 60:
+        return f"about {hours / 24:.0f} days"
+    return f"about {hours / 24 / 30:.1f} months"
 
 
 async def _sync_status_rows(session: AsyncSession) -> Sequence[RowMapping]:
