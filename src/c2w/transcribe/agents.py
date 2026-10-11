@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from c2w.db.models.core import Brand, Recording, StorageDestination
 from c2w.db.session import brand_session
 from c2w.logging import get_logger
+from c2w.transcribe import announcements
 from c2w.transcribe.base import Segment, TranscriptResult, redact_digits
 from c2w.transcribe.service import (
     _record_failure,
@@ -373,7 +374,17 @@ async def submit(agent: Agent, job_id: str, result: AgentResult) -> str:
             },
         )
 
-        reason = skip_reason(transcript, config)
+        # Counted before judging, so the voicemail calls about to be skipped
+        # still teach the fingerprints. See `announcements`.
+        verdict = await announcements.judge(
+            session,
+            brand_id,
+            segments,
+            repeats=config.announcement_repeats,
+            min_speech_seconds=config.min_speech_seconds,
+        )
+        transcript.engine_detail["conversation_seconds"] = verdict.conversation_seconds
+        reason = skip_reason(transcript, config) or verdict.reason
         if reason is None:
             await store_transcript(session, recording, brand_id, transcript, config)
         else:

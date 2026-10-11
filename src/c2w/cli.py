@@ -195,6 +195,32 @@ async def cmd_agent_progress(_args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+async def cmd_transcripts_reclassify(args: argparse.Namespace) -> int:
+    from c2w.db.session import brand_session
+    from c2w.transcribe.announcements import reclassify
+    from c2w.transcribe.service import load_settings
+
+    async with platform_session() as session:
+        brands = (
+            await session.execute(text("SELECT id, name FROM brands WHERE is_active ORDER BY id"))
+        ).all()
+    for brand_id, name in brands:
+        async with brand_session(brand_id) as session:
+            config = await load_settings(session, brand_id=brand_id)
+            result = await reclassify(
+                session,
+                brand_id,
+                repeats=config.announcement_repeats,
+                min_speech_seconds=config.min_speech_seconds,
+                rebuild=not args.keep_counts,
+            )
+        _out(
+            f"{name:16} checked {result['checked']:>8,} transcripts, "
+            f"{result['skipped']:>7,} were recordings or music and are now skipped"
+        )
+    return EXIT_OK
+
+
 def _eta_words(hours: float) -> str:
     if hours < 48:
         return f"{hours:.0f} hours"
@@ -664,6 +690,20 @@ def build_parser() -> argparse.ArgumentParser:
     ag.add_parser("progress", help="transcription progress and ETA").set_defaults(
         func=cmd_agent_progress
     )
+
+    tr = sub.add_parser("transcripts", help="maintain transcripts").add_subparsers(
+        dest="cmd", required=True
+    )
+    p = tr.add_parser(
+        "reclassify",
+        help="skip stored transcripts that are only voicemail, carrier messages or music",
+    )
+    p.add_argument(
+        "--keep-counts",
+        action="store_true",
+        help="use the learned fingerprints as they are instead of recounting them",
+    )
+    p.set_defaults(func=cmd_transcripts_reclassify)
 
     # doctor
     sub.add_parser("doctor", help="check configuration and connectivity").set_defaults(

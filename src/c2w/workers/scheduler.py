@@ -59,6 +59,7 @@ class Scheduler:
         self._last_retention = 0.0
         self._last_archive_totals = 0.0
         self._last_sms = 0.0
+        self._last_reclassify = 0.0
 
     def request_stop(self) -> None:
         self._stopping.set()
@@ -148,6 +149,12 @@ class Scheduler:
             # start and report a few seconds of activity as if it were an hour.
             if not first_pass:
                 await self._step("sync_summary", self._send_sync_summary(summary_minutes))
+
+        # Calls stored before their voicemail prompt had been heard often enough
+        # to be recognised as one; see `announcements.reclassify`.
+        if loop_now - self._last_reclassify >= 3600:
+            self._last_reclassify = loop_now
+            await self._step("announcements", _reclassify_recent())
 
         # Retention only gates which discovered recordings become eligible for
         # offload; it never deletes anything at the source.
@@ -1028,6 +1035,33 @@ async def singleton_lock(name: str):
             )
     finally:
         await connection.close()
+
+
+async def _reclassify_recent() -> None:
+    """Skip the last day's transcripts that turned out to be recordings."""
+    from c2w.db.session import brand_session
+    from c2w.transcribe.announcements import reclassify
+    from c2w.transcribe.service import load_settings
+
+    async with platform_session() as session:
+        brands = (
+            await session.execute(text("SELECT id FROM brands WHERE is_active"))
+        ).scalars().all()
+    since = datetime.now(UTC) - timedelta(hours=26)
+    for brand_id in brands:
+        async with brand_session(brand_id) as session:
+            config = await load_settings(session, brand_id=brand_id)
+            if not config.enabled:
+                continue
+            result = await reclassify(
+                session,
+                brand_id,
+                repeats=config.announcement_repeats,
+                min_speech_seconds=config.min_speech_seconds,
+                since=since,
+            )
+        if result["skipped"]:
+            log.info("scheduler.announcements_skipped", brand_id=brand_id, **result)
 
 
 async def _amain() -> None:

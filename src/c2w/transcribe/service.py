@@ -59,6 +59,7 @@ class TranscribeSettings:
     only_longer_than: int
     concurrency: int
     min_speech_seconds: int = 0
+    announcement_repeats: int = 0
 
 
 async def load_settings(
@@ -85,6 +86,9 @@ async def load_settings(
         concurrency=await get.get_int(session, "transcribe.concurrency", brand_id=brand_id),
         min_speech_seconds=await get.get_int(
             session, "transcribe.min_speech_seconds", brand_id=brand_id
+        ),
+        announcement_repeats=await get.get_int(
+            session, "transcribe.announcement_repeats", brand_id=brand_id
         ),
     )
 
@@ -245,7 +249,18 @@ async def transcribe_recording(
         with contextlib.suppress(OSError):
             os.unlink(path)
 
-    reason = skip_reason(result, config)
+    from c2w.transcribe import announcements
+
+    await _set_scope(session, brand_id)
+    verdict = await announcements.judge(
+        session,
+        brand_id,
+        result.segments,
+        repeats=config.announcement_repeats,
+        min_speech_seconds=config.min_speech_seconds,
+    )
+    result.engine_detail["conversation_seconds"] = verdict.conversation_seconds
+    reason = skip_reason(result, config) or verdict.reason
     if reason is not None:
         log.info(
             "transcribe.skipped",

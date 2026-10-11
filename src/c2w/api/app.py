@@ -13,6 +13,7 @@ reports dependencies, and that is what a load balancer should gate on.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import time
 from collections.abc import AsyncIterator
@@ -22,7 +23,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from c2w import __version__
 from c2w.db.session import dispose_engine, get_engine, get_sessionmaker
@@ -48,9 +49,56 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         environment = "unknown"
         log.warning("api.settings_unavailable_at_startup", error=str(exc))
     log.info("api.starting", version=__version__, environment=environment)
+    warm = asyncio.get_running_loop().create_task(_warm_dashboard())
     yield
+    warm.cancel()
     await dispose_engine()
     log.info("api.stopped")
+
+
+async def _warm_dashboard() -> None:
+    """Fill the dashboard's caches in the background as soon as the API starts.
+
+    Its whole-table figures take a minute and more to compute at twenty-four
+    million recordings, and every cache starts empty after a restart -- so the
+    first person to open the dashboard waited for all of them at once, past
+    Cloudflare's 100-second limit, and got a 524. After this, the first
+    request finds them ready, and expired ones are refreshed behind the page.
+    """
+    from c2w.api.v1.cdrs import dashboard_stats
+    from c2w.db.models.core import Brand
+    from c2w.db.session import brand_session
+    from c2w.sync.account_eta import account_etas
+    from c2w.sync.convergence import convergence
+
+    try:
+        async with get_sessionmaker()() as session:
+            cache_seconds = await settings_service.get_int(session, "ui.stats_cache_seconds")
+            source_estimate = await settings_service.get_int(
+                session, "archive.source_objects_estimate"
+            )
+            brands = (
+                (await session.execute(select(Brand.id).where(Brand.is_active.is_(True))))
+                .scalars()
+                .all()
+            )
+        if cache_seconds <= 0:
+            return  # caching switched off; nothing would be kept
+        started = time.monotonic()
+        for brand_id in brands:
+            # The same arguments the dashboard passes, so the entries it
+            # looks up are the ones made here.
+            async with brand_session(brand_id) as session:
+                await account_etas(session, cache_seconds=max(cache_seconds, 120))
+                await dashboard_stats(session, cache_seconds=cache_seconds)
+                await convergence(
+                    session, source_estimate=source_estimate, cache_seconds=cache_seconds
+                )
+        log.info("api.dashboard_warm", seconds=round(time.monotonic() - started, 1))
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.warning("api.dashboard_warm_failed", exc_info=True)
 
 
 def create_app() -> FastAPI:

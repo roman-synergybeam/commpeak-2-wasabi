@@ -17,6 +17,7 @@ correlated recording still appears -- a missing join must never hide a call.
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import math
 import time
@@ -28,6 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from c2w.commpeak.correlate import normalise_msisdn
+from c2w.logging import get_logger
 
 __all__ = [
     "COUNT_CAP",
@@ -69,6 +71,8 @@ MAX_MERGE_ROWS = 5_000
 #: link to one would be a guess presented as a fact.
 COUNT_CAP = 10_000
 DEFAULT_RANGE_DAYS = 7
+
+log = get_logger(__name__)
 
 
 class SortField(enum.StrEnum):
@@ -627,6 +631,7 @@ async def get_recording(session: AsyncSession, recording_id: int) -> dict[str, A
 #: Process-local on purpose: it is a cache, not state, and a restart losing it
 #: costs one recount.
 _STATS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_STATS_REFRESHING: set[str] = set()
 
 #: Cleared by the tests, and by anything that needs a recount now.
 def forget_cached_stats() -> None:
@@ -644,9 +649,43 @@ async def _scan_counts(session: AsyncSession, cache_seconds: int) -> dict[str, A
     now = time.monotonic()
     if cache_seconds > 0:
         cached = _STATS_CACHE.get(scope)
-        if cached is not None and cached[0] > now:
+        if cached is not None:
+            if cached[0] > now:
+                return cached[1]
+            # Expired, but stale beats slow: at twenty-four million recordings
+            # these counts take half a minute for the larger organisation, and
+            # blocking on them made one viewer per cache period wait for it --
+            # behind Cloudflare's 100-second limit, together with the other
+            # dashboard figures, that is a 524. The old counts go out now (the
+            # page shows when they were taken) and a recount runs behind them.
+            if scope not in _STATS_REFRESHING:
+                _STATS_REFRESHING.add(scope)
+                asyncio.get_running_loop().create_task(
+                    _refresh_counts(scope, cache_seconds)
+                )
             return cached[1]
+    return await _count(session, scope, cache_seconds)
 
+
+async def _refresh_counts(scope: str, cache_seconds: int) -> None:
+    """Recount one scope on its own session, off the request path."""
+    from c2w.db.session import platform_session
+
+    try:
+        async with platform_session() as session:
+            await session.execute(
+                text("SELECT set_config('c2w.brand_id', :b, true)"),
+                {"b": "" if scope == "unscoped" else scope},
+            )
+            await _count(session, scope, cache_seconds)
+    except Exception:
+        log.warning("dashboard.recount_failed", scope=scope, exc_info=True)
+    finally:
+        _STATS_REFRESHING.discard(scope)
+
+
+async def _count(session: AsyncSession, scope: str, cache_seconds: int) -> dict[str, Any]:
+    now = time.monotonic()
     today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     recording_states = dict(
         (

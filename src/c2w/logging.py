@@ -66,7 +66,14 @@ def configure_logging(service: str, *, level_name: str = "INFO", json_output: bo
         cache_logger_on_first_use=True,
     )
     logging.basicConfig(format="%(message)s", stream=sys.stderr, level=level)
-    for noisy in ("botocore", "aiobotocore", "boto3", "urllib3", "sqlalchemy.engine"):
+    # httpx and httpcore log every request URL at INFO, and Telegram's Bot API
+    # puts the bot token *in* the URL (/bot<token>/sendMessage) -- so each
+    # alert wrote the token to the journal in clear. WARNING keeps their
+    # failures and drops the URLs.
+    for noisy in (
+        "botocore", "aiobotocore", "boto3", "urllib3", "sqlalchemy.engine",
+        "httpx", "httpcore",
+    ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     structlog.contextvars.bind_contextvars(service=service, pid=os.getpid())

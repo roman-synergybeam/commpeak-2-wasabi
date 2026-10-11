@@ -1735,6 +1735,23 @@ _SPECS: Final[tuple[SettingSpec, ...]] = (
         brand_overridable=True,
     ),
     SettingSpec(
+        key="transcribe.announcement_repeats",
+        type=SettingType.INT,
+        default=20,
+        category="Transcription and voice analysis",
+        label="Treat a sentence as a recording after",
+        description="Voicemail greetings, carrier messages and phone menus are the same "
+        "sentence word for word in many calls; a person never is. A sentence of five or "
+        "more words heard in this many different calls counts as a recording, and a call "
+        "with too little speech besides recordings and music is skipped. A real "
+        "conversation keeps its whole transcript.",
+        unit="calls",
+        choices=("0", "10", "20", "50", "100"),
+        choice_labels={"0": "never (known phrases only)"},
+        validator=_non_negative,
+        brand_overridable=True,
+    ),
+    SettingSpec(
         key="transcribe.concurrency",
         type=SettingType.INT,
         default=1,

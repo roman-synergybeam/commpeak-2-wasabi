@@ -753,6 +753,20 @@ they do meet. `transcribe_cursors` holds where each organisation's oldest-first
 scan has reached, or every claim would re-probe every transcribed row from the
 start; an expired or handed-back lease pulls the cursor back to it.
 
+**Recorded announcements are fingerprinted, not listed** (`transcribe/announcements.py`).
+Carrier voicemail, busy messages and the organisations' own phone menus are the
+same sentence word for word in hundreds of calls; a person never is. Sentences
+of 5+ words are counted per organisation in `transcribe_phrases` (RLS), and one
+heard in `transcribe.announcement_repeats` (default 20) calls is a recording. A
+short regex list catches the common prompts from the first call, and a second
+one catches music and Whisper's subtitle hallucinations ("Amara.org", "thank
+you for watching"). **Nothing is removed from a kept call** -- a sales script
+also repeats -- the segments only decide whether there was a conversation. On
+the first 30,000 transcripts a quarter (7,805) were recordings; a random
+sample of 24 was checked by eye before `c2w-admin transcripts reclassify`
+applied it. The scheduler reclassifies the last day hourly, for calls stored
+before their prompt had been heard often enough.
+
 The ETA (`agents.progress`) counts recordings *dealt with* -- transcribed or
 skipped -- because skipping is most of the work, against the archive's verified
 object count from `storage_destinations`.
